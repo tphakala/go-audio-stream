@@ -552,3 +552,45 @@ func TestAuthorizeErrors(t *testing.T) {
 		})
 	}
 }
+
+// AuthNone was inserted as the new zero value, shifting AuthUnknown from 0 to
+// 1. Nothing may depend on the old numeric values, and String must cover every
+// constant plus an out-of-range one.
+func TestAuthSchemeString(t *testing.T) {
+	t.Parallel()
+	// Declared separately from auth.go's unknownAuthName on purpose: asserting
+	// against the constant String itself returns would make this tautological,
+	// which is the trap the state tests fell into.
+	const wantUnknown = "unknown"
+	cases := map[AuthScheme]string{
+		AuthNone:       "none",
+		AuthUnknown:    wantUnknown,
+		AuthBasic:      "Basic",
+		AuthDigest:     "Digest",
+		AuthScheme(99): wantUnknown,
+		AuthScheme(-1): wantUnknown,
+	}
+	for s, want := range cases {
+		if got := s.String(); got != want {
+			t.Errorf("AuthScheme(%d).String() = %q, want %q", int(s), got, want)
+		}
+	}
+}
+
+// A zero Challenge reports AuthNone, and neither AuthNone nor AuthUnknown is
+// ever selected or answerable.
+func TestAuthSchemeZeroValueIsNone(t *testing.T) {
+	t.Parallel()
+	var c Challenge
+	if c.Scheme != AuthNone {
+		t.Errorf("zero Challenge scheme = %v, want AuthNone", c.Scheme)
+	}
+	for _, s := range []AuthScheme{AuthNone, AuthUnknown} {
+		if _, ok := SelectChallenge([]Challenge{{Scheme: s}}); ok {
+			t.Errorf("SelectChallenge selected %v, want no usable challenge", s)
+		}
+		if _, err := Authorize(Challenge{Scheme: s}, rfc7616Creds, DigestInput{}); !errors.Is(err, ErrUnsupportedAuth) {
+			t.Errorf("Authorize(%v) error = %v, want ErrUnsupportedAuth", s, err)
+		}
+	}
+}

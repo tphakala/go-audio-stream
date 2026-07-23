@@ -15,13 +15,38 @@ import (
 type AuthScheme int
 
 const (
+	// AuthNone means no authentication has been negotiated. It is the zero
+	// value, so a Challenge or SessionInfo that has not been filled in reports
+	// "no auth" rather than "a scheme I do not implement".
+	AuthNone AuthScheme = iota
 	// AuthUnknown is a scheme this client does not implement.
-	AuthUnknown AuthScheme = iota
+	AuthUnknown
 	// AuthBasic is HTTP Basic (RFC 7617).
 	AuthBasic
 	// AuthDigest is HTTP Digest (RFC 7616, with RFC 2069 legacy support).
 	AuthDigest
 )
+
+// String returns the scheme name as it appears in a WWW-Authenticate header
+// ("Basic", "Digest"), "none" when no scheme has been negotiated, or "unknown"
+// for a scheme this client does not implement.
+func (s AuthScheme) String() string {
+	switch s {
+	case AuthNone:
+		return "none"
+	case AuthBasic:
+		return "Basic"
+	case AuthDigest:
+		return "Digest"
+	default:
+		// AuthUnknown and any out-of-range value.
+		return unknownAuthName
+	}
+}
+
+// unknownAuthName is the name reported for an unimplemented or out-of-range
+// scheme, shared by String and its test.
+const unknownAuthName = "unknown"
 
 // Auth-param names, lowercased as ParseChallenges stores them in
 // Challenge.Params and as digestAuthorization reads them.
@@ -255,7 +280,7 @@ func SelectChallenge(challenges []Challenge) (Challenge, bool) {
 				basic = c
 			}
 		default:
-			// AuthUnknown: not usable, skip.
+			// AuthNone and AuthUnknown: not usable, skip.
 		}
 	}
 	if digest != nil {

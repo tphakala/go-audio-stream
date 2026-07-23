@@ -1,0 +1,410 @@
+package rtsp
+
+import (
+	"context"
+	"crypto/tls"
+	"errors"
+	"fmt"
+	"net"
+	"sync"
+	"sync/atomic"
+	"time"
+
+	audiostream "github.com/tphakala/go-audio-stream"
+)
+
+// Internal tuning constants.
+const (
+	// teardownDeadline bounds the best-effort TEARDOWN write and its response
+	// read during shutdown.
+	teardownDeadline = 2 * time.Second
+	// maxReadBuffer is a backstop ceiling on the reader accumulation buffer.
+	// The M4a per-unit caps make it unreachable for well-formed units.
+	maxReadBuffer = MaxHeaderBytes + MaxBodySize
+	// maxResyncBytes bounds byte-at-a-time resynchronization before the
+	// reader declares a fatal framing error.
+	maxResyncBytes = 4096
+)
+
+// Exported errors, in addition to the ones reused from the audiostream root
+// package and the wire layer.
+var (
+	// ErrServerTeardown ends Wait when the server sent a TEARDOWN.
+	ErrServerTeardown = errors.New("rtsp: server sent TEARDOWN")
+	// ErrConnectionClosed wraps the underlying cause when the control
+	// connection was lost unexpectedly.
+	ErrConnectionClosed = errors.New("rtsp: connection closed")
+	// ErrAuthFailed ends a request when authentication was rejected after the
+	// permitted retries.
+	ErrAuthFailed = errors.New("rtsp: authentication failed")
+	// ErrRequestTimeout ends a request when the server did not answer within
+	// Config.Timeout. It is the request-path counterpart to
+	// audiostream.ErrReadTimeout, which covers the read-idle watchdog: both
+	// mean the peer went quiet, so a caller retrying on one usually wants to
+	// retry on the other.
+	ErrRequestTimeout = errors.New("rtsp: request timeout")
+)
+
+// ChannelPair is the RTP and RTCP interleaved channel numbers the server
+// assigned to one track during Setup.
+type ChannelPair struct {
+	// TrackID is the track the channels carry.
+	TrackID int
+	// RTP is the interleaved channel carrying RTP.
+	RTP int
+	// RTCP is the interleaved channel carrying RTCP.
+	RTCP int
+}
+
+// SessionInfo is a read-only snapshot of the negotiated session, for
+// diagnostics such as a handshake walkthrough tool. It carries no credentials
+// and no counters. Every field except KeepaliveMethod is populated by the
+// lifecycle verbs, so on a freshly dialed client only KeepaliveMethod is set.
+type SessionInfo struct {
+	// SessionID is the negotiated RTSP session identifier, "" before Setup.
+	SessionID string
+	// SessionTimeout is the advertised (or defaulted) session timeout.
+	SessionTimeout time.Duration
+	// AuthScheme is the authentication scheme in use, AuthNone before any
+	// challenge has been answered. It is the same type the wire layer's
+	// ParseChallenges and SelectChallenge use, so a caller can compare the two
+	// directly.
+	AuthScheme AuthScheme
+	// KeepaliveMethod is the negotiated keepalive method ("OPTIONS" or
+	// "GET_PARAMETER"), "" before Dial's OPTIONS completes.
+	KeepaliveMethod string
+	// Channels lists the assigned interleaved channel pairs, one per set-up
+	// track, in Setup order. Freshly allocated; never internal state.
+	Channels []ChannelPair
+}
+
+// Client is a single RTSP session. Close, Wait, Stats and SessionInfo are safe
+// from any goroutine; of those, only Close, Stats and SessionInfo may be
+// called from inside OnFrame, because Wait blocks until the reader goroutine
+// has finished and would deadlock it. The lifecycle calls (Describe, Setup,
+// Play) are not safe for concurrent use and must be made in order from one
+// goroutine.
+type Client struct {
+	cfg  Config
+	conn net.Conn
+
+	// writeMu serializes every socket write.
+	writeMu sync.Mutex
+
+	// pendMu guards pending, the CSeq rendezvous table.
+	pendMu  sync.Mutex
+	pending map[int]chan *Response
+	cseq    atomic.Uint32
+
+	// mu guards the state machine and negotiated session fields below.
+	mu              sync.Mutex
+	state           state
+	sessionID       string
+	sessionTimeout  time.Duration
+	keepaliveMethod string
+	authScheme      AuthScheme
+	baseURL         string
+	channelPairs    []ChannelPair
+	termErr         error
+
+	// lastFrameAt is the watchdog clock (UnixNano), written by the reader on
+	// every frame and read when arming the read deadline, so it is atomic.
+	//
+	// TODO(play): whichever code sets playing must stamp this first.
+	// armReadDeadline derives the deadline from it, so flipping playing while
+	// this is still zero yields a 1970 deadline that has already expired and
+	// kills a healthy stream on its first read.
+	lastFrameAt atomic.Int64
+	// playing gates the read-idle watchdog; false until Play.
+	playing atomic.Bool
+
+	// deadlineMu serializes read-deadline arming against the shutdown
+	// interrupt so the reader can never re-arm past a shutdown.
+	deadlineMu   sync.Mutex
+	shuttingDown bool
+
+	closeOnce sync.Once
+	closing   chan struct{}
+	done      chan struct{}
+	wg        sync.WaitGroup
+
+	// Reader-owned accumulation buffer and parse offset.
+	rbuf   []byte
+	start  int
+	resync int
+}
+
+// Dial connects to cfg.URL, starts the reader goroutine, and sends an OPTIONS
+// probe to learn the keepalive method from the Public header. For rtsps it
+// performs the TLS handshake first. It returns a Client in the idle state
+// ready for Describe, or an error (with the connection torn down) on failure.
+// A non-2xx OPTIONS response is tolerated (the Public header is simply
+// unknown); a connection-level failure is fatal.
+//
+// A server may answer the probe and end the session in the same segment. The
+// response is real, so Dial succeeds, but the returned Client is already
+// closed and Describe will return a *StateError. Check Wait or SessionInfo
+// before proceeding if that case matters to the caller.
+//
+//nolint:gocritic // Config is the documented public Dial signature; hugeParam does not apply to a per-session entry point.
+func Dial(ctx context.Context, cfg Config) (*Client, error) {
+	cfg.applyDefaults()
+	tgt, err := parseTarget(&cfg)
+	if err != nil {
+		return nil, err
+	}
+	conn, err := dialConn(ctx, &cfg, &tgt)
+	if err != nil {
+		return nil, err
+	}
+	c := newClient(&cfg, conn, &tgt)
+	go c.reader()
+	if err := c.options(ctx, tgt.requestURL); err != nil {
+		<-c.done // the funnel already fired; wait for the reader to finish.
+		return nil, err
+	}
+	return c, nil
+}
+
+// newClient builds a Client around an established connection.
+func newClient(cfg *Config, conn net.Conn, tgt *target) *Client {
+	return &Client{
+		cfg:     *cfg,
+		conn:    conn,
+		pending: make(map[int]chan *Response),
+		baseURL: tgt.requestURL,
+		closing: make(chan struct{}),
+		done:    make(chan struct{}),
+		state:   stateIdle,
+	}
+}
+
+// dialConn performs the TCP connect and, for rtsps, the TLS handshake, both
+// bounded by cfg.Timeout and ctx.
+func dialConn(ctx context.Context, cfg *Config, tgt *target) (net.Conn, error) {
+	d := net.Dialer{Timeout: cfg.Timeout}
+	conn, err := d.DialContext(ctx, "tcp", tgt.address)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %w", ErrConnectionClosed, err)
+	}
+	if !tgt.tls {
+		return conn, nil
+	}
+	tconn := tls.Client(conn, tlsConfigFor(cfg, tgt))
+	if err := tconn.SetDeadline(time.Now().Add(cfg.Timeout)); err != nil {
+		_ = conn.Close()
+		return nil, fmt.Errorf("%w: %w", ErrConnectionClosed, err)
+	}
+	if err := tconn.HandshakeContext(ctx); err != nil {
+		_ = conn.Close()
+		return nil, fmt.Errorf("%w: %w", ErrConnectionClosed, err)
+	}
+	if err := tconn.SetDeadline(time.Time{}); err != nil {
+		_ = conn.Close()
+		return nil, fmt.Errorf("%w: %w", ErrConnectionClosed, err)
+	}
+	return tconn, nil
+}
+
+// tlsConfigFor returns the tls.Config for an rtsps dial: the caller's
+// TLSConfig (cloned, with the server name filled in when empty), or a
+// verified default keyed on the URL host.
+func tlsConfigFor(cfg *Config, tgt *target) *tls.Config {
+	if cfg.TLSConfig != nil {
+		tc := cfg.TLSConfig.Clone()
+		if tc.ServerName == "" {
+			tc.ServerName = tgt.serverName
+		}
+		// The clone is already normalized (ServerName above), so leaving the
+		// floor unset here would silently give a caller who passed only
+		// RootCAs whatever minimum the toolchain currently defaults to.
+		if tc.MinVersion == 0 {
+			tc.MinVersion = tls.VersionTLS12
+		}
+		return tc
+	}
+	return &tls.Config{
+		ServerName:         tgt.serverName,
+		InsecureSkipVerify: cfg.InsecureTLS,
+		MinVersion:         tls.VersionTLS12,
+	}
+}
+
+// options sends the OPTIONS probe and records the keepalive method from the
+// Public header. A non-2xx response is tolerated: the keepalive method
+// defaults to OPTIONS. A connection-level failure is returned (already
+// funneled into shutdown by roundTrip).
+func (c *Client) options(ctx context.Context, reqURL string) error {
+	resp, err := c.roundTrip(ctx, &Request{Method: methodOptions, URL: reqURL})
+	if err != nil {
+		return err
+	}
+	km := KeepaliveMethod(ParsePublic(resp.Header.Get("Public")))
+	c.mu.Lock()
+	c.keepaliveMethod = km
+	c.mu.Unlock()
+	return nil
+}
+
+// initiateShutdown funnels every terminal trigger through one place, exactly
+// once. The first cause wins. It signals the timer goroutine, records the
+// shutdown intent under deadlineMu, and interrupts a blocked read or write
+// with an immediate deadline on both directions.
+func (c *Client) initiateShutdown(cause error) {
+	c.closeOnce.Do(func() {
+		c.setTermErr(cause)
+		close(c.closing)
+		c.deadlineMu.Lock()
+		c.shuttingDown = true
+		_ = c.conn.SetDeadline(time.Now())
+		c.deadlineMu.Unlock()
+	})
+}
+
+// setTermErr records the terminal cause (first writer wins) and moves the
+// state to closed, both under mu.
+func (c *Client) setTermErr(cause error) {
+	c.mu.Lock()
+	if c.termErr == nil {
+		c.termErr = cause
+	}
+	c.state = stateClosed
+	c.mu.Unlock()
+}
+
+// termError returns the recorded terminal cause, or nil if none yet.
+func (c *Client) termError() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.termErr
+}
+
+// Close ends the session. It is idempotent and safe from any goroutine,
+// including from inside OnFrame. It signals the reader loop, which sends a
+// best-effort TEARDOWN when a session was established and then closes the
+// connection. Wait afterwards returns audiostream.ErrClosed, unless an earlier
+// cause had already ended the session, since the first cause wins. Close
+// returns nil.
+func (c *Client) Close() error {
+	c.initiateShutdown(audiostream.ErrClosed)
+	return nil
+}
+
+// Wait blocks until the session ends and returns the terminal error. The
+// common causes are audiostream.ErrClosed after Close, ctx.Err() if ctx
+// cancels first, ErrServerTeardown on a server TEARDOWN,
+// audiostream.ErrReadTimeout on watchdog expiry, ErrRequestTimeout when a
+// request went unanswered, and ErrConnectionClosed (wrapping the cause) on
+// connection loss. The list is not exhaustive: a framing or marshalling
+// failure surfaces the wire layer's own error. After Wait returns, OnFrame
+// will not be called again.
+func (c *Client) Wait(ctx context.Context) error {
+	select {
+	case <-c.done:
+		return c.termError()
+	case <-ctx.Done():
+		c.initiateShutdown(ctx.Err())
+		<-c.done
+		return c.termError()
+	}
+}
+
+// Stats returns a snapshot of per-track receive counters in a freshly
+// allocated map that never aliases internal state. No track can be set up yet,
+// so the map is always empty; per-track counting arrives with Setup.
+func (c *Client) Stats() audiostream.Stats {
+	return audiostream.Stats{Tracks: make(map[int]audiostream.TrackStats)}
+}
+
+// SessionInfo returns a snapshot of the negotiated session details known so
+// far. It is safe from any goroutine, reads only mu-guarded fields (never
+// credentials), and never aliases internal state.
+func (c *Client) SessionInfo() SessionInfo {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	var chans []ChannelPair
+	if len(c.channelPairs) > 0 {
+		chans = make([]ChannelPair, len(c.channelPairs))
+		copy(chans, c.channelPairs)
+	}
+	return SessionInfo{
+		SessionID:       c.sessionID,
+		SessionTimeout:  c.sessionTimeout,
+		AuthScheme:      c.authScheme,
+		KeepaliveMethod: c.keepaliveMethod,
+		Channels:        chans,
+	}
+}
+
+// advance validates that method is legal in the current state and, when it
+// is, transitions to the destination state. It returns a *StateError
+// (matching ErrInvalidState) without changing state when the call is illegal.
+// Close and fatal shutdown move to closed through setTermErr, not advance.
+func (c *Client) advance(method string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if !legalIn(method, c.state) {
+		return &StateError{Method: method, State: c.state.String()}
+	}
+	dest, ok := destState(method)
+	if !ok {
+		// Unreachable while legalIn and destState agree. Refusing rather than
+		// defaulting keeps a future divergence a visible error instead of a
+		// silent transition to closed.
+		return &StateError{Method: method, State: c.state.String()}
+	}
+	c.state = dest
+	return nil
+}
+
+// writeMessage serializes one socket write under writeMu with a Timeout-bound
+// write deadline.
+func (c *Client) writeMessage(raw []byte) error {
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
+	if err := c.armWriteDeadline(c.cfg.Timeout); err != nil {
+		return err
+	}
+	_, err := c.conn.Write(raw)
+	return err
+}
+
+// armWriteDeadline sets the socket write deadline d from now, under deadlineMu
+// so it can never race past a shutdown. When shutdown has begun it sets an
+// immediate deadline instead.
+//
+// initiateShutdown's SetDeadline(now) does interrupt a write already blocked in
+// the syscall. What it could not stop was a write that reached its own deadline
+// call just AFTER the interrupt and re-armed the write side forward to
+// now+Timeout, undoing it. Close could then leave the reader parked in Write for
+// the full 10s default while sendTeardownBestEffort queued behind it on writeMu
+// and Wait blocked for the same window.
+func (c *Client) armWriteDeadline(d time.Duration) error {
+	c.deadlineMu.Lock()
+	defer c.deadlineMu.Unlock()
+	deadline := time.Now().Add(d)
+	if c.shuttingDown {
+		deadline = time.Now()
+	}
+	return c.conn.SetWriteDeadline(deadline)
+}
+
+// armTeardownDeadlines bounds the best-effort TEARDOWN write and the discard
+// read that follows it. Both go through deadlineMu for the same reason
+// armWriteDeadline does, but unlike armWriteDeadline neither collapses to an
+// immediate deadline during shutdown.
+//
+// That exemption is the whole point. sendTeardownBestEffort runs only from the
+// terminal sequence, which runs only after initiateShutdown, so shuttingDown is
+// ALWAYS set by then. Routing its write through armWriteDeadline therefore
+// armed an already-expired deadline and the poller refused the write outright,
+// so the TEARDOWN was never transmitted and the discarded error hid it. The
+// server would keep the session allocated until its own timeout, and on a
+// camera with a one-session limit the next Dial is refused.
+func (c *Client) armTeardownDeadlines() {
+	c.deadlineMu.Lock()
+	defer c.deadlineMu.Unlock()
+	deadline := time.Now().Add(teardownDeadline)
+	_ = c.conn.SetWriteDeadline(deadline)
+	_ = c.conn.SetReadDeadline(deadline)
+}
