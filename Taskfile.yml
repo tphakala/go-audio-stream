@@ -46,6 +46,7 @@ tasks:
       - go test -run '^$' -fuzz '^FuzzParseInterleaved$' -fuzztime=2m ./rtsp
       - go test -run '^$' -fuzz '^FuzzParseChallenges$' -fuzztime=2m ./rtsp
       - go test -run '^$' -fuzz '^FuzzResolveControlURL$' -fuzztime=2m ./rtsp
+      - go test -run '^$' -fuzz '^FuzzResolveBaseURL$' -fuzztime=2m ./rtsp
       - go test -run '^$' -fuzz '^FuzzParseTransport$' -fuzztime=2m ./rtsp
       - go test -run '^$' -fuzz '^FuzzParseSession$' -fuzztime=2m ./rtsp
 

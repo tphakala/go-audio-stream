@@ -2,6 +2,7 @@ package rtsp_test
 
 import (
 	"errors"
+	"net/url"
 	"strings"
 	"testing"
 
@@ -18,6 +19,8 @@ const (
 	controlQueryTrackID1   = "?trackID=1"
 	resolvedStreamTrackID1 = "rtsp://user:pass@cam:554/stream/trackID=1"
 	onvifTrackWithSSRC     = "rtsp://cam:554/onvif1/track1?ssrc=1"
+	liveURLCamExample      = "rtsp://cam.example:554/live"
+	liveURLCamExampleSlash = "rtsp://cam.example:554/live/"
 )
 
 func TestResolveBaseURL(t *testing.T) {
@@ -42,15 +45,15 @@ func TestResolveBaseURL(t *testing.T) {
 		},
 		{
 			name:        "B3 content-base absolute path resolves against request host",
-			requestURL:  "rtsp://cam.example:554/live",
+			requestURL:  liveURLCamExample,
 			contentBase: "/media/",
 			want:        "rtsp://cam.example:554/media/",
 		},
 		{
 			name:            "B4 content-location used when content-base absent",
-			requestURL:      "rtsp://cam.example:554/live",
-			contentLocation: "rtsp://cam.example:554/live/",
-			want:            "rtsp://cam.example:554/live/",
+			requestURL:      liveURLCamExample,
+			contentLocation: liveURLCamExampleSlash,
+			want:            liveURLCamExampleSlash,
 		},
 	}
 	for _, tt := range tests {
@@ -225,6 +228,33 @@ func TestResolveControlURLRejectsControlCharacters(t *testing.T) {
 			}
 			if got != "" {
 				t.Fatalf("ResolveControlURL(%q) = %q, want empty on error", tt.control, got)
+			}
+		})
+	}
+}
+
+// The absolute-control branch rebuilds the URL from base's scheme and host.
+// When base carries neither, that assembled a degenerate string like "://"
+// and returned it as a success. Found by the fuzz round-trip invariant.
+func TestResolveControlURLRejectsDegenerateAbsoluteResult(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		base    string
+		control string
+	}{
+		{"schemeless base with bare scheme control", "0", "rtsp:"},
+		{"schemeless base with absolute control", "0", "rtsp://"},
+		{"empty base with bare scheme control", "", "rtsps:"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := rtsp.ResolveControlURL(tt.base, tt.control)
+			if err == nil {
+				if _, perr := url.Parse(got); perr != nil {
+					t.Fatalf("ResolveControlURL(%q, %q) = %q which does not parse: %v", tt.base, tt.control, got, perr)
+				}
 			}
 		})
 	}

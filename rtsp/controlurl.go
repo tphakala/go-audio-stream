@@ -101,17 +101,20 @@ func ResolveControlURL(base, control string) (string, error) {
 		return base, nil
 	}
 
+	var resolved string
 	if controlURL, cerr := url.Parse(control); cerr == nil && isRTSPScheme(controlURL.Scheme) {
-		return resolveAbsoluteControl(baseURL, controlURL), nil
+		resolved = resolveAbsoluteControl(baseURL, controlURL)
+	} else {
+		resolved = resolveRelativeControl(base, control)
 	}
 
-	// The relative form is built by concatenation, so nothing has vetted the
-	// control text yet. It comes straight from the SDP a=control attribute,
-	// which is remote input: a value carrying CR or LF would otherwise be
-	// handed back as a "resolved" URL and could split a later request line.
-	// Re-parsing rejects control characters exactly as ResolveBaseURL does
-	// for its own result, so both resolvers return vetted output.
-	resolved := resolveRelativeControl(base, control)
+	// Neither branch has vetted its output. The a=control attribute is
+	// remote input, so a value carrying CR or LF would otherwise be handed
+	// back as a "resolved" URL and could split a later request line. The
+	// absolute branch can also assemble a degenerate string such as "://"
+	// when base carries no scheme or host. Re-parsing catches both, exactly
+	// as ResolveBaseURL already does for its own result, so every string
+	// this package returns as a URL is one that parses.
 	if _, err := url.Parse(resolved); err != nil {
 		return "", ErrInvalidURL
 	}

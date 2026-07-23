@@ -455,11 +455,30 @@ func digestHash(algorithm string) (func() hash.Hash, error) {
 // kvQuoted renders a quoted-string auth-param, name="value". The value is
 // escaped per the RFC 7616 quoted-string grammar: backslash first, then
 // double-quote, so a credential containing either character cannot break
-// out of the quotes or forge extra auth-params.
+// out of the quotes or forge extra auth-params. CR and LF are dropped
+// outright: a malformed WWW-Authenticate can carry a bare CR into a
+// challenge param, and escaping does not neutralize it the way it does a
+// quote. MarshalRequest would reject the resulting header anyway, so this
+// is defense in depth, but it keeps a header-splitting byte from ever being
+// assembled into an Authorization value.
 func kvQuoted(name, value string) string {
+	value = stripCRLF(value)
 	value = strings.ReplaceAll(value, `\`, `\\`)
 	value = strings.ReplaceAll(value, `"`, `\"`)
 	return name + `="` + value + `"`
+}
+
+// stripCRLF removes carriage returns and line feeds from s.
+func stripCRLF(s string) string {
+	if !strings.ContainsAny(s, "\r\n") {
+		return s
+	}
+	return strings.Map(func(r rune) rune {
+		if r == '\r' || r == '\n' {
+			return -1
+		}
+		return r
+	}, s)
 }
 
 // kvUnquoted renders a bare-token auth-param, name=value.

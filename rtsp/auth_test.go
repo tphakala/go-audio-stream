@@ -18,6 +18,28 @@ const (
 	testPassword  = "password"
 )
 
+// A malformed WWW-Authenticate can carry a bare CR into a challenge param.
+// It must never reach the assembled Authorization value, where it would be
+// a header-splitting byte.
+func TestAuthorizeStripsControlCharactersFromParams(t *testing.T) {
+	challenge := Challenge{
+		Scheme: AuthDigest,
+		Realm:  "r\r\nX-Injected: evil",
+		Params: map[string]string{
+			paramRealm:  "r\r\nX-Injected: evil",
+			paramNonce:  "n\rx",
+			paramOpaque: "o\nx",
+		},
+	}
+	got, err := Authorize(challenge, rfc7616Creds, DigestInput{Method: testMethodGET, URI: "/"})
+	if err != nil {
+		t.Fatalf("Authorize error = %v, want nil", err)
+	}
+	if strings.ContainsAny(got, "\r\n") {
+		t.Fatalf("Authorize emitted control characters: %q", got)
+	}
+}
+
 // An explicitly empty qop must be answered with the RFC 2069 legacy form:
 // no qop, no nc, and no cnonce in the Authorization value. Asserting only
 // that Authorize returns no error would not catch it emitting a qop=auth
