@@ -687,6 +687,52 @@ func TestDiscardTrackNotDelivered(t *testing.T) {
 	}
 }
 
+// The same bound must hold when the gate-admitted channel is an RTCP channel.
+// A minimal Receiver Report (8 bytes, no Sender Report) parses as a valid RTCP
+// compound, so treating it as a re-lock would let a run of garbage bracketing
+// forged tiny RTCP frames hold the session open indefinitely. Only a real
+// Sender Report is strong enough evidence to clear the budget.
+func TestResyncBudgetStillBoundedByRTCPChannel(t *testing.T) {
+	// V=2, RC=0, PT=201 (Receiver Report), length 1 word, plus a reporter SSRC:
+	// a well-formed 8-byte RTCP compound that carries no Sender Report.
+	rr := []byte{'$', 0x01, 0x00, 0x08, 0x80, 0xC9, 0x00, 0x01, 0xCA, 0xFE, 0xBA, 0xBE}
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	closeRelease := func() { releaseOnce.Do(func() { close(release) }) }
+	t.Cleanup(closeRelease)
+
+	s := testserver.New(t, testserver.Options{Handle: func(sc *testserver.ServerConn) {
+		if _, err := sc.Handshake(testserver.HandshakeConfig{
+			SDP:            opusSDP,
+			SessionID:      testSessionID,
+			SessionTimeout: testTimeoutS,
+		}); err != nil {
+			return
+		}
+		<-release
+		junk := make([]byte, 0, 32*1024)
+		for range 10 {
+			junk = append(junk, unclassifiableBytes(2000)...)
+			junk = append(junk, rr...)
+		}
+		_ = sc.WriteRaw(junk)
+		drainRequests(sc)
+	}})
+
+	c := dialIdle(t, s.URL("/stream"))
+	defer func() { _ = c.Close() }()
+	describeSetupPlay(t, c, nil)
+	closeRelease()
+
+	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
+	defer cancel()
+	err := c.Wait(ctx)
+	if err == nil || !strings.Contains(err.Error(), "resync exceeded") {
+		t.Errorf("Wait = %v, want a resync budget framing error; an RTCP frame carrying "+
+			"no Sender Report must not clear the budget", err)
+	}
+}
+
 // The same bound must hold when the gate-admitted channel belongs to a
 // DISCARDED track. A discard track is never delivered from, so treating its
 // frames as proof of a re-lock on the strength of the channel byte alone would

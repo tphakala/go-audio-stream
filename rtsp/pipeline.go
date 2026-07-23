@@ -75,14 +75,15 @@ type track struct {
 	stream rtp.Stream
 	aac    *aac.Depacketizer
 	// wirePayloadType is the payload type this track has settled on and
-	// wirePTSet says whether it has settled, while ptUndeclared counts the
-	// consecutive undeclared packets seen before it does. See acceptPayloadType
-	// for how a track settles; the zero value accepts the first type it sees,
-	// so a track built by any path other than newTrack cannot silently filter
-	// to PT 0.
+	// wirePTSet says whether it has settled. Until it settles, ptCandidate and
+	// ptRun track the current run of one undeclared type, so a track adopts a
+	// type only after seeing it consistently. See acceptPayloadType; the zero
+	// value accepts the first type it sees, so a track built by any path other
+	// than newTrack cannot silently filter to PT 0.
 	wirePayloadType uint8
 	wirePTSet       bool
-	ptUndeclared    int
+	ptCandidate     uint8
+	ptRun           int
 	baseTS          uint64
 	baseSet         bool
 	// baselineFixed is set true the first time a baseline is established and is
@@ -215,37 +216,37 @@ func modeOf(params *sdp.AACParams) string {
 	return params.Mode
 }
 
-// ptAdoptThreshold is how many consecutive packets carrying an undeclared
-// payload type a track tolerates before concluding the SDP was wrong and
-// adopting what the stream actually carries. Five packets is on the order of
-// 100 ms of audio, short enough that a camera which mis-declares its format
-// loses only a prologue, and long enough that a stray packet at the head of a
-// session cannot capture the track.
+// ptAdoptThreshold is how many consecutive packets of one undeclared payload
+// type a track tolerates before concluding the SDP was wrong and adopting that
+// type. Five packets is on the order of 100 ms of audio at a typical 20 ms
+// packet time: short enough that a camera which mis-declares its format loses
+// only a prologue, long enough that a stray packet cannot capture the track.
 const ptAdoptThreshold = 5
 
 // acceptPayloadType decides whether a packet's payload type belongs to this
 // track. Reader-goroutine only.
 //
-// The type the SDP declared wins whenever it appears, and seeing it settles the
-// track for good. A track whose SDP declared nothing settles on the first type
-// it sees instead. Otherwise a run of ptAdoptThreshold consecutive undeclared
-// packets, with the declared type never appearing, is taken as the SDP being
-// wrong, and the observed type is adopted.
+// The type the SDP declared always wins and settles the track for good. A track
+// whose SDP declared nothing settles on the first type it sees. Otherwise the
+// track adopts an undeclared type only after ptAdoptThreshold consecutive
+// packets of that SAME type, with the declared type never appearing.
 //
-// Both halves are needed, because each fails alone in the other's case.
-// Enforcing the SDP's value alone hands a camera whose m= line disagrees with
-// what it sends a session in which every packet is rejected, nothing is
-// delivered, and the read-idle watchdog never fires because frames keep
-// arriving: a silent, permanent stall on exactly the quirky firmware this
-// package exists to tolerate. Settling on the first packet alone has the
-// mirror-image failure: one stray packet ahead of the real stream (a session
-// joined mid-DTMF, say) captures the track, gets delivered as audio, and every
-// real packet after it is rejected for the rest of the session. Waiting for a
-// short run before adopting distinguishes a mis-declared stream, which is
-// consistently wrong, from a stray prologue, which is not.
+// Both halves are needed, because each fails alone. Enforcing the SDP's value
+// alone hands a camera whose m= line disagrees with what it sends a session in
+// which every packet is rejected, nothing is delivered, and the read-idle
+// watchdog never fires because frames keep arriving: a silent, permanent stall
+// on exactly the quirky firmware this package exists to tolerate. Adopting the
+// first packet's type alone has the mirror-image failure: a session joined
+// mid-DTMF latches onto the telephone-event, delivers IT as audio, and rejects
+// every real packet after. Requiring a consistent run distinguishes a
+// mis-declared stream, which is steadily wrong, from a stray, which is not; and
+// requiring the SAME type across the run keeps a second stray from being the
+// packet that gets adopted.
 //
-// A rejected packet is counted and dropped by the caller, so a mis-declaring
-// camera loses at most ptAdoptThreshold packets before delivery starts.
+// A track whose SDP declared nothing has no basis to prefer any type, so it
+// settles on its first packet and a stray at the head of the stream can capture
+// it. That is the accepted cost of raw delivery for an unrecognized codec; the
+// threshold is spent only where a declared type gives something to hold out for.
 func (tr *track) acceptPayloadType(pt uint8, logger *slog.Logger) bool {
 	if tr.sdpPayloadType == payloadTypeUnknown {
 		if !tr.wirePTSet {
@@ -255,14 +256,18 @@ func (tr *track) acceptPayloadType(pt uint8, logger *slog.Logger) bool {
 	}
 	if int(pt) == tr.sdpPayloadType {
 		tr.wirePayloadType, tr.wirePTSet = pt, true
-		tr.ptUndeclared = 0
+		tr.ptRun = 0
 		return true
 	}
 	if tr.wirePTSet {
 		return pt == tr.wirePayloadType
 	}
-	tr.ptUndeclared++
-	if tr.ptUndeclared < ptAdoptThreshold {
+	if tr.ptRun > 0 && pt == tr.ptCandidate {
+		tr.ptRun++
+	} else {
+		tr.ptCandidate, tr.ptRun = pt, 1
+	}
+	if tr.ptRun < ptAdoptThreshold {
 		return false
 	}
 	logWarn(logger, "stream payload type differs from the one the SDP declared; using the stream's",

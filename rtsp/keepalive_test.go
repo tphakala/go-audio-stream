@@ -428,3 +428,59 @@ func TestSenderReportForAnotherSourceIsIgnored(t *testing.T) {
 		t.Fatal("no receiver report emitted within two RR intervals")
 	}
 }
+
+// When a compound carries Sender Reports but none describes the track's media,
+// nothing is recorded: the media SSRC learned from the RTP stream must survive.
+// Storing a foreign source's SR would make every later Receiver Report name a
+// source the server is not sending, the exact bug the SSRC preference prevents.
+func TestSenderReportForNoMatchingSourceRecordsNothing(t *testing.T) {
+	const mediaSSRC = 0x0BADF00D
+	const otherSSRC = 0xDEADBEEF
+
+	type result struct {
+		rr  rtp.ReceiverReport
+		err error
+	}
+	res := make(chan result, 1)
+	s := testserver.New(t, testserver.Options{Handle: func(sc *testserver.ServerConn) {
+		pairs, err := sc.Handshake(testserver.HandshakeConfig{
+			SDP:            opusSDP,
+			SessionID:      testSessionID,
+			SessionTimeout: testTimeoutS,
+		})
+		if err != nil {
+			return
+		}
+		// The RTP packet teaches the track its media SSRC; the SR that follows
+		// describes a different source, so it must be ignored.
+		_ = sc.InjectFrame(pairs[0].RTP, buildRTPPacket(ptOpus, 7, 960, mediaSSRC, false, []byte{0x78, 0x01}))
+		_ = sc.InjectFrame(pairs[0].RTCP, buildSenderReport(otherSSRC, 0xAAAAAAAABBBBBBBB, 111))
+		rr, rerr := readReceiverReport(sc, pairs[0].RTCP)
+		res <- result{rr: rr, err: rerr}
+		drainRequests(sc)
+	}})
+	c := dialIdle(t, s.URL("/stream"))
+	defer closeAndWait(t, c)
+	describeSetupPlay(t, c, nil)
+
+	select {
+	case r := <-res:
+		if r.err != nil {
+			t.Fatalf("reading receiver report: %v", r.err)
+		}
+		if len(r.rr.Blocks) != 1 {
+			t.Fatalf("RR blocks = %d, want 1", len(r.rr.Blocks))
+		}
+		if got := r.rr.Blocks[0].SSRC; got != mediaSSRC {
+			t.Errorf("Blocks[0].SSRC = %#x, want the media SSRC %#x unchanged", got, uint32(mediaSSRC))
+		}
+		if got := r.rr.Blocks[0].LastSR; got != 0 {
+			t.Errorf("LastSR = %#x, want 0; the foreign SR must not have been recorded", got)
+		}
+		if got := r.rr.Blocks[0].DelaySinceLastSR; got != 0 {
+			t.Errorf("DelaySinceLastSR = %d, want 0; the foreign SR must not have been recorded", got)
+		}
+	case <-time.After(2 * rrCadence):
+		t.Fatal("no receiver report emitted within two RR intervals")
+	}
+}

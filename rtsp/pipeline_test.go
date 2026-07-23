@@ -590,7 +590,13 @@ func TestDiscardTrackDropsAllocationFree(t *testing.T) {
 	tr := &track{id: 5, discard: true}
 	c := &Client{}
 	c.channels.Store(newChannelTable(nil, tr, 6, 7))
-	frame := InterleavedFrame{Channel: 6, Payload: make([]byte, 128)}
+	// A valid RTP packet carrying two CSRCs. A full rtp.ParsePacket would
+	// allocate a CSRC slice for this; the discard path must not, and an
+	// all-zero payload would not exercise that branch at all (it fails the
+	// version check first).
+	payload := make([]byte, 12+2*4+40)
+	payload[0] = 0x82 // version 2, CC = 2
+	frame := InterleavedFrame{Channel: 6, Payload: payload}
 
 	c.handleInterleaved(frame) // warm up
 	got := testing.AllocsPerRun(200, func() { c.handleInterleaved(frame) })
@@ -644,7 +650,7 @@ func TestAcceptPayloadType(t *testing.T) {
 	}
 
 	// A camera whose stream consistently disagrees with its own SDP is adopted
-	// once the run is long enough to rule out a stray, and only then.
+	// once the run of the SAME type is long enough to rule out a stray.
 	lying := &track{sdpPayloadType: 97}
 	for i := range ptAdoptThreshold - 1 {
 		if lying.acceptPayloadType(96, nil) {
@@ -666,6 +672,34 @@ func TestAcceptPayloadType(t *testing.T) {
 	// The declared type still wins if it ever turns up.
 	if !lying.acceptPayloadType(97, nil) {
 		t.Error("the declared payload type was rejected after an adoption")
+	}
+
+	// The run must be the SAME undeclared type. A near-complete run of one type
+	// broken by a single stray of another does not adopt either: the stray
+	// restarts the count, so the packet that finally reaches the threshold is
+	// the one actually seen consistently, never whichever happened to land on
+	// the boundary.
+	mixed := &track{sdpPayloadType: 97}
+	for range ptAdoptThreshold - 1 {
+		if mixed.acceptPayloadType(96, nil) {
+			t.Fatal("undeclared packet accepted before the threshold")
+		}
+	}
+	if mixed.acceptPayloadType(101, nil) {
+		t.Error("a stray of a different type was adopted at the run boundary")
+	}
+	if mixed.wirePTSet {
+		t.Error("the track settled on a stray rather than the consistent type")
+	}
+	// The consistent type still gets there, one full run later.
+	for i := range ptAdoptThreshold {
+		got := mixed.acceptPayloadType(96, nil)
+		if i < ptAdoptThreshold-1 && got {
+			t.Fatalf("packet %d of the restarted run accepted early", i)
+		}
+		if i == ptAdoptThreshold-1 && !got {
+			t.Error("the consistent type was not adopted after a full clean run")
+		}
 	}
 
 	// A run broken by the declared type restarts: the declared type settles the

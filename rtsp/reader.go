@@ -14,6 +14,11 @@ import (
 // readChunk is the per-read scratch size for the reader accumulation buffer.
 const readChunk = 4096
 
+// rtpVersion is the only RTP version this client accepts (RFC 3550). The reader
+// checks it directly on the discard path, where a full rtp.ParsePacket would
+// allocate for no benefit.
+const rtpVersion = 2
+
 // errBufferFull is the backstop when the accumulation buffer would exceed
 // maxReadBuffer. MaxHeaderBytes and MaxBodySize bound every well-formed unit
 // below that ceiling, so it is unreachable except on a desynchronized or
@@ -285,18 +290,17 @@ func (c *Client) handleInterleaved(f InterleavedFrame) bool {
 	}
 	tr := bind.track
 	if tr.discard {
-		// Counted and dropped without delivering or depacketizing, but still
-		// parsed. The parse is not for the payload, which is thrown away; it is
-		// the framing evidence consume needs. Trusting the channel byte alone
-		// here would let a run of garbage that happens to name a discarded
-		// track's channel clear the resync budget indefinitely, which is the
-		// bound the usable verdict exists to preserve. Parsing a header costs
-		// no allocation, and Bytes still counts the whole interleaved payload
-		// (RTP header included) as it is documented to.
+		// Counted and dropped without delivering or depacketizing. The frame is
+		// validated, not parsed: trusting the channel byte alone would let a run
+		// of garbage naming a discarded track's channel clear the resync budget
+		// indefinitely, but a full parse would allocate a CSRC slice for a
+		// packet carrying contributing sources (a mixer feeds exactly the kind
+		// of track a caller discards), so this checks the RTP version and length
+		// that a real packet has and nothing more. Bytes still counts the whole
+		// interleaved payload, RTP header included, as documented.
 		tr.packets.Add(1)
 		tr.bytes.Add(uint64(len(f.Payload)))
-		_, err := rtp.ParsePacket(f.Payload)
-		return err == nil
+		return len(f.Payload) >= rtp.HeaderSize && f.Payload[0]>>6 == rtpVersion
 	}
 	if bind.isRTCP {
 		return c.handleRTCP(tr, f.Payload, now)
@@ -369,11 +373,17 @@ func (c *Client) handleInterleaved(f InterleavedFrame) bool {
 // parser cannot read must not end a session whose media is arriving fine.
 func (c *Client) handleRTCP(tr *track, payload []byte, now time.Time) bool {
 	reports, err := rtp.ParseCompound(payload)
-	if err != nil {
+	if err != nil || len(reports) == 0 {
+		// Not usable as re-lock evidence. This verdict is consulted only while
+		// resynchronizing, where the bar has to match the RTP path's: a full
+		// Sender Report (28 bytes, PT 200, a 20-byte sender-info block) is
+		// structured enough that random garbage will not parse as one, whereas
+		// ParseCompound accepts an empty buffer or a bare 8-byte Receiver Report,
+		// which a run of garbage could forge to clear the budget indefinitely.
+		// A genuine RR-only stream is unaffected: this matters only during a
+		// desync, and a real media stream clears the budget with its RTP packets
+		// meanwhile.
 		return false
-	}
-	if len(reports) == 0 {
-		return true // a valid compound, just not one carrying a Sender Report.
 	}
 
 	sr, ok := reports[0], true
