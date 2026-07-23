@@ -42,7 +42,10 @@ const (
 		"a=control:video\r\n"
 
 	testSessionID = "sess-42"
-	testTimeoutS  = 60
+	// Deliberately NOT 60: DefaultSessionTimeout is 60s and ParseSession seeds
+	// it before parsing, so a 60 here would let every SessionTimeout assertion
+	// pass with the timeout parameter ignored entirely.
+	testTimeoutS = 90
 )
 
 // serve reads the next client request, asserts its method, and answers it with
@@ -110,12 +113,31 @@ func drainRequests(sc *testserver.ServerConn) {
 }
 
 // closeAndWait closes the client and asserts Wait returns ErrClosed (or nil).
+//
+// The wait is bounded even though Close is expected to end it promptly. Every
+// test in this file defers this helper, so an unbounded wait would turn any
+// regression that stops the reader from finishing into a ten-minute hang of the
+// whole package with no indication of which test was stuck.
 func closeAndWait(t *testing.T, c *rtsp.Client) {
 	t.Helper()
-	_ = c.Close()
-	if err := c.Wait(context.Background()); err != nil && !errors.Is(err, audiostream.ErrClosed) {
+	if err := c.Close(); err != nil {
+		t.Errorf("Close: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
+	defer cancel()
+	if err := c.Wait(ctx); err != nil && !errors.Is(err, audiostream.ErrClosed) {
 		t.Errorf("Wait after Close = %v, want ErrClosed", err)
 	}
+}
+
+// keepaliveHeader advertises GET_PARAMETER so a KeepaliveMethod assertion is
+// discriminating. KeepaliveMethod falls back to OPTIONS for a nil list, an
+// empty list, and a list that merely omits GET_PARAMETER, so asserting OPTIONS
+// against publicHeader would hold even if the Public header were never read.
+func keepaliveHeader() rtsp.Header {
+	h := rtsp.Header{}
+	h.Set("Public", "OPTIONS, DESCRIBE, SETUP, PLAY, TEARDOWN, GET_PARAMETER")
+	return h
 }
 
 // dialIdle dials the server and returns a client in the idle state.
@@ -126,6 +148,29 @@ func dialIdle(t *testing.T, url string) *rtsp.Client {
 		t.Fatalf("Dial: %v", err)
 	}
 	return c
+}
+
+// TestDescribeWrongContentType covers the media-type comparison itself. The
+// sibling test that sends no Content-Type at all exits one branch earlier, at
+// the empty guard, so without this case the comparison could be deleted with
+// the suite still green.
+func TestDescribeWrongContentType(t *testing.T) {
+	for _, ct := range []string{"text/html", "application/xml; charset=utf-8", "application/sdpx"} {
+		t.Run(ct, func(t *testing.T) {
+			h := rtsp.Header{}
+			h.Set("Content-Type", ct)
+			s := testserver.New(t, testserver.Options{Handle: func(sc *testserver.ServerConn) {
+				serve(t, sc, methodOptions, 200, "OK", publicHeader(), nil)
+				serve(t, sc, methodDescribe, 200, "OK", h, []byte(aacSDP))
+				drainRequests(sc)
+			}})
+			c := dialIdle(t, s.URL("/stream"))
+			defer closeAndWait(t, c)
+			if _, err := c.Describe(context.Background()); !errors.Is(err, rtsp.ErrNotSDP) {
+				t.Errorf("Describe with Content-Type %q = %v, want ErrNotSDP", ct, err)
+			}
+		})
+	}
 }
 
 func TestDescribeHappyPath(t *testing.T) {

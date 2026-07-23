@@ -15,6 +15,7 @@
 // the connection's life, and probes OPTIONS to learn the keepalive method. A
 // Client therefore holds a socket and a goroutine, and must be released with
 // Close; Wait reports the terminal cause. Close, Wait, Stats and SessionInfo
-// are safe from any goroutine. The verbs that drive a session (DESCRIBE,
-// SETUP, PLAY) and frame delivery arrive in subsequent changes.
+// are safe from any goroutine. Describe and Setup discover the tracks and
+// negotiate their interleaved channels; PLAY and frame delivery arrive in
+// subsequent changes, so a set-up session does not yet produce frames.
 package rtsp

@@ -16,11 +16,18 @@ import (
 func describeOne(t *testing.T, sdp string, setupFn func(sc *testserver.ServerConn)) (*rtsp.Client, []rtsp.Track) {
 	t.Helper()
 	s := testserver.New(t, testserver.Options{Handle: func(sc *testserver.ServerConn) {
-		serve(t, sc, methodOptions, 200, "OK", publicHeader(), nil)
+		// keepaliveHeader, not publicHeader: it advertises GET_PARAMETER, which is
+		// what makes the KeepaliveMethod assertion below discriminating.
+		serve(t, sc, methodOptions, 200, "OK", keepaliveHeader(), nil)
 		serve(t, sc, methodDescribe, 200, "OK", sdpHeaders(""), []byte(sdp))
 		setupFn(sc)
 	}})
 	c := dialIdle(t, s.URL("/stream"))
+	// The caller registers closeAndWait only after this returns, so without a
+	// cleanup of our own a Fatalf below would strand the client, its reader
+	// goroutine and its connection for the rest of the binary, where
+	// assertNoGoroutineLeak would blame an unrelated test.
+	t.Cleanup(func() { _ = c.Close() })
 	tracks, err := c.Describe(context.Background())
 	if err != nil {
 		t.Fatalf("Describe: %v", err)
@@ -29,15 +36,33 @@ func describeOne(t *testing.T, sdp string, setupFn func(sc *testserver.ServerCon
 }
 
 // answerSetup reads one SETUP and answers it with the given interleaved pair
-// and the shared session id.
-func answerSetup(t *testing.T, sc *testserver.ServerConn, rtpCh, rtcpCh int) {
+// and the shared session id, after asserting the pair the client PROPOSED.
+//
+// Checking the proposal matters because everything else in these tests observes
+// only what the client accepted back, so the allocation logic could propose a
+// constant 0-1 for every track, or a pair outside the one-byte channel range,
+// with the suite still green.
+func answerSetup(t *testing.T, sc *testserver.ServerConn, proposeRTP, proposeRTCP, rtpCh, rtcpCh int) {
 	t.Helper()
-	serve(t, sc, methodSetup, 200, "OK", setupHeaders(rtpCh, rtcpCh, testSessionID, testTimeoutS), nil)
+	req, err := sc.ReadRequest()
+	if err != nil {
+		t.Errorf("read SETUP: %v", err)
+		return
+	}
+	if req.Method != methodSetup {
+		t.Errorf("got method %s, want %s", req.Method, methodSetup)
+	}
+	if got, want := req.Header.Get("Transport"), rtsp.BuildTransport(proposeRTP, proposeRTCP); got != want {
+		t.Errorf("SETUP proposed Transport %q, want %q", got, want)
+	}
+	if err := sc.Respond(req, 200, "OK", setupHeaders(rtpCh, rtcpCh, testSessionID, testTimeoutS), nil); err != nil {
+		t.Errorf("respond SETUP: %v", err)
+	}
 }
 
 func TestSetupRenumberedChannels(t *testing.T) {
 	c, tracks := describeOne(t, aacSDP, func(sc *testserver.ServerConn) {
-		answerSetup(t, sc, 4, 5) // server renumbers away from the proposed 0-1
+		answerSetup(t, sc, 0, 1, 4, 5) // server renumbers away from the proposed 0-1
 		drainRequests(sc)
 	})
 	defer closeAndWait(t, c)
@@ -56,8 +81,8 @@ func TestSetupRenumberedChannels(t *testing.T) {
 
 func TestSetupSecondTrackChannelClaim(t *testing.T) {
 	c, tracks := describeOne(t, audioVideoSDP, func(sc *testserver.ServerConn) {
-		answerSetup(t, sc, 0, 1)
-		answerSetup(t, sc, 2, 3)
+		answerSetup(t, sc, 0, 1, 0, 1)
+		answerSetup(t, sc, 2, 3, 2, 3)
 		drainRequests(sc)
 	})
 	defer closeAndWait(t, c)
@@ -79,9 +104,9 @@ func TestSetupSecondTrackChannelClaim(t *testing.T) {
 
 func TestSetupChannelConflict(t *testing.T) {
 	c, tracks := describeOne(t, audioVideoSDP, func(sc *testserver.ServerConn) {
-		answerSetup(t, sc, 0, 1)
+		answerSetup(t, sc, 0, 1, 0, 1)
 		// Second SETUP returns the same pair the first track already claimed.
-		answerSetup(t, sc, 0, 1)
+		answerSetup(t, sc, 2, 3, 0, 1)
 		drainRequests(sc)
 	})
 	defer closeAndWait(t, c)
@@ -154,7 +179,7 @@ func TestSetupBeforeDescribe(t *testing.T) {
 
 func TestSetupDiscardFlag(t *testing.T) {
 	c, tracks := describeOne(t, aacSDP, func(sc *testserver.ServerConn) {
-		answerSetup(t, sc, 0, 1)
+		answerSetup(t, sc, 0, 1, 0, 1)
 		drainRequests(sc)
 	})
 	defer closeAndWait(t, c)
@@ -169,8 +194,8 @@ func TestSetupDiscardFlag(t *testing.T) {
 
 func TestSessionInfoAfterSetup(t *testing.T) {
 	c, tracks := describeOne(t, audioVideoSDP, func(sc *testserver.ServerConn) {
-		answerSetup(t, sc, 0, 1)
-		answerSetup(t, sc, 2, 3)
+		answerSetup(t, sc, 0, 1, 0, 1)
+		answerSetup(t, sc, 2, 3, 2, 3)
 		drainRequests(sc)
 	})
 	defer closeAndWait(t, c)
@@ -189,11 +214,11 @@ func TestSessionInfoAfterSetup(t *testing.T) {
 	if info.SessionTimeout != testTimeoutS*time.Second {
 		t.Errorf("SessionTimeout = %v, want %ds", info.SessionTimeout, testTimeoutS)
 	}
-	if info.KeepaliveMethod != methodOptions {
-		t.Errorf("KeepaliveMethod = %q, want OPTIONS", info.KeepaliveMethod)
-	}
-	if info.AuthScheme != rtsp.AuthNone {
-		t.Errorf("AuthScheme = %v, want AuthNone (this handshake is unauthenticated)", info.AuthScheme)
+	// The fixture advertises GET_PARAMETER, so this fails if the Public header
+	// is not actually parsed. Asserting OPTIONS instead would hold for a nil
+	// list, an empty list, and a list that merely omits GET_PARAMETER.
+	if info.KeepaliveMethod != "GET_PARAMETER" {
+		t.Errorf("KeepaliveMethod = %q, want GET_PARAMETER (advertised in Public)", info.KeepaliveMethod)
 	}
 	if len(info.Channels) != 2 {
 		t.Fatalf("Channels = %v, want two pairs", info.Channels)
@@ -202,5 +227,47 @@ func TestSessionInfoAfterSetup(t *testing.T) {
 	info.Channels[0].RTP = 999
 	if c.SessionInfo().Channels[0].RTP == 999 {
 		t.Error("SessionInfo().Channels aliases internal state")
+	}
+}
+
+// Setup must reject a Track it did not hand out BEFORE issuing the request, so
+// the handler here scripts no SETUP at all: if the client sent one, the server
+// goroutine would read it and the drain would answer it, and the assertion that
+// no channel was claimed would still hold. The proof that nothing was sent is
+// that Setup returns before the round trip.
+func TestSetupRejectsForeignTrack(t *testing.T) {
+	c, tracks := describeOne(t, audioVideoSDP, drainRequests)
+	defer closeAndWait(t, c)
+
+	crossed := rtsp.Track{ID: tracks[0].ID, Control: tracks[1].Control}
+	if err := c.Setup(context.Background(), crossed, rtsp.SetupOptions{}); !errors.Is(err, rtsp.ErrUnknownTrack) {
+		t.Errorf("Setup with a crossed ID and Control = %v, want ErrUnknownTrack", err)
+	}
+	if err := c.Setup(context.Background(), rtsp.Track{ID: 99, Control: "rtsp://cam/s/x"}, rtsp.SetupOptions{}); !errors.Is(err, rtsp.ErrUnknownTrack) {
+		t.Errorf("Setup with an out-of-range id = %v, want ErrUnknownTrack", err)
+	}
+	if chans := c.SessionInfo().Channels; len(chans) != 0 {
+		t.Errorf("Channels = %v, want none claimed after rejected Setups", chans)
+	}
+}
+
+// A second Setup for a track already set up would publish a second pipeline and
+// a second channel pair under one track ID, and per-track stats are keyed by
+// that ID.
+func TestSetupRejectsRepeatedTrack(t *testing.T) {
+	c, tracks := describeOne(t, aacSDP, func(sc *testserver.ServerConn) {
+		answerSetup(t, sc, 0, 1, 0, 1)
+		drainRequests(sc)
+	})
+	defer closeAndWait(t, c)
+
+	if err := c.Setup(context.Background(), tracks[0], rtsp.SetupOptions{}); err != nil {
+		t.Fatalf("Setup: %v", err)
+	}
+	if err := c.Setup(context.Background(), tracks[0], rtsp.SetupOptions{}); !errors.Is(err, rtsp.ErrTrackAlreadySetUp) {
+		t.Errorf("second Setup for the same track = %v, want ErrTrackAlreadySetUp", err)
+	}
+	if chans := c.SessionInfo().Channels; len(chans) != 1 {
+		t.Errorf("Channels = %v, want the single original pair", chans)
 	}
 }

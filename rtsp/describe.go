@@ -3,6 +3,7 @@ package rtsp
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 
 	audiostream "github.com/tphakala/go-audio-stream"
@@ -29,13 +30,23 @@ type describedTrack struct {
 }
 
 // Describe issues a DESCRIBE, parses the SDP body, resolves the session base
-// and per-track control URLs via the M4a resolvers, and returns the discovered
-// tracks. It is a one-shot transition from the idle state; a second call or a
-// call out of order returns a *StateError (matching ErrInvalidState). Auth
-// retries and redirects inside the call are internal and are not transitions.
-// A 3xx response surfaces as *audiostream.RedirectError and is never followed;
-// any other non-2xx as *ResponseError; both leave the session open so the
-// caller may Close.
+// and per-track control URLs, and returns the discovered tracks. It is legal
+// only in the idle state, else it returns a *StateError (matching
+// ErrInvalidState).
+//
+// The transition happens only on success: a Describe that fails while parsing
+// the response leaves the client idle, so it may be retried. Once one has
+// succeeded, a second call returns a *StateError.
+//
+// Errors it can return: *audiostream.RedirectError for a 3xx, which is never
+// followed; *UnauthorizedError for a 401, which the caller must currently
+// answer itself because no authentication retry is wired into this verb yet;
+// *ResponseError for any other non-2xx; ErrNotSDP when the response body is
+// not application/sdp. All of them leave the session open so the caller may
+// Close or retry.
+//
+// A 2xx whose body parses but declares no media sections yields an empty track
+// slice and a nil error, and still transitions to the described state.
 func (c *Client) Describe(ctx context.Context) ([]Track, error) {
 	c.mu.Lock()
 	if c.state != stateIdle {
@@ -93,14 +104,14 @@ func (c *Client) do(ctx context.Context, req *Request) (*Response, error) {
 // ErrNotSDP.
 func checkSDPContentType(value string) error {
 	if value == "" {
-		return ErrNotSDP
+		return fmt.Errorf("%w: response carried no Content-Type", ErrNotSDP)
 	}
 	base := value
 	if i := strings.IndexByte(base, ';'); i >= 0 {
 		base = base[:i]
 	}
 	if !strings.EqualFold(strings.TrimSpace(base), sdpContentType) {
-		return ErrNotSDP
+		return fmt.Errorf("%w: Content-Type is %q", ErrNotSDP, value)
 	}
 	return nil
 }

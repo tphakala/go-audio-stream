@@ -2,6 +2,8 @@ package rtsp
 
 import (
 	"log/slog"
+	"maps"
+	"math"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -12,13 +14,21 @@ import (
 	"github.com/tphakala/go-audio-stream/rtsp/sdp"
 )
 
-// aacHbrMode is the only RFC 3640 mode this milestone depacketizes; any other
-// mode (for example MP4A-LATM) degrades to raw payload delivery.
+// aacHbrMode is the only RFC 3640 mode this milestone depacketizes. The other
+// modes that RFC defines (generic, CELP-cbr, CELP-vbr, AAC-lbr) degrade to raw
+// payload delivery. Note this is the fmtp "mode=" value under an
+// mpeg4-generic rtpmap, not an encoding name: a track carrying a different
+// encoding name, MP4A-LATM among them, never reaches this comparison, because
+// the SDP layer maps only MPEG4-GENERIC to CodecAAC and everything else lands
+// on newTrack's unrecognized-codec path.
 const aacHbrMode = "AAC-hbr"
 
-// aacSamplesPerFrame is the fixed AAC frame length assumed for intra-packet
-// PTS interpolation. Decision 7 defers 960-sample detection from the
-// AudioSpecificConfig, so 1024 (AAC-LC) is used for every AAC-hbr track.
+// aacSamplesPerFrame is the AAC frame length assumed for intra-packet PTS
+// interpolation. The format permits 960 as well, and the depacketizer accepts
+// any length, so this is a policy this package chose rather than a limit the
+// format imposes: detecting 960 requires decoding the AudioSpecificConfig,
+// which this milestone does not do, and 1024 is the AAC-LC value that cameras
+// emit. A 960-sample stream therefore drifts in PTS until that detection lands.
 const aacSamplesPerFrame = 1024
 
 // codecKind selects a track's per-codec delivery path in the reader.
@@ -40,9 +50,12 @@ const (
 // publishes it into the channel table by an atomic store; that store
 // establishes the happens-before edge, after which only the reader goroutine
 // mutates the non-atomic fields (stream, aac, baseTS/baseSet, seed, g711Buf).
-// The atomic stat and RR-snapshot fields are written by the reader and read by
-// Stats and the keepalive timer. A track is always referenced by pointer and
-// never copied.
+// A track is always referenced by pointer and never copied.
+//
+// The atomic fields below are declared for the readers and writers that arrive
+// with frame delivery; nothing reads or writes them yet. They are atomic
+// because that is the access discipline those callers will need, not because
+// anything races over them today.
 type track struct {
 	id          int
 	kind        codecKind
@@ -61,14 +74,16 @@ type track struct {
 	hasSeed bool
 	g711Buf []byte
 
-	// Per-track receive counters: reader writes, Stats reads.
+	// Per-track receive counters. The reader will write these and Stats will
+	// read them once delivery lands; both are unwired today.
 	packets    atomic.Uint64
 	bytes      atomic.Uint64
 	seqGaps    atomic.Uint64
 	malformed  atomic.Uint64
 	ssrcResets atomic.Uint64
 
-	// RTCP Receiver Report snapshot: reader writes, keepalive timer reads.
+	// RTCP Receiver Report snapshot. The reader will write these and the
+	// keepalive timer will read them; both arrive with delivery.
 	rrHighestSeq     atomic.Uint32
 	rrCumulativeLost atomic.Uint32
 	senderSSRC       atomic.Uint32
@@ -77,11 +92,18 @@ type track struct {
 }
 
 // newTrack builds a track's depacketization pipeline from its resolved
-// descriptor and the negotiated interleaved channels. It selects the
-// depacketizer by codec: an AAC-hbr fmtp yields an aac.Depacketizer; a
-// non-AAC-hbr mode, an unrecognized codec, video, or an invalid fmtp falls
-// back to raw payload delivery with a logged warning. It never fails, so a
-// quirky fmtp degrades one track to raw rather than failing Setup.
+// descriptor and the negotiated interleaved channels.
+//
+// It dispatches on the codec, but only after confirming the track is audio.
+// The SDP layer resolves the codec from the a=rtpmap encoding name without
+// regard to the m= kind, so a video section advertising MPEG4-GENERIC/90000
+// resolves to CodecAAC; without the media check its payloads would be fed to
+// the AAC access-unit parser and emitted as audio frames with a PTS derived
+// from a 90 kHz video clock.
+//
+// A non-audio track, an unrecognized codec, a non-AAC-hbr mode, or an invalid
+// fmtp falls back to raw payload delivery with a logged warning. It never
+// fails, so a quirky fmtp degrades one track to raw rather than failing Setup.
 func newTrack(id int, desc describedTrack, opts SetupOptions, rtpCh, rtcpCh int, logger *slog.Logger) *track {
 	tr := &track{
 		id:          id,
@@ -90,6 +112,11 @@ func newTrack(id int, desc describedTrack, opts SetupOptions, rtpCh, rtcpCh int,
 		discard:     opts.Discard,
 		rtpChannel:  rtpCh,
 		rtcpChannel: rtcpCh,
+	}
+	if desc.media != audiostream.MediaAudio {
+		logWarn(logger, "track is not audio; delivering raw payloads",
+			"track", id, "media", desc.media.String())
+		return tr
 	}
 	switch codec := desc.codec.(type) {
 	case audiostream.CodecAAC:
@@ -100,16 +127,23 @@ func newTrack(id int, desc describedTrack, opts SetupOptions, rtpCh, rtcpCh int,
 		tr.kind = deliverG711
 		tr.law = codec.Law
 	default:
-		tr.kind = deliverRaw
+		logWarn(logger, "unrecognized codec; delivering raw payloads", "track", id)
 	}
 	return tr
 }
 
 // clockRateTicks converts an SDP clock rate to the uint64 tick rate used for
-// PTS math, clamping a negative or missing rate to zero (ptsOf treats zero as
-// "unknown" and reports a zero PTS).
+// PTS math. Zero is the "rate unknown" sentinel: PTS interpolation is skipped
+// for such a track rather than dividing by it, so a missing or nonsensical
+// a=rtpmap rate costs timestamps, not a panic.
+//
+// Both bounds are enforced here because this is where the value crosses from
+// the SDP into arithmetic. The rate is remote input parsed with a plain Atoi,
+// so it can arrive negative or far beyond anything meaningful; RTP timestamps
+// are 32 bits by definition, so a rate above MaxUint32 cannot describe a real
+// stream and would silently wrap the first time it is narrowed.
 func clockRateTicks(rate int) uint64 {
-	if rate <= 0 {
+	if rate <= 0 || int64(rate) > math.MaxUint32 {
 		return 0
 	}
 	return uint64(rate)
@@ -127,16 +161,17 @@ func (tr *track) configureAAC(params *sdp.AACParams, logger *slog.Logger) {
 	dp, err := aac.New(configFromAAC(params))
 	if err != nil {
 		tr.kind = deliverRaw
-		logWarn(logger, "aac fmtp invalid; delivering raw payloads", "error", err.Error())
+		logWarn(logger, "aac fmtp invalid; delivering raw payloads", "error", err)
 		return
 	}
 	tr.kind = deliverAAC
 	tr.aac = dp
 }
 
-// configFromAAC maps SDP MPEG4-GENERIC fmtp parameters to an aac.Config with
-// SamplesPerFrame fixed at 1024 (decision 7). aac.New validates the field
-// widths.
+// configFromAAC maps SDP MPEG4-GENERIC fmtp parameters to an aac.Config.
+// SamplesPerFrame is fixed at aacSamplesPerFrame; see that constant for why
+// this package does not detect the 960-sample case. aac.New validates the
+// field widths.
 func configFromAAC(p *sdp.AACParams) aac.Config {
 	return aac.Config{
 		SizeLength:       p.SizeLength,
@@ -169,8 +204,9 @@ type channelBinding struct {
 }
 
 // channelTable is an immutable channel-to-track routing table. Setup publishes
-// a new table by copy-on-write and an atomic store; the reader loads it
-// lock-free on every interleaved frame and never mutates it.
+// a new table by copy-on-write and an atomic store. It is immutable so that the
+// reader can load it lock-free on every interleaved frame once it routes them;
+// nothing reads it yet, and the reader will never mutate it.
 type channelTable struct {
 	bindings map[int]channelBinding
 }
@@ -194,17 +230,16 @@ func newChannelTable(old *channelTable, tr *track, rtpCh, rtcpCh int) *channelTa
 	}
 	bindings := make(map[int]channelBinding, size)
 	if old != nil {
-		for ch, b := range old.bindings {
-			bindings[ch] = b
-		}
+		maps.Copy(bindings, old.bindings)
 	}
 	bindings[rtpCh] = channelBinding{track: tr, isRTCP: false}
 	bindings[rtcpCh] = channelBinding{track: tr, isRTCP: true}
 	return &channelTable{bindings: bindings}
 }
 
-// logWarn logs at warn level when a logger is configured. Credentials are
-// never passed to it; only codec and channel diagnostics.
+// logWarn logs at warn level when a logger is configured. Callers must not
+// pass credentials: URLs go through RedactURL first, and no call site passes a
+// password, a nonce, or an Authorization value.
 func logWarn(logger *slog.Logger, msg string, args ...any) {
 	if logger != nil {
 		logger.Warn(msg, args...)

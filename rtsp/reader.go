@@ -191,10 +191,11 @@ func (c *Client) resyncOne() bool {
 	return true
 }
 
-// handleInterleaved handles one interleaved frame. In this milestone no track
-// is set up, so there is nothing to route to and every frame is skipped. The
-// interleaved-channel routing table, per-track depacketization, and OnFrame
-// delivery are added in a later task.
+// handleInterleaved handles one interleaved frame. Setup now publishes a
+// channel-to-track routing table, but this function does not consult it yet, so
+// every frame is still skipped. Routing, per-track depacketization and OnFrame
+// delivery are added in a later task, which is also when the resync gate above
+// gains its semantic discriminator.
 func (c *Client) handleInterleaved(f InterleavedFrame) {
 	// Stamped here even though nothing is routed yet. armReadDeadline derives
 	// the watchdog deadline from this value, so if Play set playing before the

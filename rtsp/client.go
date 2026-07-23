@@ -58,8 +58,10 @@ type ChannelPair struct {
 
 // SessionInfo is a read-only snapshot of the negotiated session, for
 // diagnostics such as a handshake walkthrough tool. It carries no credentials
-// and no counters. Every field except KeepaliveMethod is populated by the
-// lifecycle verbs, so on a freshly dialed client only KeepaliveMethod is set.
+// and no counters. Dial sets KeepaliveMethod; Setup sets SessionID,
+// SessionTimeout and Channels. AuthScheme stays AuthNone until the
+// authentication retry is wired into the lifecycle verbs, which has not
+// happened yet, so it currently reports AuthNone on every client.
 type SessionInfo struct {
 	// SessionID is the negotiated RTSP session identifier, "" before Setup.
 	SessionID string
@@ -111,15 +113,16 @@ type Client struct {
 	// so Setup can build the pipeline without re-parsing the SDP. Written by
 	// Describe under mu, read by Setup under mu.
 	described []describedTrack
-	// tracks holds the constructed per-track pipelines in Setup order. Appended
-	// by Setup under mu; read by Stats.
+	// tracks holds the constructed per-track pipelines in Setup order, appended
+	// by Setup under mu. Stats will read it once per-track counting is wired;
+	// nothing reads it today.
 	tracks []*track
 
-	// channels is the immutable channel-to-track routing table the reader loads
-	// lock-free on every interleaved frame. Setup publishes a new table by
-	// copy-on-write and an atomic store; the reader only ever loads it. It is
-	// outside mu deliberately: the reader must never block on the lock the
-	// lifecycle calls hold.
+	// channels is the immutable channel-to-track routing table. Setup publishes
+	// a new table by copy-on-write and an atomic store. It sits outside mu so
+	// that the reader can load it lock-free once it routes frames, rather than
+	// blocking on the lock the lifecycle calls hold; that routing has not
+	// landed, so nothing loads it yet.
 	channels atomic.Pointer[channelTable]
 
 	// lastFrameAt is the watchdog clock (UnixNano), written by the reader on
@@ -325,8 +328,9 @@ func (c *Client) Wait(ctx context.Context) error {
 }
 
 // Stats returns a snapshot of per-track receive counters in a freshly
-// allocated map that never aliases internal state. No track can be set up yet,
-// so the map is always empty; per-track counting arrives with Setup.
+// allocated map that never aliases internal state. The map is always empty
+// today: tracks can be set up, but nothing increments their counters until
+// frame delivery lands, so reporting them would only assert zeros.
 func (c *Client) Stats() audiostream.Stats {
 	return audiostream.Stats{Tracks: make(map[int]audiostream.TrackStats)}
 }
