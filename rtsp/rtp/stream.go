@@ -101,7 +101,19 @@ func (s *Stream) extendTS(ts uint32) uint64 {
 	if d < 0x80000000 {
 		return s.ts64 + uint64(d) // forward, including 32-bit wrap
 	}
-	return s.ts64 - uint64(-d) // small backward step
+
+	// Backward step. Negating a uint32 yields 2^32-d, which for
+	// d >= 2^31 is exactly the backward magnitude. Clamp at zero: the
+	// running value starts at the first packet's raw 32-bit timestamp,
+	// so a stream that begins just after a timestamp wrap can see a
+	// step reaching back further than everything accumulated so far,
+	// and an unsigned subtraction would report that as an enormous
+	// timestamp rather than one near the start of the stream.
+	back := uint64(-d)
+	if back > s.ts64 {
+		return 0
+	}
+	return s.ts64 - back
 }
 
 // StreamStats is a snapshot of a Stream's cumulative counters.

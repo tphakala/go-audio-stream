@@ -15,7 +15,8 @@ const (
 
 var (
 	// ErrShortPacket is returned when the buffer is shorter than the
-	// fixed header, CSRC list, or declared header extension.
+	// fixed header or the declared CSRC list. A truncated header
+	// extension reports ErrTruncatedExtension instead.
 	ErrShortPacket = errors.New("rtp: packet shorter than fixed header")
 	// ErrVersion is returned when the RTP version is not 2.
 	ErrVersion = errors.New("rtp: unsupported version")

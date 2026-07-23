@@ -76,3 +76,33 @@ func TestStreamSSRCReset(t *testing.T) {
 		t.Errorf("ssrc resets = %d, want 1", st.SSRCResets)
 	}
 }
+
+func TestObserveBackwardTimestampBeforeStreamStartClampsToZero(t *testing.T) {
+	t.Parallel()
+	// The running 64-bit timestamp starts at the first packet's raw
+	// 32-bit value, so a stream that begins just after a timestamp wrap
+	// can receive a duplicate from just before it. That step reaches
+	// back further than everything accumulated so far, and an unsigned
+	// subtraction would report it as a timestamp near 2^64 instead of
+	// one near the start of the stream.
+	var s rtp.Stream
+
+	first := s.Observe(rtp.Header{SSRC: 1, SequenceNumber: 100, Timestamp: 100})
+	if first.Timestamp != 100 {
+		t.Fatalf("first Timestamp = %d, want 100", first.Timestamp)
+	}
+
+	// 396 ticks before the first packet, having wrapped past zero.
+	const beforeWrap = uint32(4294966900)
+	got := s.Observe(rtp.Header{SSRC: 1, SequenceNumber: 99, Timestamp: beforeWrap})
+
+	if !got.Duplicate {
+		t.Errorf("Duplicate = false, want true for a backward sequence step")
+	}
+	if got.Timestamp != 0 {
+		t.Errorf("Timestamp = %d, want 0 (clamped, not an unsigned underflow)", got.Timestamp)
+	}
+	if got.Timestamp > 1<<32 {
+		t.Errorf("Timestamp = %d underflowed past the 32-bit range", got.Timestamp)
+	}
+}
