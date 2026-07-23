@@ -39,6 +39,8 @@ tasks:
       - go test -run '^$' -fuzz '^FuzzParse$' -fuzztime=2m ./rtsp/sdp
       - go test -run '^$' -fuzz '^FuzzParsePacket$' -fuzztime=2m ./rtsp/rtp
       - go test -run '^$' -fuzz '^FuzzParseCompound$' -fuzztime=2m ./rtsp/rtp
+      - go test -run '^$' -fuzz '^FuzzParseAUHeaders$' -fuzztime=2m ./depacket/aac
+      - go test -run '^$' -fuzz '^FuzzDepacketize$' -fuzztime=2m ./depacket/aac
 
   tidy:
     desc: Tidy and verify go.mod
