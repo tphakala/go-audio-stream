@@ -161,3 +161,48 @@ func TestParseLenient(t *testing.T) {
 		_ = s.Codecs() // Codecs must also stay total over these inputs
 	}
 }
+
+func TestParseSkipsOutOfRangePayloadTypes(t *testing.T) {
+	t.Parallel()
+	// An RTP payload type is 7 bits, so an m= line can only ever declare
+	// 0 to 127. Attributes naming anything outside that range are skipped
+	// rather than stored, so a caller ranging over RTPMaps or FMTPs never
+	// sees a key that Formats could not contain.
+	body := []byte("v=0\r\n" +
+		"m=audio 0 RTP/AVP 97\r\n" +
+		"a=rtpmap:97 opus/48000/2\r\n" +
+		"a=rtpmap:128 BOGUS/8000\r\n" +
+		"a=rtpmap:-1 BOGUS/8000\r\n" +
+		"a=rtpmap:99999 BOGUS/8000\r\n" +
+		"a=fmtp:128 mode=bogus\r\n" +
+		"a=fmtp:-1 mode=bogus\r\n")
+
+	s, err := sdp.Parse(body)
+	if err != nil {
+		t.Fatalf("Parse() = %v, want nil", err)
+	}
+	if len(s.Media) != 1 {
+		t.Fatalf("len(Media) = %d, want 1", len(s.Media))
+	}
+	m := s.Media[0]
+
+	if len(m.RTPMaps) != 1 {
+		t.Errorf("len(RTPMaps) = %d, want 1 (only payload type 97): %v", len(m.RTPMaps), m.RTPMaps)
+	}
+	if _, ok := m.RTPMaps[97]; !ok {
+		t.Error("RTPMaps is missing the valid payload type 97")
+	}
+	if len(m.FMTPs) != 0 {
+		t.Errorf("len(FMTPs) = %d, want 0 (both fmtp lines are out of range): %v", len(m.FMTPs), m.FMTPs)
+	}
+	for pt := range m.RTPMaps {
+		if pt < 0 || pt > 127 {
+			t.Errorf("RTPMaps holds out-of-range payload type %d", pt)
+		}
+	}
+	for pt := range m.FMTPs {
+		if pt < 0 || pt > 127 {
+			t.Errorf("FMTPs holds out-of-range payload type %d", pt)
+		}
+	}
+}

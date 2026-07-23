@@ -22,7 +22,10 @@ func Parse(body []byte) (*Session, error) {
 	sessionAttrs := 0
 	mediaAttrs := 0
 
-	for _, raw := range strings.Split(string(body), "\n") {
+	// SplitSeq walks the lines without materializing a slice of every
+	// line first, so a body that is nothing but newlines costs no more
+	// than the body itself.
+	for raw := range strings.SplitSeq(string(body), "\n") {
 		line := strings.TrimSuffix(raw, "\r")
 		if line == "" {
 			continue
@@ -94,7 +97,7 @@ func parseMediaLine(val string) Media {
 	if len(fields) > 3 {
 		for _, tok := range fields[3:] {
 			pt, err := strconv.Atoi(tok)
-			if err != nil || pt < 0 || pt > 127 {
+			if err != nil || !validPayloadType(pt) {
 				continue
 			}
 			m.Formats = append(m.Formats, pt)
@@ -149,7 +152,7 @@ func parseRTPMap(value string, current *Media) {
 		return
 	}
 	pt, err := strconv.Atoi(parts[0])
-	if err != nil {
+	if err != nil || !validPayloadType(pt) {
 		return
 	}
 
@@ -178,6 +181,17 @@ func parseRTPMap(value string, current *Media) {
 	}
 }
 
+// maxPayloadType is the largest RTP payload type, which the RTP header
+// carries in 7 bits (RFC 3550 section 5.1).
+const maxPayloadType = 127
+
+// validPayloadType reports whether pt is a payload type an m= line could
+// have declared. Attributes naming anything else are skipped, so every
+// key in RTPMaps and FMTPs is one Formats can actually contain.
+func validPayloadType(pt int) bool {
+	return pt >= 0 && pt <= maxPayloadType
+}
+
 // parseFMTP parses "<pt> <params...>" and stores the raw params string in
 // current.FMTPs. It skips the whole fmtp on any malformation.
 func parseFMTP(value string, current *Media) {
@@ -188,7 +202,7 @@ func parseFMTP(value string, current *Media) {
 		return
 	}
 	pt, err := strconv.Atoi(parts[0])
-	if err != nil {
+	if err != nil || !validPayloadType(pt) {
 		return
 	}
 	current.FMTPs[pt] = parts[1]
