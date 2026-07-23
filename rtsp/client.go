@@ -100,6 +100,17 @@ type Client struct {
 	pending map[int]chan *Response
 	cseq    atomic.Uint32
 
+	// lifecycleMu serializes one lifecycle call end to end, across its network
+	// round trip. Client documents that Describe, Setup and Play come from a
+	// single goroutine, and mu alone cannot enforce that: each verb validates
+	// under mu, releases it for the round trip, then re-acquires it to commit,
+	// so two concurrent Setups would both pass the already-set-up check and
+	// both propose the same channel pair, and the second would overwrite the
+	// first's binding in the routing table with no error. Holding this for the
+	// whole call makes the documented contract structural. Lock order is
+	// lifecycleMu then mu, never the reverse.
+	lifecycleMu sync.Mutex
+
 	// mu guards the state machine and negotiated session fields below.
 	mu              sync.Mutex
 	state           state

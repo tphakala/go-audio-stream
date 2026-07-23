@@ -71,10 +71,19 @@ func serve(t *testing.T, sc *testserver.ServerConn, wantMethod string, code int,
 // sdpHeaders builds a DESCRIBE response header set with an application/sdp
 // Content-Type and an optional Content-Base.
 func sdpHeaders(contentBase string) rtsp.Header {
+	return sdpHeadersFull(contentBase, "")
+}
+
+// sdpHeadersFull additionally sets Content-Location, which ResolveBaseURL falls
+// back to when Content-Base is absent.
+func sdpHeadersFull(contentBase, contentLocation string) rtsp.Header {
 	h := rtsp.Header{}
 	h.Set("Content-Type", "application/sdp")
 	if contentBase != "" {
 		h.Set("Content-Base", contentBase)
+	}
+	if contentLocation != "" {
+		h.Set("Content-Location", contentLocation)
 	}
 	return h
 }
@@ -338,27 +347,30 @@ func TestControlURLVariants(t *testing.T) {
 	// before the server starts and captured read-only by the handler.
 	const trailingBase = "rtsp://cam.example/stream/"
 	cases := []struct {
-		name        string
-		control     string
-		contentBase string // "" omits Content-Base
-		wantSuffix  string // appended to the dial host base (scheme://host:port)
-		wantFixed   string // non-empty overrides wantSuffix with an absolute URL
+		name            string
+		control         string
+		contentBase     string // "" omits Content-Base
+		contentLocation string // "" omits Content-Location
+		wantSuffix      string // appended to the dial host base (scheme://host:port)
+		wantFixed       string // non-empty overrides wantSuffix with an absolute URL
 	}{
 		{name: "bare token", control: controlTrackID1, wantSuffix: "/stream/trackID=1"},
 		{name: "trailing-slash base", control: controlTrackID1, contentBase: trailingBase, wantFixed: "rtsp://cam.example/stream/trackID=1"},
 		{name: "absolute wrong host", control: "rtsp://192.168.1.99:554/wrong/track1", wantSuffix: "/wrong/track1"},
 		{name: "query only", control: "?ctl=1", wantSuffix: "/stream?ctl=1"},
 		{name: "star", control: "*", wantSuffix: "/stream"},
-		{name: "missing content-base", control: controlTrackID1, wantSuffix: "/stream/trackID=1"},
+		// Content-Base absent, so ResolveBaseURL falls back to Content-Location.
+		// The previous row here repeated "bare token" verbatim and tested nothing.
+		{name: "content-location fallback", control: controlTrackID1, contentLocation: trailingBase, wantFixed: "rtsp://cam.example/stream/trackID=1"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			sdpBody := []byte("v=0\r\nm=audio 0 RTP/AVP 0\r\na=control:" + tc.control + "\r\n")
-			contentBase := tc.contentBase
+			contentBase, contentLocation := tc.contentBase, tc.contentLocation
 			gotCh := make(chan string, 1)
 			s := testserver.New(t, testserver.Options{Handle: func(sc *testserver.ServerConn) {
 				serve(t, sc, methodOptions, 200, "OK", publicHeader(), nil)
-				serve(t, sc, methodDescribe, 200, "OK", sdpHeaders(contentBase), sdpBody)
+				serve(t, sc, methodDescribe, 200, "OK", sdpHeadersFull(contentBase, contentLocation), sdpBody)
 				req, err := sc.ReadRequest()
 				if err != nil {
 					return

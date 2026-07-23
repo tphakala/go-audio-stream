@@ -48,6 +48,9 @@ type describedTrack struct {
 // A 2xx whose body parses but declares no media sections yields an empty track
 // slice and a nil error, and still transitions to the described state.
 func (c *Client) Describe(ctx context.Context) ([]Track, error) {
+	c.lifecycleMu.Lock()
+	defer c.lifecycleMu.Unlock()
+
 	c.mu.Lock()
 	if c.state != stateIdle {
 		st := c.state.String()

@@ -49,7 +49,13 @@ var (
 // streaming two tracks over one channel once PLAY starts the aggregate session.
 //
 // On success it transitions the client into the setup state.
+//
+// Concurrent Setup calls are outside the documented contract, but they
+// serialize rather than corrupting the routing table.
 func (c *Client) Setup(ctx context.Context, trk Track, opts SetupOptions) error {
+	c.lifecycleMu.Lock()
+	defer c.lifecycleMu.Unlock()
+
 	desc, err := c.describedTrackFor(trk)
 	if err != nil {
 		return err
