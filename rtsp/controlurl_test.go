@@ -15,6 +15,7 @@ const (
 	streamURLWithAuth      = "rtsp://user:pass@cam:554/stream"
 	streamURLNoAuth        = "rtsp://cam:554/stream"
 	controlTrackID1        = "trackID=1"
+	controlQueryTrackID1   = "?trackID=1"
 	resolvedStreamTrackID1 = "rtsp://user:pass@cam:554/stream/trackID=1"
 	onvifTrackWithSSRC     = "rtsp://cam:554/onvif1/track1?ssrc=1"
 )
@@ -103,8 +104,32 @@ func TestResolveControlURL(t *testing.T) {
 		{
 			name:    "C4 query-only control",
 			base:    streamURLNoAuth,
-			control: "?trackID=1",
+			control: controlQueryTrackID1,
 			want:    "rtsp://cam:554/stream?trackID=1",
+		},
+		// The base-carrying-a-query cases. Appending is textual, so a
+		// non-"?" control lands inside the existing query rather than after
+		// it. These pin the current behaviour so it cannot drift silently:
+		// re-attaching the query after the control path would rewrite every
+		// request URL sent to a token-authenticated camera, so that change
+		// needs live-hardware evidence, not a passing unit test.
+		{
+			name:    "C4a relative control appends inside an existing query",
+			base:    "rtsp://cam:554/stream?token=abc",
+			control: controlTrackID1,
+			want:    "rtsp://cam:554/stream?token=abc/trackID=1",
+		},
+		{
+			name:    "C4b query-only control extends an existing query",
+			base:    "rtsp://cam:554/stream?token=abc",
+			control: controlQueryTrackID1,
+			want:    "rtsp://cam:554/stream?token=abc?trackID=1",
+		},
+		{
+			name:    "C4c absolute control keeps its own query, not the base's",
+			base:    "rtsp://user:pass@cam:554/stream?token=abc",
+			control: "rtsp://0.0.0.0/stream/trackID=1?sub=2",
+			want:    "rtsp://user:pass@cam:554/stream/trackID=1?sub=2",
 		},
 		{
 			name:    "C5 absolute with wrong LAN host",
@@ -174,6 +199,61 @@ func TestResolveControlURLInvalidBase(t *testing.T) {
 	_, err := rtsp.ResolveControlURL("://bad", "trackID=1")
 	if !errors.Is(err, rtsp.ErrInvalidURL) {
 		t.Fatalf("ResolveControlURL error = %v, want ErrInvalidURL", err)
+	}
+}
+
+// The a=control value is remote input. A control carrying CR or LF must not
+// come back as a "resolved" URL, or it becomes a request-line injection the
+// moment a caller puts it on the wire.
+func TestResolveControlURLRejectsControlCharacters(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		control string
+	}{
+		{"crlf injecting a header", "trackID=1\r\nX-Injected: evil"},
+		{"bare cr", "trackID=1\rEvil"},
+		{"bare lf", "trackID=1\nEvil"},
+		{"nul byte", "trackID=1\x00"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := rtsp.ResolveControlURL(streamURLNoAuth, tt.control)
+			if !errors.Is(err, rtsp.ErrInvalidURL) {
+				t.Fatalf("ResolveControlURL(%q) error = %v, want ErrInvalidURL", tt.control, err)
+			}
+			if got != "" {
+				t.Fatalf("ResolveControlURL(%q) = %q, want empty on error", tt.control, got)
+			}
+		})
+	}
+}
+
+// A URL with no "//" authority still parses, but into Opaque with User nil,
+// so the ordinary userinfo redaction never fires on it.
+func TestRedactURLOpaqueFormDoesNotLeakPassword(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		in   string
+	}{
+		{"opaque with credentials", "rtsp:user:secret@cam:554/stream"},
+		{"opaque without path", "rtsp:user:secret@cam:554"},
+		{"opaque password containing at sign", "rtsp:user:sec@ret@cam:554/stream"},
+		{"unparseable opaque form", "rtsp:user:secret@ho st/x"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := rtsp.RedactURL(tt.in)
+			if strings.Contains(got, "secret") {
+				t.Fatalf("RedactURL(%q) leaked password: %q", tt.in, got)
+			}
+			if !strings.Contains(got, "REDACTED") {
+				t.Fatalf("RedactURL(%q) did not mask userinfo: %q", tt.in, got)
+			}
+		})
 	}
 }
 

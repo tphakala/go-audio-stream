@@ -74,6 +74,21 @@ func ResolveBaseURL(requestURL, contentBase, contentLocation string) (string, er
 //     or "?", or when base already ends with "/". A "?"-leading control
 //     attaches directly after base (extending its query).
 //
+// Appending is textual and deliberate, not RFC 3986 reference resolution: a
+// control value like "trackID=1" is not a valid relative reference, and
+// resolving it as one would drop the base's last path segment entirely.
+//
+// One consequence is worth knowing. When base already carries a query, the
+// appended segment lands INSIDE that query: "rtsp://h/s?token=a" plus
+// "trackID=1" gives "rtsp://h/s?token=a/trackID=1", which re-parses with
+// RawQuery "token=a/trackID=1" rather than as a new path segment. The string
+// is a well-formed URL and this is the long-standing behaviour, so it is
+// pinned by test rather than changed blind; whether a query-bearing base
+// wants this form or "<path>/<control>?<query>" has not been confirmed
+// against real hardware. Revisit it with live camera testing before
+// changing it, since either choice silently rewrites every SETUP target for
+// token-authenticated cameras.
+//
 // The userinfo from base is preserved. It returns ErrInvalidURL when base
 // does not parse, and never panics.
 func ResolveControlURL(base, control string) (string, error) {
@@ -90,7 +105,17 @@ func ResolveControlURL(base, control string) (string, error) {
 		return resolveAbsoluteControl(baseURL, controlURL), nil
 	}
 
-	return resolveRelativeControl(base, control), nil
+	// The relative form is built by concatenation, so nothing has vetted the
+	// control text yet. It comes straight from the SDP a=control attribute,
+	// which is remote input: a value carrying CR or LF would otherwise be
+	// handed back as a "resolved" URL and could split a later request line.
+	// Re-parsing rejects control characters exactly as ResolveBaseURL does
+	// for its own result, so both resolvers return vetted output.
+	resolved := resolveRelativeControl(base, control)
+	if _, err := url.Parse(resolved); err != nil {
+		return "", ErrInvalidURL
+	}
+	return resolved, nil
 }
 
 // isRTSPScheme reports whether scheme is "rtsp" or "rtsps", case-insensitively.
@@ -142,26 +167,77 @@ func RedactURL(urlStr string) string {
 	if err != nil {
 		return redactFallback(urlStr)
 	}
-	if u.User == nil {
-		return urlStr
+	if u.User != nil {
+		u.User = url.User("REDACTED")
+		return u.String()
 	}
-	u.User = url.User("REDACTED")
-	return u.String()
+	// A URL with no "//" authority ("rtsp:user:pass@cam/stream") is still
+	// valid: net/url parses the whole remainder into Opaque and never
+	// populates User, so the branch above cannot fire and the credentials
+	// would survive into the log. Mask that shape explicitly.
+	if red, ok := redactOpaque(u.Opaque); ok {
+		u.Opaque = red
+		return u.String()
+	}
+	return urlStr
+}
+
+// isURIScheme reports whether s is a syntactically valid URI scheme per RFC
+// 3986: an ALPHA followed by ALPHA / DIGIT / "+" / "-" / ".". It gates the
+// redaction fallback so ordinary prose containing a colon is not mistaken
+// for a credential-bearing URL.
+func isURIScheme(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		ch := s[i]
+		switch {
+		case ch >= 'a' && ch <= 'z', ch >= 'A' && ch <= 'Z':
+		case i > 0 && (ch >= '0' && ch <= '9' || ch == '+' || ch == '-' || ch == '.'):
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// redactOpaque masks the userinfo of an opaque URI remainder shaped like
+// "userinfo@host/path", returning the masked remainder and true when that
+// shape is present. The authority ends at the first "/", and the userinfo
+// at the last "@" within it, so a password containing "@" cannot leave part
+// of itself behind.
+func redactOpaque(opaque string) (string, bool) {
+	authorityEnd := strings.IndexByte(opaque, '/')
+	if authorityEnd < 0 {
+		authorityEnd = len(opaque)
+	}
+	at := strings.LastIndex(opaque[:authorityEnd], "@")
+	if at < 0 {
+		return "", false
+	}
+	return "REDACTED" + opaque[at:], true
 }
 
 // redactFallback masks the userinfo of a string that failed strict URL
-// parsing by scanning for a "scheme://userinfo@host" shape: the substring
-// between the first "://" and the following "@" is replaced with
-// "REDACTED". A string without that shape is returned unchanged.
+// parsing by scanning for a "scheme://userinfo@host" shape, or the
+// authority-less "scheme:userinfo@host" shape, and replacing the userinfo
+// with "REDACTED". A string without either shape is returned unchanged.
 func redactFallback(urlStr string) string {
-	schemeEnd := strings.Index(urlStr, "://")
-	if schemeEnd < 0 {
+	var prefixLen int
+	switch i := strings.IndexByte(urlStr, ':'); {
+	case i < 0 || !isURIScheme(urlStr[:i]):
+		// No scheme at all, so this is not a URL and must be left alone
+		// rather than have arbitrary "word:word@word" text rewritten.
+		return urlStr
+	case strings.HasPrefix(urlStr[i:], "://"):
+		prefixLen = i + len("://")
+	default:
+		prefixLen = i + len(":")
+	}
+	red, ok := redactOpaque(urlStr[prefixLen:])
+	if !ok {
 		return urlStr
 	}
-	rest := urlStr[schemeEnd+len("://"):]
-	at := strings.Index(rest, "@")
-	if at < 0 {
-		return urlStr
-	}
-	return urlStr[:schemeEnd+len("://")] + "REDACTED" + rest[at:]
+	return urlStr[:prefixLen] + red
 }

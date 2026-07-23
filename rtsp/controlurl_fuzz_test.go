@@ -17,7 +17,7 @@ var controlURLSeeds = []struct {
 	{streamURLWithAuth, controlTrackID1},
 	{"rtsp://user:pass@cam:554/stream/", controlTrackID1},
 	{streamURLNoAuth, "/trackID=1"},
-	{streamURLNoAuth, "?trackID=1"},
+	{streamURLNoAuth, controlQueryTrackID1},
 	{streamURLWithAuth, "rtsp://192.168.1.10:554/stream/trackID=1"},
 	{streamURLWithAuth, "rtsp://0.0.0.0/audio"},
 	{streamURLNoAuth, "*"},

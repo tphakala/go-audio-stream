@@ -173,6 +173,15 @@ func TestParseSession(t *testing.T) {
 		{"extra param ignored", "66334873;timeout=90;foo=bar", "66334873", 90},
 		{"surrounding spaces trimmed", "  12345678  ", "12345678", 60},
 		{"empty value", "", "", 60},
+		// A non-positive or overflowing timeout must not reach the keepalive
+		// timer, which would fire continuously (or panic) on one. Each falls
+		// back to the default rather than being taken at face value.
+		{"zero timeout falls back to default", "12345678;timeout=0", "12345678", 60},
+		{"negative timeout falls back to default", "12345678;timeout=-30", "12345678", 60},
+		{"overflowing timeout falls back to default", "12345678;timeout=9223372037", "12345678", 60},
+		{"absurd timeout falls back to default", "12345678;timeout=99999999999999999999", "12345678", 60},
+		{"non-numeric timeout falls back to default", "12345678;timeout=abc", "12345678", 60},
+		{"largest representable timeout is accepted", "12345678;timeout=9223372036", "12345678", 9223372036},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

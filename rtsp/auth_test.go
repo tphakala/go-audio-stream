@@ -18,6 +18,76 @@ const (
 	testPassword  = "password"
 )
 
+// An explicitly empty qop must be answered with the RFC 2069 legacy form:
+// no qop, no nc, and no cnonce in the Authorization value. Asserting only
+// that Authorize returns no error would not catch it emitting a qop=auth
+// response built from an empty client nonce.
+func TestAuthorizeEmptyQOPUsesLegacyForm(t *testing.T) {
+	challenge := Challenge{
+		Scheme: AuthDigest,
+		Realm:  "r",
+		Params: map[string]string{paramRealm: "r", paramNonce: "n", paramQOP: ""},
+	}
+	got, err := Authorize(challenge, rfc7616Creds, DigestInput{Method: testMethodGET, URI: "/"})
+	if err != nil {
+		t.Fatalf("Authorize error = %v, want nil", err)
+	}
+	for _, forbidden := range []string{"qop=", "nc=", "cnonce="} {
+		if strings.Contains(got, forbidden) {
+			t.Fatalf("Authorize = %q, must not contain %q for an empty qop", got, forbidden)
+		}
+	}
+	if !strings.Contains(got, "response=") {
+		t.Fatalf("Authorize = %q, want a response parameter", got)
+	}
+}
+
+// A challenge whose only defect is an empty qop is still answerable, so
+// SelectChallenge must prefer it over Basic rather than skipping it.
+func TestSelectChallengeEmptyQOPStillUsable(t *testing.T) {
+	basic := Challenge{Scheme: AuthBasic, Realm: "b", Params: map[string]string{paramRealm: "b"}}
+	emptyQOP := Challenge{
+		Scheme: AuthDigest,
+		Realm:  "r",
+		Params: map[string]string{paramRealm: "r", paramNonce: "n", paramQOP: ""},
+	}
+	got, ok := SelectChallenge([]Challenge{basic, emptyQOP})
+	if !ok || got.Scheme != AuthDigest {
+		t.Fatalf("SelectChallenge = %#v ok=%v, want the digest challenge", got, ok)
+	}
+}
+
+// An unimplemented scheme must not leak its token into the params of a real
+// challenge that precedes it on the same header line. A scheme token often
+// ends in base64 "=" padding, which is what used to make it look like an
+// auth-param.
+func TestParseChallengesUnknownSchemeDoesNotPolluteParams(t *testing.T) {
+	got := ParseChallenges([]string{`Digest realm="r", nonce="n", NTLM TlRMTVNTUAABAAAA=`})
+	if len(got) != 1 {
+		t.Fatalf("ParseChallenges returned %d challenges, want 1: %#v", len(got), got)
+	}
+	c := got[0]
+	if c.Scheme != AuthDigest {
+		t.Fatalf("scheme = %v, want AuthDigest", c.Scheme)
+	}
+	want := map[string]string{paramRealm: "r", paramNonce: "n"}
+	if !reflect.DeepEqual(c.Params, want) {
+		t.Fatalf("params = %#v, want %#v", c.Params, want)
+	}
+}
+
+// RFC 7235 permits whitespace around an auth-param's "=", so a param written
+// that way must still parse rather than being mistaken for a scheme token.
+func TestParseChallengesAllowsWhitespaceAroundEquals(t *testing.T) {
+	got := ParseChallenges([]string{`Digest realm = "r", nonce = "n"`})
+	if len(got) != 1 {
+		t.Fatalf("ParseChallenges returned %d challenges, want 1: %#v", len(got), got)
+	}
+	if got[0].Params[paramNonce] != "n" || got[0].Realm != "r" {
+		t.Fatalf("params = %#v, want realm=r nonce=n", got[0].Params)
+	}
+}
+
 func TestParseChallenges(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -166,6 +236,14 @@ func TestSelectChallenge(t *testing.T) {
 	sha := Challenge{Scheme: AuthDigest, Realm: "r", Params: map[string]string{paramRealm: "r", paramNonce: "n", paramAlgorithm: algSHA256}}
 	digestNoAlg := Challenge{Scheme: AuthDigest, Realm: "r", Params: map[string]string{paramRealm: "r", paramNonce: "n"}}
 
+	// Digest challenges Authorize cannot answer. SelectChallenge must skip
+	// each of these rather than stranding the client on an unusable Digest
+	// when an answerable Basic challenge is also on offer.
+	digestNoNonce := Challenge{Scheme: AuthDigest, Realm: "r", Params: map[string]string{paramRealm: "r", paramAlgorithm: algMD5}}
+	digestBadAlg := Challenge{Scheme: AuthDigest, Realm: "r", Params: map[string]string{paramRealm: "r", paramNonce: "n", paramAlgorithm: "MD5-sess"}}
+	digestAuthIntOnly := Challenge{Scheme: AuthDigest, Realm: "r", Params: map[string]string{paramRealm: "r", paramNonce: "n", paramQOP: "auth-int"}}
+	digestAuthInList := Challenge{Scheme: AuthDigest, Realm: "r", Params: map[string]string{paramRealm: "r", paramNonce: "n", paramQOP: "auth-int,auth"}}
+
 	tests := []struct {
 		name   string
 		in     []Challenge
@@ -178,6 +256,15 @@ func TestSelectChallenge(t *testing.T) {
 		{"digest without algorithm beats basic", []Challenge{basic, digestNoAlg}, digestNoAlg, true},
 		{"basic only", []Challenge{basic}, basic, true},
 		{"none usable", nil, Challenge{}, false},
+		{"digest without nonce falls back to basic", []Challenge{basic, digestNoNonce}, basic, true},
+		{"digest with unsupported algorithm falls back to basic", []Challenge{basic, digestBadAlg}, basic, true},
+		{"digest offering only auth-int falls back to basic", []Challenge{basic, digestAuthIntOnly}, basic, true},
+		{"unusable sha256 does not preempt usable md5", []Challenge{
+			{Scheme: AuthDigest, Realm: "r", Params: map[string]string{paramRealm: "r", paramAlgorithm: algSHA256}},
+			md5,
+		}, md5, true},
+		{"qop list containing auth is usable", []Challenge{basic, digestAuthInList}, digestAuthInList, true},
+		{"no answerable challenge at all", []Challenge{digestNoNonce, digestBadAlg}, Challenge{}, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -398,6 +485,40 @@ func TestAuthorizeErrors(t *testing.T) {
 			challenge: Challenge{Scheme: AuthUnknown},
 			in:        DigestInput{},
 			wantErr:   ErrUnsupportedAuth,
+		},
+		{
+			// An explicitly empty qop is malformed, not an offer, so it is
+			// answered with the legacy no-qop form. Demanding a cnonce for a
+			// qop the server never named would fail a session needlessly.
+			name: "empty qop is treated as legacy no-qop",
+			challenge: Challenge{
+				Scheme: AuthDigest,
+				Realm:  "r",
+				Params: map[string]string{
+					paramRealm: "r",
+					paramNonce: "n",
+					paramQOP:   "",
+				},
+			},
+			in:      DigestInput{Method: testMethodGET, URI: "/"},
+			wantErr: nil,
+		},
+		{
+			// Answering "auth" to a challenge offering only auth-int would
+			// build a response the server must reject, so it is refused here
+			// rather than sent and failed on the wire.
+			name: "qop offers only auth-int",
+			challenge: Challenge{
+				Scheme: AuthDigest,
+				Realm:  "r",
+				Params: map[string]string{
+					paramRealm: "r",
+					paramNonce: "n",
+					paramQOP:   "auth-int",
+				},
+			},
+			in:      rfc7616Input(),
+			wantErr: ErrUnsupportedAuth,
 		},
 	}
 	for _, tt := range tests {

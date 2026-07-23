@@ -102,11 +102,22 @@ func parseChallengeValue(value string, challenges *[]Challenge) {
 			if rest != "" {
 				parseAuthParam(current, rest)
 			}
-		case !strings.Contains(head, "=") && (current == nil || !strings.Contains(segment, "=")):
-			// A bare token that is not Basic or Digest is an unimplemented
-			// scheme (Negotiate, NTLM) or garbage. Clear current so any
-			// following params are dropped with it.
-			current = nil
+		case !strings.Contains(head, "="):
+			// The segment opens with a bare token. RFC 7235 allows
+			// whitespace around an auth-param's "=", so "nonce = \"n\"" also
+			// lands here; it is a param exactly when the remainder starts
+			// with "=". Otherwise the token names an unimplemented scheme
+			// (Negotiate, NTLM) or is garbage, and current is cleared so any
+			// following params are dropped with it. Testing the remainder
+			// rather than the whole segment matters because a scheme's
+			// opaque token often carries base64 "=" padding, which would
+			// otherwise misfile the token as a param of the previous,
+			// unrelated challenge.
+			if strings.HasPrefix(rest, "=") {
+				parseAuthParam(current, segment)
+			} else {
+				current = nil
+			}
 		default:
 			// name=value auth-param for the current challenge.
 			parseAuthParam(current, segment)
@@ -217,12 +228,22 @@ func parseAuthParamValue(raw string) string {
 // first, then any other Digest, then Basic (matching the research report's
 // SHA-256 Digest > MD5 Digest > Basic ordering). It returns the challenge
 // and true, or a zero Challenge and false when none are usable.
+//
+// "Usable" means Authorize can actually answer it, so a Digest challenge
+// this client cannot compute a response for (no nonce, an unsupported
+// algorithm such as a -sess variant, or a qop that does not offer "auth")
+// is skipped rather than selected. Without that filter a server offering an
+// exotic Digest alongside Basic would strand the client on the Digest and
+// fail the session, even though the Basic challenge was answerable.
 func SelectChallenge(challenges []Challenge) (Challenge, bool) {
 	var digest, basic *Challenge
 	for i := range challenges {
 		c := &challenges[i]
 		switch c.Scheme {
 		case AuthDigest:
+			if !digestAnswerable(c) {
+				continue
+			}
 			if strings.EqualFold(c.Params[paramAlgorithm], algSHA256) {
 				return *c, true
 			}
@@ -244,6 +265,33 @@ func SelectChallenge(challenges []Challenge) (Challenge, bool) {
 		return *basic, true
 	}
 	return Challenge{}, false
+}
+
+// digestAnswerable reports whether digestAuthorization can build a response
+// for this Digest challenge. It mirrors that function's preconditions
+// exactly, so SelectChallenge never hands back a challenge Authorize would
+// reject.
+func digestAnswerable(c *Challenge) bool {
+	if c.Params[paramNonce] == "" {
+		return false
+	}
+	if _, err := digestHash(c.Params[paramAlgorithm]); err != nil {
+		return false
+	}
+	qop := strings.TrimSpace(c.Params[paramQOP])
+	return qop == "" || qopOffersAuth(qop)
+}
+
+// qopOffersAuth reports whether a qop parameter value offers the "auth"
+// qop-value this client answers with. The value is a comma-separated list,
+// for example `auth,auth-int`.
+func qopOffersAuth(qop string) bool {
+	for v := range strings.SplitSeq(qop, ",") {
+		if strings.EqualFold(strings.TrimSpace(v), qopAuth) {
+			return true
+		}
+	}
+	return false
 }
 
 // Sentinel errors from the Authorization builders.
@@ -291,10 +339,12 @@ type DigestInput struct {
 //   - qop=auth present: the full form with cnonce and nc from in.
 //   - qop absent (legacy RFC 2069): H(H(A1):nonce:H(A2)).
 //
-// It returns ErrUnsupportedAuth for an unknown scheme or an unsupported
-// algorithm (anything other than MD5, SHA-256, or absent), ErrMissingNonce
-// when a Digest challenge has no nonce, and ErrMissingCNonce when qop is
-// present but in.CNonce is empty. It never panics.
+// It returns ErrUnsupportedAuth for an unknown scheme, an unsupported
+// algorithm (anything other than MD5, SHA-256, or absent), or a qop that
+// does not offer "auth"; ErrMissingNonce when a Digest challenge has no
+// nonce; and ErrMissingCNonce when qop is present but in.CNonce is empty.
+// SelectChallenge screens for exactly these conditions, so a challenge it
+// returns is always answerable. It never panics.
 func Authorize(challenge Challenge, creds Credentials, in DigestInput) (string, error) {
 	switch challenge.Scheme {
 	case AuthBasic:
@@ -346,7 +396,17 @@ func digestAuthorization(challenge Challenge, creds Credentials, in DigestInput)
 		kvQuoted("uri", in.URI),
 	}
 
-	if _, hasQOP := challenge.Params[paramQOP]; hasQOP {
+	// An explicitly empty qop ("qop=\"\"") is malformed rather than a real
+	// offer, so it is treated as absent and answered with the RFC 2069
+	// legacy form. That is strictly more likely to authenticate than
+	// demanding a cnonce for a qop the server never actually named.
+	if qop := strings.TrimSpace(challenge.Params[paramQOP]); qop != "" {
+		// This client only implements qop=auth. Answering "auth" to a
+		// challenge that offers only auth-int would produce a response the
+		// server is bound to reject, so refuse it here instead.
+		if !qopOffersAuth(qop) {
+			return "", ErrUnsupportedAuth
+		}
 		if in.CNonce == "" {
 			return "", ErrMissingCNonce
 		}

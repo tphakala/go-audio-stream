@@ -2,6 +2,7 @@ package rtsp
 
 import (
 	"errors"
+	"math"
 	"strconv"
 	"strings"
 	"time"
@@ -29,10 +30,14 @@ var (
 type TransportHeader struct {
 	// Protocol is the transport-spec token, for example "RTP/AVP/TCP".
 	Protocol string
-	// Interleaved is true when a valid interleaved channel pair was present.
+	// Interleaved is true when an interleaved=a-b pair was present and both
+	// sides were numeric. It reports only that a pair was parsed, NOT that
+	// the pair is usable: the range and consecutiveness rules are enforced
+	// by InterleavedChannels, which is what callers must use before trusting
+	// the channel numbers.
 	Interleaved bool
-	// RTPChannel and RTCPChannel are the interleaved channel numbers, valid
-	// only when Interleaved is true.
+	// RTPChannel and RTCPChannel are the interleaved channel numbers as
+	// received, set only when Interleaved is true and still unvalidated.
 	RTPChannel  int
 	RTCPChannel int
 	// Unicast is true when unicast delivery was indicated.
@@ -49,9 +54,12 @@ type TransportHeader struct {
 // ParseTransport parses one Transport header field value (the server's
 // accepted transport-spec) into a TransportHeader. Parameters are
 // case-insensitive; unknown parameters are ignored; missing fields keep
-// their zero value. Only a valid consecutive interleaved pair (a-b) sets
-// Interleaved. It returns ErrMalformedTransport when the value has no
-// transport-spec token, and never panics.
+// their zero value. Any numeric interleaved=a-b pair sets Interleaved,
+// including a non-consecutive or out-of-range one; validation is deferred
+// to InterleavedChannels so a bad pair is reported as ErrBadChannelPair
+// rather than being silently dropped at parse time. It returns
+// ErrMalformedTransport when the value has no transport-spec token, and
+// never panics.
 func ParseTransport(value string) (TransportHeader, error) {
 	parts := strings.Split(value, ";")
 	protocol := strings.TrimSpace(parts[0])
@@ -94,10 +102,11 @@ func applyTransportParam(t *TransportHeader, param string) {
 	}
 }
 
-// parseInterleavedParam parses an interleaved=a[-b] value into t. A valid
-// consecutive-looking pair (both sides numeric) sets RTPChannel, RTCPChannel,
-// and Interleaved; a lone channel number sets only RTPChannel and leaves
-// Interleaved false; anything else is ignored.
+// parseInterleavedParam parses an interleaved=a[-b] value into t. Any pair
+// with both sides numeric sets RTPChannel, RTCPChannel, and Interleaved,
+// leaving the range and consecutiveness checks to InterleavedChannels; a
+// lone channel number sets only RTPChannel and leaves Interleaved false;
+// anything else is ignored.
 func parseInterleavedParam(t *TransportHeader, val string) {
 	rtpStr, rtcpStr, hasDash := strings.Cut(val, "-")
 	if hasDash {
@@ -141,6 +150,14 @@ func (t TransportHeader) InterleavedChannels(claimed map[int]bool) (rtp, rtcp in
 // TCP-interleaved profile with the given channel pair (RTP then RTCP):
 // "RTP/AVP/TCP;unicast;interleaved=<rtp>-<rtcp>". The server may renumber;
 // the response pair, validated by InterleavedChannels, is authoritative.
+//
+// The caller is responsible for passing a pair this package would itself
+// accept: 0 <= rtpChannel <= 254 and rtcpChannel == rtpChannel+1. This is a
+// pure serializer with no error return, so an out-of-range pair yields a
+// header the server will reject rather than a local error. The pair is
+// chosen by the client from its own per-session counter, never from remote
+// input, which is why the check belongs at the allocation site rather than
+// here.
 func BuildTransport(rtpChannel, rtcpChannel int) string {
 	return "RTP/AVP/TCP;unicast;interleaved=" + strconv.Itoa(rtpChannel) + "-" + strconv.Itoa(rtcpChannel)
 }
@@ -160,10 +177,22 @@ type SessionHeader struct {
 	Timeout time.Duration
 }
 
+// maxTimeoutSeconds is the largest timeout=<seconds> that still fits in a
+// time.Duration. A larger value would overflow the nanosecond multiply and
+// wrap to a negative or nonsensical duration, so it is rejected outright.
+const maxTimeoutSeconds = math.MaxInt64 / int64(time.Second)
+
 // ParseSession parses a Session header field value: the bare session ID and
 // an optional ";timeout=<seconds>" parameter. Other parameters are
 // tolerated and ignored. A missing timeout yields DefaultSessionTimeout. An
 // empty value yields a zero ID and the default timeout. It never panics.
+//
+// Only a strictly positive timeout that fits in a time.Duration is accepted.
+// A zero, negative, or overflowing value is ignored in favour of
+// DefaultSessionTimeout: the keepalive timer derives its interval from this
+// duration, and a non-positive interval would make it fire continuously
+// (time.NewTicker panics outright), so a malformed or hostile Session header
+// must not be able to reach it.
 func ParseSession(value string) SessionHeader {
 	parts := strings.Split(value, ";")
 	h := SessionHeader{
@@ -175,9 +204,11 @@ func ParseSession(value string) SessionHeader {
 		if !hasEq || !strings.EqualFold(strings.TrimSpace(name), "timeout") {
 			continue
 		}
-		if secs, err := strconv.Atoi(strings.TrimSpace(val)); err == nil {
-			h.Timeout = time.Duration(secs) * time.Second
+		secs, err := strconv.ParseInt(strings.TrimSpace(val), 10, 64)
+		if err != nil || secs <= 0 || secs > maxTimeoutSeconds {
+			continue
 		}
+		h.Timeout = time.Duration(secs) * time.Second
 	}
 	return h
 }
