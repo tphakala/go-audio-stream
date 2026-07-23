@@ -89,6 +89,31 @@ func (c *Client) roundTrip(ctx context.Context, req *Request) (*Response, error)
 	}
 }
 
+// marshalBareRequest builds and marshals a request that deliberately bypasses
+// roundTrip: a fresh CSeq, the standard headers, and credentials when auth is
+// active, with no pending entry registered and no reply awaited. Its two callers
+// are the keepalive timer and the best-effort TEARDOWN.
+//
+// It exists so that the header set stays in one place. Each of those callers
+// used to assemble it inline, and the copies drifted: the TEARDOWN went out
+// unauthenticated for as long as it had its own copy, which on a camera that
+// challenges every request leaves the session allocated until the server's own
+// timeout. Note it applies no lifecycle-state branch of its own, so routing a
+// caller through it cannot change what that caller sends.
+func (c *Client) marshalBareRequest(method, url string) ([]byte, error) {
+	c.mu.Lock()
+	sess := c.sessionID
+	c.mu.Unlock()
+
+	req := &Request{Method: method, URL: url, CSeq: int(c.cseq.Add(1)), Header: Header{}}
+	req.Header.Set("User-Agent", c.cfg.UserAgent)
+	if sess != "" {
+		req.Header.Set("Session", sess)
+	}
+	c.attachAuthorization(req)
+	return MarshalRequest(req)
+}
+
 // drain reports whether a response was already delivered to ch, without
 // blocking. Every terminal branch of roundTrip's select must consult it first.
 //
@@ -123,9 +148,11 @@ type authState struct {
 // do sends req via roundTrip and, on a 401, authenticates using the selected
 // challenge and the session credentials, then returns the final response. It
 // applies ClassifyStatus to translate the status into nil (success), a
-// *audiostream.RedirectError, or a *ResponseError; a 401 that survives the
-// permitted retries becomes ErrAuthFailed. A transport failure (already
-// funneled into shutdown by roundTrip) is returned with a nil response.
+// *audiostream.RedirectError, or a *ResponseError; a 401 this client cannot
+// answer, or one that survives the permitted retries, becomes an error matching
+// ErrAuthFailed and wrapping the last *UnauthorizedError. A transport failure
+// (already funneled into shutdown by roundTrip) is returned with a nil
+// response.
 func (c *Client) do(ctx context.Context, req *Request) (*Response, error) {
 	resp, err := c.roundTrip(ctx, req)
 	if err != nil {
@@ -148,10 +175,10 @@ func (c *Client) do(ctx context.Context, req *Request) (*Response, error) {
 func (c *Client) authenticate(ctx context.Context, req *Request, ue *UnauthorizedError) (*Response, error) {
 	challenge, ok := SelectChallenge(ParseChallenges(ue.Challenges))
 	if !ok {
-		return nil, ErrAuthFailed
+		return nil, authFailed(ue, "no usable challenge offered")
 	}
 	if !c.activateAuth(challenge) {
-		return nil, ErrAuthFailed
+		return nil, authFailed(ue, "challenge scheme cannot be answered")
 	}
 
 	resp, err := c.roundTrip(ctx, req)
@@ -166,9 +193,11 @@ func (c *Client) authenticate(ctx context.Context, req *Request, ue *Unauthorize
 
 	next, ok := SelectChallenge(ParseChallenges(second.Challenges))
 	if !ok || !next.Stale() {
-		return nil, ErrAuthFailed
+		return nil, authFailed(second, "credentials rejected")
 	}
-	c.refreshNonce(next)
+	if !c.refreshNonce(next) {
+		return nil, authFailed(second, "challenge changed scheme mid-session")
+	}
 
 	resp, err = c.roundTrip(ctx, req)
 	if err != nil {
@@ -177,15 +206,30 @@ func (c *Client) authenticate(ctx context.Context, req *Request, ue *Unauthorize
 	cerr = ClassifyStatus(resp)
 	var third *UnauthorizedError
 	if errors.As(cerr, &third) {
-		return nil, ErrAuthFailed
+		return nil, authFailed(third, "credentials rejected after a nonce rotation")
 	}
 	return resp, cerr
 }
 
+// authFailed builds the error every give-up path returns: it matches
+// ErrAuthFailed under errors.Is, says which of the four ways the exchange ended,
+// and wraps the challenge so a caller can still read the realm and prompt for
+// credentials. The bare sentinel told a caller only that authentication had
+// failed, and two of the four paths return before anything was ever sent, so
+// "rejected" would have been wrong for them.
+func authFailed(ue *UnauthorizedError, why string) error {
+	return fmt.Errorf("%w: %s: %w", ErrAuthFailed, why, ue)
+}
+
 // attachAuthorization adds an Authorization header to req when authentication
 // is active, computing it for req's method and URI and incrementing the nonce
-// count under the same server nonce (RFC 7616). A compute error leaves the
-// header off so a later 401 re-enters the auth path. The value is never logged.
+// count under the same server nonce (RFC 7616). The value is never logged.
+//
+// A compute error removes the header rather than leaving req as it found it.
+// authenticate retries the SAME request, so a bare return would resend the
+// PREVIOUS attempt's Authorization under a nonce count the server has already
+// seen; deleting it sends the request unauthenticated instead, which is what
+// re-enters the auth path.
 //
 // Callers outside roundTrip (the keepalive timer, the best-effort TEARDOWN)
 // call it directly, so nc is allocated on whichever goroutine is sending. The
@@ -211,6 +255,9 @@ func (c *Client) attachAuthorization(req *Request) {
 		NonceCount: st.nc,
 	})
 	if err != nil {
+		req.Header.Del("Authorization")
+		logWarn(c.cfg.Logger, "could not compute an Authorization header; sending the request unauthenticated",
+			"method", req.Method, "error", err)
 		return
 	}
 	req.Header.Set("Authorization", value)
@@ -242,19 +289,31 @@ func (c *Client) activateAuth(challenge Challenge) bool {
 		creds:     Credentials{Username: c.username, Password: c.password},
 		cnonce:    cnonce,
 	}
-	c.authScheme = challenge.Scheme
 	c.mu.Unlock()
 	return true
 }
 
 // refreshNonce updates the active auth state with a rotated (stale) challenge,
 // resetting the nonce count so the retry computes nc=1 under the new nonce. The
-// credentials and client nonce are unchanged.
-func (c *Client) refreshNonce(challenge Challenge) {
+// credentials and client nonce are unchanged. It reports false, changing
+// nothing, when the challenge names a different scheme.
+//
+// A stale nonce is by definition a rotation within one scheme, so a scheme
+// change here is not a rotation at all. Accepting one would be a downgrade
+// channel: "stale" is an RFC 7616 Digest parameter, but nothing stops a server
+// attaching it to a Basic challenge, and this function is the one writer of the
+// active challenge that does not go through activateAuth's scheme check. A
+// Digest session would then start sending the password base64-encoded, and
+// SessionInfo would still report Digest.
+func (c *Client) refreshNonce(challenge Challenge) bool {
 	c.mu.Lock()
+	defer c.mu.Unlock()
+	if challenge.Scheme != c.auth.challenge.Scheme {
+		return false
+	}
 	c.auth.challenge = challenge
 	c.auth.nc = 0
-	c.mu.Unlock()
+	return true
 }
 
 // newCNonce returns a fresh client nonce: 16 random bytes hex-encoded.

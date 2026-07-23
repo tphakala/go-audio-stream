@@ -21,7 +21,8 @@ const (
 	// read during shutdown.
 	teardownDeadline = 2 * time.Second
 	// maxReadBuffer is a backstop ceiling on the reader accumulation buffer.
-	// The M4a per-unit caps make it unreachable for well-formed units.
+	// MaxHeaderBytes and MaxBodySize cap every well-formed unit below it, so it
+	// is reachable only on a desynchronized or hostile stream.
 	maxReadBuffer = MaxHeaderBytes + MaxBodySize
 	// maxResyncBytes bounds byte-at-a-time resynchronization before the
 	// reader declares a fatal framing error.
@@ -36,8 +37,11 @@ var (
 	// ErrConnectionClosed wraps the underlying cause when the control
 	// connection was lost unexpectedly.
 	ErrConnectionClosed = errors.New("rtsp: connection closed")
-	// ErrAuthFailed ends a request when authentication was rejected after the
-	// permitted retries.
+	// ErrAuthFailed ends a request whose 401 this client could not answer: no
+	// usable challenge was offered, or the credentials were still refused after
+	// the permitted retries. The returned error wraps the *UnauthorizedError, so
+	// errors.As recovers the challenge (its realm, for prompting) even though
+	// the retry was automatic.
 	ErrAuthFailed = errors.New("rtsp: authentication failed")
 	// ErrRequestTimeout ends a request when the server did not answer within
 	// Config.Timeout. It is the request-path counterpart to
@@ -118,14 +122,15 @@ type Client struct {
 	sessionID       string
 	sessionTimeout  time.Duration
 	keepaliveMethod string
-	authScheme      AuthScheme
 	baseURL         string
 	channelPairs    []ChannelPair
 	termErr         error
 	// auth is the active authentication state. Once a 401 has been answered,
-	// roundTrip attaches an Authorization header to every subsequent request
-	// under mu, incrementing nc per request under the same server nonce. The
-	// password and the header value are never logged.
+	// every outgoing request carries an Authorization header computed from it,
+	// with the nonce count incremented per request under the same server nonce.
+	// It is also what SessionInfo reports the scheme from, so the scheme is
+	// stored once rather than kept in a second field that has to be updated in
+	// step. The password and the header value are never logged.
 	auth authState
 
 	// username and password are the resolved credentials (URL userinfo wins
@@ -173,10 +178,14 @@ type Client struct {
 	done      chan struct{}
 	wg        sync.WaitGroup
 
-	// Reader-owned accumulation buffer and parse offset.
-	rbuf   []byte
-	start  int
-	resync int
+	// Reader-owned accumulation buffer, parse offset, and read scratch. The
+	// scratch is a field rather than a local in fill() because conn is an
+	// interface, so escape analysis cannot see the callee and heap-allocates a
+	// local array on every single socket read.
+	rbuf     []byte
+	start    int
+	resync   int
+	rscratch [readChunk]byte
 }
 
 // Dial connects to cfg.URL, starts the reader goroutine, and sends an OPTIONS
@@ -227,14 +236,15 @@ func newClient(cfg *Config, conn net.Conn, tgt *target) *Client {
 	}
 }
 
-// randomSSRC returns a random 32-bit RTCP reporter SSRC. crypto/rand does not
-// fail in practice; a fixed non-zero fallback keeps the reporter id valid if it
-// ever does.
+// randomSSRC returns a random 32-bit RTCP reporter SSRC.
+//
+// crypto/rand.Read has been documented never to return an error since Go 1.24:
+// it crashes the program irrecoverably if the system source fails. There is
+// therefore no error branch to write, and any fallback constant here would be
+// unreachable code pretending to be a degraded mode.
 func randomSSRC() uint32 {
 	var b [4]byte
-	if _, err := rand.Read(b[:]); err != nil {
-		return 0xA5A5A5A5
-	}
+	_, _ = rand.Read(b[:]) // cannot fail; see above.
 	return binary.BigEndian.Uint32(b[:])
 }
 
@@ -406,9 +416,11 @@ func (c *Client) SessionInfo() SessionInfo {
 		copy(chans, c.channelPairs)
 	}
 	return SessionInfo{
-		SessionID:       c.sessionID,
-		SessionTimeout:  c.sessionTimeout,
-		AuthScheme:      c.authScheme,
+		SessionID:      c.sessionID,
+		SessionTimeout: c.sessionTimeout,
+		// The zero Challenge carries AuthNone, so an unauthenticated session
+		// reports AuthNone without a separate "is auth active" test.
+		AuthScheme:      c.auth.challenge.Scheme,
 		KeepaliveMethod: c.keepaliveMethod,
 		Channels:        chans,
 	}

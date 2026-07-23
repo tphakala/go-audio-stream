@@ -419,9 +419,6 @@ func (sc *ServerConn) InjectFrame(channel int, payload []byte) error {
 	return err
 }
 
-// SendServerRequest writes a server-initiated request (for example a
-// mid-session OPTIONS or a TEARDOWN) with a fresh server CSeq and returns
-// that CSeq so the test can await the client's 200 OK.
 // WriteRaw writes bytes straight to the connection, bypassing every framing
 // helper, so a test can inject a byte run that desynchronizes the client's
 // framing loop ahead of a real unit. It is the escape hatch for reader-framing
@@ -431,6 +428,9 @@ func (sc *ServerConn) WriteRaw(b []byte) error {
 	return err
 }
 
+// SendServerRequest writes a server-initiated request (for example a
+// mid-session OPTIONS or a TEARDOWN) with a fresh server CSeq and returns
+// that CSeq so the test can await the client's 200 OK.
 func (sc *ServerConn) SendServerRequest(method, url string, headers rtsp.Header) (cseq int, err error) {
 	sc.cseq++
 	raw, err := rtsp.MarshalRequest(&rtsp.Request{
@@ -480,6 +480,10 @@ type AuthSpec struct {
 	Username  string
 	Password  string
 	Stale     bool // when set, the first post-auth 401 carries stale=true once
+	// StaleNonce is the nonce the stale=true challenge rotates to. Empty reuses
+	// Nonce, which makes the retry indistinguishable from a plain resend and
+	// leaves a client that ignores the rotation undetectable.
+	StaleNonce string
 }
 
 // ChannelPair is the RTP/RTCP interleaved channel pair the server assigned
@@ -578,16 +582,25 @@ func (sc *ServerConn) readDescribeWithAuth(cfg *HandshakeConfig) (*rtsp.Request,
 			return nil, err
 		}
 	}
-	if cfg.Auth.Stale {
-		if err := sc.sendChallenge(req, cfg.Auth, true); err != nil {
+	spec := cfg.Auth
+	if spec.Stale {
+		if err := sc.sendChallenge(req, spec, true); err != nil {
 			return nil, err
 		}
 		req, err = sc.readDescribeAgain()
 		if err != nil {
 			return nil, err
 		}
+		if spec.StaleNonce != "" {
+			// Validate the retry against the ROTATED nonce. Checking it against
+			// the original would accept a client that ignored the rotation
+			// entirely, which is the whole behaviour the stale path exists for.
+			rotated := *spec
+			rotated.Nonce = spec.StaleNonce
+			spec = &rotated
+		}
 	}
-	sc.validateAuthorization(req, cfg.Auth)
+	sc.validateAuthorization(req, spec)
 	return req, nil
 }
 
@@ -614,8 +627,12 @@ func buildChallenge(spec *AuthSpec, stale bool) string {
 	if strings.EqualFold(spec.Scheme, "Basic") {
 		return `Basic realm="` + spec.Realm + `"`
 	}
+	nonce := spec.Nonce
+	if stale && spec.StaleNonce != "" {
+		nonce = spec.StaleNonce
+	}
 	parts := make([]string, 0, 5)
-	parts = append(parts, `realm="`+spec.Realm+`"`, `nonce="`+spec.Nonce+`"`)
+	parts = append(parts, `realm="`+spec.Realm+`"`, `nonce="`+nonce+`"`)
 	if spec.Algorithm != "" {
 		parts = append(parts, "algorithm="+spec.Algorithm)
 	}
@@ -668,9 +685,30 @@ func (sc *ServerConn) verifyDigest(req *rtsp.Request, spec *AuthSpec) {
 		sc.t.Errorf("testserver: Digest nonce = %q, want %q", params["nonce"], spec.Nonce)
 		return
 	}
+	// The digest URI is checked against the request line rather than merely
+	// fed into the hash. Deriving HA2 from whatever the client claimed would
+	// verify the client against itself: a client that digests over the session
+	// base URL instead of the track control URL is internally consistent and
+	// would pass here while a real camera answers it 401.
+	if params["uri"] != req.URL {
+		sc.t.Errorf("testserver: Digest uri = %q, want the request URI %q", params["uri"], req.URL)
+		return
+	}
+	// Likewise the qop: taking the client's word for it would accept a legacy
+	// response to a qop challenge and a qop response to a legacy one, which are
+	// the two ways the RFC 2069 and RFC 7616 formulas get confused.
+	if (spec.QOP == "") != (params["qop"] == "") {
+		sc.t.Errorf("testserver: Digest qop = %q, want %q", params["qop"], spec.QOP)
+		return
+	}
+	if spec.QOP != "" && (params["nc"] == "" || params["cnonce"] == "") {
+		sc.t.Errorf("testserver: Digest with qop must carry nc and cnonce, got nc=%q cnonce=%q",
+			params["nc"], params["cnonce"])
+		return
+	}
 	h := digestHasher(spec.Algorithm)
 	ha1 := h(spec.Username + ":" + spec.Realm + ":" + spec.Password)
-	ha2 := h(req.Method + ":" + params["uri"])
+	ha2 := h(req.Method + ":" + req.URL)
 	var want string
 	if qop := params["qop"]; qop != "" {
 		want = h(strings.Join([]string{ha1, spec.Nonce, params["nc"], params["cnonce"], qop, ha2}, ":"))
@@ -698,10 +736,10 @@ func parseDigestParams(header string) map[string]string {
 }
 
 // digestHasher returns a hex-hashing function for the challenge algorithm:
-// SHA-256 when named, otherwise MD5 (the RFC default). MD5 is what the RFC
-// specifies for Digest and what every camera in the quirk matrix offers; it is
-// used here only to reproduce the client's arithmetic, never as a security
-// primitive.
+// SHA-256 when named, otherwise MD5, which RFC 7616 section 3.3 makes the
+// default when the algorithm directive is absent (it also registers SHA-256 and
+// discourages MD5, which is why both are supported here). It reproduces the
+// client's arithmetic and is never used as a security primitive.
 func digestHasher(algorithm string) func(string) string {
 	newHash := md5.New
 	if strings.EqualFold(algorithm, "SHA-256") {

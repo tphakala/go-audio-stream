@@ -13,7 +13,10 @@ type TrackStats struct {
 	// SeqGaps is the total number of packets lost per sequence
 	// number tracking.
 	SeqGaps uint64
-	// Malformed is the number of packets discarded as unparseable.
+	// Malformed is the number of packets discarded without being delivered:
+	// unparseable ones, and ones carrying a payload type the track does not
+	// carry (a second format multiplexed onto the same channel). A steadily
+	// climbing count is not by itself evidence of a corrupt stream.
 	Malformed uint64
 	// SSRCResets is the number of mid-stream SSRC changes tolerated.
 	SSRCResets uint64

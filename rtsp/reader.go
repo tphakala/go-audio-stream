@@ -21,10 +21,10 @@ const readChunk = 4096
 var errBufferFull = errors.New("rtsp: read buffer limit exceeded")
 
 // reader is the single reader goroutine. It owns every socket read for the
-// connection's whole life. A deferred recover funnels a panic raised inside
-// the framing loop (including one from a consumer callback in a later task)
-// into shutdown, so such a panic becomes a clean session end rather than a
-// process crash. It does not cover the terminal sequence that runs after it,
+// connection's whole life. A deferred recover funnels a panic raised inside the
+// framing loop into shutdown, so such a panic becomes a clean session end rather
+// than a process crash. That covers the consumer's OnFrame callback, which this
+// loop calls directly. It does not cover the terminal sequence that runs after it,
 // nor any other goroutine. When the framing loop ends, it performs the
 // terminal teardown and, as its final act, closes done.
 func (c *Client) reader() {
@@ -77,11 +77,18 @@ func (c *Client) readLoop() {
 }
 
 // stepFunc parses one wire unit from buf, handles it, and returns the byte
-// count consumed. ErrIncomplete signals "read more".
+// count consumed and whether the unit turned out to be usable. ErrIncomplete
+// signals "read more".
+//
+// usable is what lets consume tell a genuine re-lock from a false one: a
+// message parser only returns a unit it has already validated, so it reports
+// true, while an interleaved frame reports whether it reached a track and, when
+// this client parses its payload, parsed. Ignored unless the unit was admitted
+// by the resync gate.
 //
 // A unit handed to a step aliases rbuf and is valid only until the next fill,
 // so a step must copy anything it keeps.
-type stepFunc func(buf []byte) (int, error)
+type stepFunc func(buf []byte) (n int, usable bool, err error)
 
 // Whether a step's parser structurally validates the unit it accepts, which
 // decides if the unit may be trusted while resynchronizing. The message
@@ -113,12 +120,12 @@ func (c *Client) consume(step stepFunc, validated bool) bool {
 	// re-lock on one and would exhaust the budget unless a real message arrived
 	// within maxResyncBytes. So the discriminator is the channel byte, which
 	// carries meaning this client assigned: a frame whose channel c.channels
-	// binds is one this session negotiated, and only a handful of the 256
-	// channel values are ever bound.
+	// binds is one this session negotiated.
+	gated := false
 	if resyncing && !validated {
 		switch c.gateResyncFrame() {
 		case resyncAccept:
-			// Fall through to the step: a bound channel re-locks the stream.
+			gated = true // fall through to the step, but stay on probation.
 		case resyncFill:
 			return c.fillMore()
 		case resyncDiscard:
@@ -126,7 +133,7 @@ func (c *Client) consume(step stepFunc, validated bool) bool {
 		}
 	}
 
-	n, err := step(c.rbuf[c.start:])
+	n, usable, err := step(c.rbuf[c.start:])
 	switch {
 	case errors.Is(err, ErrIncomplete):
 		return c.fillMore()
@@ -143,7 +150,17 @@ func (c *Client) consume(step stepFunc, validated bool) bool {
 		return false
 	default:
 		c.start += n
-		c.resync = 0
+		// A gate-admitted frame clears the budget only once it has proved
+		// usable. The channel byte alone is weak evidence: 0x00 and 0x01 are
+		// both common bytes inside PCM and the channels most often bound, so a
+		// run of garbage can present a plausible header every few hundred
+		// bytes. Clearing the budget on that alone would restart it before it
+		// could ever fire, and a stream that never yields a parseable packet
+		// would hold the session open forever while delivering nothing, which
+		// is the bound this whole gate exists to preserve.
+		if !gated || usable {
+			c.resync = 0
+		}
 		return true
 	}
 }
@@ -170,15 +187,18 @@ const (
 // across two reads from being mistaken for garbage: the '$' arrives in one read
 // and its channel byte in the next, and discarding on the strength of the first
 // byte alone would drop the header and desync the very stream it is trying to
-// recover. fillMore cannot loop here, because it either appends bytes, returns
-// false on a read error, or trips the buffer ceiling.
+// recover. Filling here makes no less progress than the FrameNeedMore path it
+// borrows: fill either appends bytes, returns a read error, or trips the buffer
+// ceiling. It shares that path's one non-advancing case, a zero-byte read with
+// a nil error, which re-loops.
 //
 // The residual false positive is a 0x24 inside an RTP payload followed by a
-// byte that happens to equal a bound channel, which re-locks on garbage and
-// consumes whatever length follows. Nothing in a byte stream can rule that out;
-// what the gate buys is that the odds are now the odds of hitting one of the
-// two-to-four bound channels rather than any of 256, and the resync budget
-// still bounds the run that follows.
+// byte that happens to equal a bound channel, which consumes whatever length
+// follows. Nothing in a byte stream can rule that out, and the odds are not the
+// uniform 2-per-256 the channel count suggests: a session binds two channels
+// per set-up track, they are almost always 0x00 and 0x01, and those are the two
+// most common bytes in near-silent PCM. That is why consume keeps such a frame
+// on probation rather than treating admission as a re-lock.
 func (c *Client) gateResyncFrame() resyncVerdict {
 	buf := c.rbuf[c.start:]
 	if len(buf) < 2 {
@@ -192,34 +212,33 @@ func (c *Client) gateResyncFrame() resyncVerdict {
 
 // stepInterleaved parses and dispatches one interleaved frame. The frame
 // payload aliases rbuf, so handleInterleaved must consume it before the next
-// read.
-func (c *Client) stepInterleaved(buf []byte) (int, error) {
+// read. It reports handleInterleaved's usable verdict.
+func (c *Client) stepInterleaved(buf []byte) (n int, usable bool, err error) {
 	f, n, err := ParseInterleaved(buf)
 	if err != nil {
-		return 0, err
+		return 0, false, err
 	}
-	c.handleInterleaved(f)
-	return n, nil
+	return n, c.handleInterleaved(f), nil
 }
 
 // stepResponse parses one response and routes it to its pending caller.
-func (c *Client) stepResponse(buf []byte) (int, error) {
+func (c *Client) stepResponse(buf []byte) (n int, usable bool, err error) {
 	resp, n, err := ParseResponse(buf)
 	if err != nil {
-		return 0, err
+		return 0, false, err
 	}
 	c.dispatchResponse(resp)
-	return n, nil
+	return n, true, nil
 }
 
 // stepRequest parses one server-initiated request and answers it.
-func (c *Client) stepRequest(buf []byte) (int, error) {
+func (c *Client) stepRequest(buf []byte) (n int, usable bool, err error) {
 	req, n, err := ParseRequest(buf)
 	if err != nil {
-		return 0, err
+		return 0, false, err
 	}
 	c.handleServerRequest(req)
-	return n, nil
+	return n, true, nil
 }
 
 // resyncOne discards one unrecognized leading byte, bounded by maxResyncBytes
@@ -246,41 +265,48 @@ func (c *Client) resyncOne() bool {
 // The watchdog clock is stamped for EVERY interleaved frame, before routing and
 // whatever this function then decides to do with it. audiostream.ErrReadTimeout
 // means the peer went quiet, so any frame is evidence it did not: a camera
-// streaming on a channel this client never bound, or emitting a payload type
-// this track does not carry, is alive and misbehaving, not dead. A caller that
-// needs "no audio for N seconds" has OnFrame to measure it with.
-func (c *Client) handleInterleaved(f InterleavedFrame) {
+// streaming on a channel this client never bound is alive and misbehaving, not
+// dead. A caller that needs "no audio for N seconds" has OnFrame to measure it
+// with. A stream that produces frames but never a usable packet is bounded
+// instead by the resync budget, through the usable verdict returned here.
+func (c *Client) handleInterleaved(f InterleavedFrame) bool {
 	now := time.Now()
 	c.lastFrameAt.Store(now.UnixNano())
 
 	bind, ok := c.channels.Load().lookup(f.Channel)
 	if !ok {
-		return // unknown or not-yet-published channel.
+		return false // unknown or not-yet-published channel.
 	}
 	tr := bind.track
 	if tr.discard {
+		// A discard track is deliberately never parsed, so there is nothing to
+		// validate and the frame counts as usable on the strength of its
+		// channel alone.
 		tr.packets.Add(1)
 		tr.bytes.Add(uint64(len(f.Payload)))
-		return
+		return true
 	}
 	if bind.isRTCP {
-		c.handleRTCP(tr, f.Payload, now)
-		return
+		return c.handleRTCP(tr, f.Payload, now)
 	}
 
 	pkt, err := rtp.ParsePacket(f.Payload)
 	if err != nil {
 		tr.malformed.Add(1)
-		return
+		return false
 	}
-	if !tr.acceptsPayloadType(pkt.Header.PayloadType) {
+	if !tr.acceptPayloadType(pkt.Header.PayloadType, c.cfg.Logger) {
 		// A second format multiplexed onto this track's RTP channel (a
 		// telephone-event alongside speech, or the second entry of an m= line
-		// listing several formats). Counted and dropped before rtp.Stream sees
-		// it: folding a foreign PT's sequence numbers into this track's stream
-		// would report the interleaving itself as continuous packet loss.
+		// listing several formats). Dropped BEFORE rtp.Stream observes it, so a
+		// foreign SSRC cannot force a spurious reset and a foreign timestamp
+		// cannot disturb this track's baseline. The cost is that the packet's
+		// sequence number becomes a hole this track counts as loss, which is
+		// the cheaper of the two errors: an inflated loss counter is a
+		// diagnostic, a corrupted baseline is every PTS for the rest of the
+		// session.
 		tr.malformed.Add(1)
-		return
+		return false
 	}
 
 	up := tr.stream.Observe(pkt.Header)
@@ -288,9 +314,15 @@ func (c *Client) handleInterleaved(f InterleavedFrame) {
 		tr.ssrcResets.Add(1)
 		tr.baseSet = false
 		tr.resetDepacketizer()
-		tr.senderSSRC.Store(pkt.Header.SSRC)
 	}
 	if !tr.baseSet {
+		// Also the first packet of the session, where Observe reports no reset
+		// because there was no previous stream to reset from. The sender SSRC
+		// is recorded here rather than under SSRCReset for exactly that reason:
+		// gating it on the reset left it zero for every session in which the
+		// camera never changed SSRC and sent no Sender Report, so every
+		// Receiver Report named a source the server was not sending.
+		tr.senderSSRC.Store(pkt.Header.SSRC)
 		tr.baseTS = c.seededOrigin(tr, up.Timestamp)
 		tr.baseSet = true
 		tr.baselineFixed = true // the seed applies only to this first baseline.
@@ -304,23 +336,40 @@ func (c *Client) handleInterleaved(f InterleavedFrame) {
 	tr.packets.Add(1)
 	tr.bytes.Add(uint64(len(pkt.Payload)))
 	tr.publishRRSnapshot()
+	return true
 }
 
-// handleRTCP parses an RTCP compound packet and stores the most recent Sender
-// Report's fields into the track's atomic snapshot for the keepalive timer's
-// Receiver Report builder: the sender SSRC, the middle 32 bits of the SR NTP
-// timestamp (LSR), and the local receive time. Malformed RTCP is ignored: RTCP
-// is advisory, and a compound packet this parser cannot read must not end a
-// session whose media is arriving fine.
-func (c *Client) handleRTCP(tr *track, payload []byte, now time.Time) {
+// handleRTCP parses an RTCP compound packet and stores one Sender Report's
+// fields into the track's atomic snapshot for the keepalive timer's Receiver
+// Report builder: the sender SSRC, the middle 32 bits of the SR NTP timestamp
+// (LSR), and the local receive time. It reports whether a report was stored.
+//
+// A compound packet may carry a Sender Report per contributing source when the
+// peer is a mixer or translator, so the one this track wants is the one whose
+// SSRC matches the media it is receiving, not simply the last in the packet.
+// Falling back to the first keeps a peer that reports under an SSRC this track
+// has not observed yet (an RTCP packet ahead of the first RTP packet) working.
+//
+// Malformed RTCP is ignored: RTCP is advisory, and a compound packet this
+// parser cannot read must not end a session whose media is arriving fine.
+func (c *Client) handleRTCP(tr *track, payload []byte, now time.Time) bool {
 	reports, err := rtp.ParseCompound(payload)
 	if err != nil || len(reports) == 0 {
-		return
+		return false
 	}
-	sr := reports[len(reports)-1]
+	sr := reports[0]
+	if want := tr.senderSSRC.Load(); want != 0 {
+		for i := range reports {
+			if reports[i].SSRC == want {
+				sr = reports[i]
+				break
+			}
+		}
+	}
 	tr.senderSSRC.Store(sr.SSRC)
 	tr.lastSR.Store(uint32(sr.NTPTimestamp >> 16))
 	tr.lastSRUnixNano.Store(now.UnixNano())
+	return true
 }
 
 // dispatchResponse routes a response to the caller waiting on its CSeq. An
@@ -386,10 +435,9 @@ func (c *Client) fill() error {
 		return errBufferFull
 	}
 	c.armReadDeadline()
-	var scratch [readChunk]byte
-	n, err := c.conn.Read(scratch[:])
+	n, err := c.conn.Read(c.rscratch[:])
 	if n > 0 {
-		c.rbuf = append(c.rbuf, scratch[:n]...)
+		c.rbuf = append(c.rbuf, c.rscratch[:n]...)
 		return nil
 	}
 	return err
@@ -457,20 +505,15 @@ func (c *Client) sessionEstablished() bool {
 func (c *Client) sendTeardownBestEffort() {
 	c.mu.Lock()
 	reqURL := c.baseURL
-	sess := c.sessionID
 	c.mu.Unlock()
 
-	req := &Request{Method: methodTeardown, URL: reqURL, CSeq: int(c.cseq.Add(1)), Header: Header{}}
-	req.Header.Set("User-Agent", c.cfg.UserAgent)
-	if sess != "" {
-		req.Header.Set("Session", sess)
-	}
-	// Credentials matter most here. This request does not go through roundTrip,
-	// so nothing else attaches them, and a TEARDOWN answered 401 leaves the
-	// server holding the session until its own timeout: on a camera that allows
-	// one session at a time, that refuses the next Dial.
-	c.attachAuthorization(req)
-	raw, err := MarshalRequest(req)
+	// Credentials matter more here than anywhere. A TEARDOWN answered 401 leaves
+	// the server holding the session until its own timeout, and on a camera that
+	// allows one session at a time that refuses the next Dial. They come from
+	// marshalBareRequest, shared with the keepalive, because this request does
+	// not go through roundTrip and an inline copy of the header set is exactly
+	// how they came to be missing here in the first place.
+	raw, err := c.marshalBareRequest(methodTeardown, reqURL)
 	if err != nil {
 		return
 	}

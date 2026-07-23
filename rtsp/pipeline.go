@@ -62,22 +62,26 @@ type track struct {
 	clockRate   uint64
 	law         audiostream.Law
 	discard     bool
-	rtpChannel  int
 	rtcpChannel int
 	// control is the resolved control URL, used to match RTP-Info entries to
 	// this track. Set once by newTrack and never mutated afterward.
 	control string
-	// payloadType is the RTP payload type the SDP resolved this track from, or
-	// payloadTypeUnknown when the m= line named none. The reader rejects a
-	// packet whose PT differs, so a second format multiplexed onto the same
-	// interleaved channel is not fed to this track's depacketizer.
-	payloadType int
+	// sdpPayloadType is the RTP payload type the SDP resolved this track from,
+	// or payloadTypeUnknown when the m= line named none. It is the EXPECTED
+	// payload type, not the enforced one: see acceptPayloadType.
+	sdpPayloadType int
 
 	// Reader-owned, non-atomic. Valid to touch only after publication.
-	stream  rtp.Stream
-	aac     *aac.Depacketizer
-	baseTS  uint64
-	baseSet bool
+	stream rtp.Stream
+	aac    *aac.Depacketizer
+	// wirePayloadType is the payload type this track actually carries, latched
+	// from its first packet, and wirePTSet says whether that has happened. They
+	// are the enforced filter; the zero value accepts anything, so a track
+	// built by any path other than newTrack cannot silently filter to PT 0.
+	wirePayloadType uint8
+	wirePTSet       bool
+	baseTS          uint64
+	baseSet         bool
 	// baselineFixed is set true the first time a baseline is established and is
 	// never cleared, so the RTP-Info seed applies only to the very first
 	// baseline. An SSRC reset clears baseSet (to re-baseline the new stream)
@@ -109,7 +113,8 @@ type track struct {
 }
 
 // newTrack builds a track's depacketization pipeline from its resolved
-// descriptor and the negotiated interleaved channels.
+// descriptor and the RTCP channel the server assigned. The RTP channel is not
+// stored: the routing table maps it to this track, and nothing reads it back.
 //
 // It dispatches on the codec, but only after confirming the track is audio.
 // The SDP layer resolves the codec from the a=rtpmap encoding name without
@@ -121,16 +126,15 @@ type track struct {
 // A non-audio track, an unrecognized codec, a non-AAC-hbr mode, or an invalid
 // fmtp falls back to raw payload delivery with a logged warning. It never
 // fails, so a quirky fmtp degrades one track to raw rather than failing Setup.
-func newTrack(id int, desc describedTrack, opts SetupOptions, rtpCh, rtcpCh int, logger *slog.Logger) *track {
+func newTrack(id int, desc describedTrack, opts SetupOptions, rtcpCh int, logger *slog.Logger) *track {
 	tr := &track{
-		id:          id,
-		kind:        deliverRaw,
-		clockRate:   clockRateTicks(desc.clockRate),
-		discard:     opts.Discard,
-		rtpChannel:  rtpCh,
-		rtcpChannel: rtcpCh,
-		control:     desc.control,
-		payloadType: desc.payloadType,
+		id:             id,
+		kind:           deliverRaw,
+		clockRate:      clockRateTicks(desc.clockRate),
+		discard:        opts.Discard,
+		rtcpChannel:    rtcpCh,
+		control:        desc.control,
+		sdpPayloadType: desc.payloadType,
 	}
 	if desc.media != audiostream.MediaAudio {
 		logWarn(logger, "track is not audio; delivering raw payloads",
@@ -208,15 +212,32 @@ func modeOf(params *sdp.AACParams) string {
 	return params.Mode
 }
 
-// acceptsPayloadType reports whether pt is the payload type this track carries.
-// A track the SDP resolved no format for accepts everything: refusing every
-// packet would be worse than delivering an unknown payload raw, which is
-// already what such a track does.
-func (tr *track) acceptsPayloadType(pt uint8) bool {
-	if tr.payloadType == payloadTypeUnknown {
+// acceptPayloadType latches the track's payload type from its first packet and
+// thereafter reports whether pt matches it. Reader-goroutine only.
+//
+// The wire is authoritative, not the SDP. Enforcing the SDP's payload type
+// directly would hand a camera whose m= line disagrees with what it actually
+// sends a session in which every packet is rejected, no frame is ever
+// delivered, and the read-idle watchdog never fires because frames keep
+// arriving: a silent, permanent stall on exactly the quirky firmware this
+// package exists to tolerate. Latching from the wire keeps that camera working
+// while still rejecting a SECOND format multiplexed onto the same channel,
+// which is what the filter is for.
+//
+// A disagreement is worth knowing about, so it is logged once, at the moment
+// the track latches. That is the SDP payload type's reader: it is the expected
+// value the observed one is checked against.
+func (tr *track) acceptPayloadType(pt uint8, logger *slog.Logger) bool {
+	if !tr.wirePTSet {
+		if tr.sdpPayloadType != payloadTypeUnknown && int(pt) != tr.sdpPayloadType {
+			logWarn(logger, "stream payload type differs from the one the SDP declared; using the stream's",
+				"track", tr.id, "sdp", tr.sdpPayloadType, "stream", int(pt))
+		}
+		tr.wirePayloadType = pt
+		tr.wirePTSet = true
 		return true
 	}
-	return int(pt) == tr.payloadType
+	return pt == tr.wirePayloadType
 }
 
 // deliver depacketizes one RTP packet for its track and hands each resulting
@@ -282,10 +303,22 @@ func (tr *track) deliverOpus(pkt rtp.Packet, up rtp.Update, now time.Time, onFra
 
 // deliverG711 expands companded G.711 into s16le PCM in the reused tr.g711Buf,
 // growing it only when a larger packet arrives, and delivers one frame.
+//
+// The expansion is skipped entirely when nothing will consume it. A nil OnFrame
+// is a supported configuration (statistics without delivery), and unlike AAC
+// this codec carries no cross-packet state, so there is nothing to keep
+// coherent by running the transform anyway.
+//
+// Growth reserves a quarter more than the packet needs. Sizing the buffer to
+// exactly len(input) reallocates on every upward tick, which for a sender whose
+// packet size ramps means an allocation per packet on the hot path.
 func (tr *track) deliverG711(pkt rtp.Packet, up rtp.Update, now time.Time, onFrame func(audiostream.Frame)) {
+	if onFrame == nil {
+		return
+	}
 	need := 2 * len(pkt.Payload)
 	if cap(tr.g711Buf) < need {
-		tr.g711Buf = make([]byte, need)
+		tr.g711Buf = make([]byte, need, need+need/4)
 	} else {
 		tr.g711Buf = tr.g711Buf[:need]
 	}
@@ -297,8 +330,10 @@ func (tr *track) deliverG711(pkt rtp.Packet, up rtp.Update, now time.Time, onFra
 	tr.deliverOne(tr.g711Buf[:n], pkt, up, now, onFrame)
 }
 
-// deliverRaw delivers the undecoded RTP payload as one frame, for unknown
-// codecs, video, and AAC modes this milestone does not decode.
+// deliverRaw delivers the undecoded RTP payload as one frame. It is the
+// fallback for every track newTrack could not build a decoder for: an
+// unrecognized codec, a non-audio media kind, an AAC mode other than AAC-hbr,
+// and an AAC fmtp whose field widths are invalid.
 func (tr *track) deliverRaw(pkt rtp.Packet, up rtp.Update, now time.Time, onFrame func(audiostream.Frame)) {
 	tr.deliverOne(pkt.Payload, pkt, up, now, onFrame)
 }
@@ -319,14 +354,23 @@ func (tr *track) deliverOne(data []byte, pkt rtp.Packet, up rtp.Update, now time
 	})
 }
 
+// maxPTSSeconds is the largest whole-second count a time.Duration holds. A
+// duration is an int64 nanosecond count, so the seconds term of a PTS must stay
+// below this or the multiply that scales it wraps negative.
+const maxPTSSeconds = math.MaxInt64 / int64(time.Second)
+
 // ptsOf computes the presentation time of an unwrapped 64-bit RTP timestamp
-// relative to tr.baseTS and the track clock rate. It splits the division to
-// avoid overflow (delta*1e9 overflows a uint64 after about 585 seconds of
-// stream) and returns 0 when the clock rate is unknown.
+// relative to tr.baseTS and the track clock rate, or 0 when the clock rate is
+// unknown.
 //
-// A timestamp below the baseline (a reordered packet, or an AU offset applied
-// to one) would wrap the unsigned subtraction into an enormous PTS, so it
-// clamps to zero instead.
+// Three separate overflows are possible and all three are handled here, because
+// every input is remote. A timestamp below the baseline (a reordered packet, or
+// an AU offset applied to one) would wrap the unsigned subtraction into an
+// enormous delta, so it clamps to zero. delta*1e9 would overflow a uint64 after
+// about 585 seconds of stream, so the division is split into whole seconds and
+// a remainder. And the seconds term itself is unbounded, because a sender may
+// advance the RTP timestamp by up to 2^31 per packet, so it is clamped to what
+// a time.Duration can express rather than being allowed to wrap negative.
 func (tr *track) ptsOf(ts uint64) time.Duration {
 	rate := tr.clockRate
 	if rate == 0 || ts < tr.baseTS {
@@ -334,6 +378,9 @@ func (tr *track) ptsOf(ts uint64) time.Duration {
 	}
 	delta := ts - tr.baseTS
 	sec := delta / rate
+	if sec >= uint64(maxPTSSeconds) {
+		return time.Duration(maxPTSSeconds) * time.Second
+	}
 	frac := (delta % rate) * uint64(time.Second) / rate
 	return time.Duration(sec)*time.Second + time.Duration(frac)
 }
@@ -341,6 +388,12 @@ func (tr *track) ptsOf(ts uint64) time.Duration {
 // resetDepacketizer clears any codec reassembly state on an SSRC change or a
 // sequence gap, so a lost fragment cannot corrupt the next access unit. Only
 // AAC carries cross-packet state; the other codecs are stateless.
+//
+// The nil check is here and not in deliverAAC, which dereferences tr.aac
+// directly, because the two are asking different questions. deliverAAC runs only
+// for kind == deliverAAC, and configureAAC is the only writer of that kind and
+// sets tr.aac in the same two lines, so there it cannot be nil. This function
+// runs for EVERY track on every gap, most of which have no depacketizer at all.
 func (tr *track) resetDepacketizer() {
 	if tr.aac != nil {
 		tr.aac.Reset()
@@ -356,12 +409,16 @@ func (tr *track) publishRRSnapshot() {
 	tr.rrCumulativeLost.Store(cumulativeLost(st.SeqGaps))
 }
 
-// cumulativeLost narrows the 64-bit loss count to the 24 bits the RFC 3550
-// report block carries. It saturates rather than truncating: a stream that has
-// lost more than 16.7 million packets should report "very lossy", not wrap
-// around to a small number and claim it recovered.
+// cumulativeLost narrows the 64-bit loss count to what an RFC 3550 report block
+// can carry. The field is 24 bits and SIGNED (RFC 3550 section 6.4.1: the count
+// may be negative when duplicates arrive), so the largest positive value it
+// holds is 0x7FFFFF, and Appendix A.3 prescribes clamping there rather than
+// wrapping. Saturating at 0xFFFFFF instead would put every value above 8.4
+// million on the wire as a negative number, and the saturation value itself as
+// -1, telling the server the client received one packet MORE than expected: a
+// very lossy stream would be reported as a perfect one.
 func cumulativeLost(seqGaps uint64) uint32 {
-	const maxCumulativeLost = 0x00FFFFFF
+	const maxCumulativeLost = 0x7FFFFF
 	if seqGaps > maxCumulativeLost {
 		return maxCumulativeLost
 	}
@@ -377,8 +434,9 @@ type channelBinding struct {
 
 // channelTable is an immutable channel-to-track routing table. Setup publishes
 // a new table by copy-on-write and an atomic store. It is immutable so that the
-// reader can load it lock-free on every interleaved frame once it routes them;
-// nothing reads it yet, and the reader will never mutate it.
+// reader can load it lock-free, which it does twice per interleaved frame: once
+// to route the frame, and once for the resync gate's channel-byte test. The
+// reader never mutates it.
 type channelTable struct {
 	bindings map[int]channelBinding
 }

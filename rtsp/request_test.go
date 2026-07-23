@@ -110,6 +110,10 @@ func TestBasicAuth(t *testing.T) {
 func TestStaleNonceReauth(t *testing.T) {
 	spec := digestSpec("MD5", "auth")
 	spec.Stale = true
+	// A DIFFERENT nonce, so the retry is only accepted if the client actually
+	// adopted the rotation. Reusing the original would make a client that
+	// ignored it byte-identical to one that honoured it.
+	spec.StaleNonce = "9f2c1e4b7a8d0356c1f9e2b4a7d0356c"
 	// The server issues one stale=true 401 after the first authenticated
 	// DESCRIBE; the client re-auths once more with the refreshed nonce and the
 	// request succeeds, so no failure surfaces.
@@ -340,5 +344,76 @@ func TestKeepaliveAndTeardownCarryAuthorization(t *testing.T) {
 		case <-time.After(4 * time.Second):
 			t.Fatal("no authenticated TEARDOWN observed")
 		}
+	}
+}
+
+// A challenge that changes scheme mid-session is refused rather than honoured,
+// even when it claims stale=true. "stale" is an RFC 7616 Digest parameter, but
+// nothing stops a server attaching it to a Basic challenge, and honouring that
+// would silently downgrade an established Digest session into sending the
+// password base64-encoded over a plaintext control channel.
+func TestStaleChallengeCannotDowngradeTheScheme(t *testing.T) {
+	sawBasic := make(chan struct{}, 1)
+	s := testserver.New(t, testserver.Options{Handle: func(sc *testserver.ServerConn) {
+		req, err := sc.ReadRequest() // Dial OPTIONS.
+		if err != nil {
+			return
+		}
+		_ = sc.Respond(req, 200, "OK", nil, nil)
+
+		// Challenge Digest, so the client commits to Digest.
+		req, err = sc.ReadRequest()
+		if err != nil {
+			return
+		}
+		_ = sc.Respond(req, 401, "Unauthorized", digestChallenge(false), nil)
+
+		// Then answer the authenticated retry with a stale=true BASIC challenge.
+		req, err = sc.ReadRequest()
+		if err != nil {
+			return
+		}
+		h := rtsp.Header{}
+		h.Set("WWW-Authenticate", `Basic realm="`+authRealm+`", stale=true`)
+		_ = sc.Respond(req, 401, "Unauthorized", h, nil)
+
+		// Anything further must not carry a Basic credential.
+		for {
+			req, err = sc.ReadRequest()
+			if err != nil {
+				return
+			}
+			if strings.HasPrefix(req.Header.Get("Authorization"), "Basic ") {
+				select {
+				case sawBasic <- struct{}{}:
+				default:
+				}
+			}
+			_ = sc.Respond(req, 200, "OK", nil, nil)
+		}
+	}})
+	c, err := rtsp.Dial(context.Background(), rtsp.Config{
+		URL:      s.URL("/stream"),
+		Timeout:  testTimeout,
+		Username: authUser,
+		Password: authPass,
+	})
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	defer closeAndWait(t, c)
+
+	_, err = c.Describe(context.Background())
+	if !errors.Is(err, rtsp.ErrAuthFailed) {
+		t.Fatalf("Describe = %v, want ErrAuthFailed rather than a scheme downgrade", err)
+	}
+	// The scheme the client committed to must still be the one it reports.
+	if got := c.SessionInfo().AuthScheme; got != rtsp.AuthDigest {
+		t.Errorf("AuthScheme = %q, want Digest", got)
+	}
+	select {
+	case <-sawBasic:
+		t.Error("client sent a Basic credential after committing to Digest")
+	default:
 	}
 }

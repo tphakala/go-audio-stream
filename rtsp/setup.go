@@ -37,9 +37,10 @@ var (
 // else is ErrUnknownTrack, and a track already set up is ErrTrackAlreadySetUp.
 //
 // A clean protocol response the caller may recover from (a non-2xx
-// *ResponseError, *audiostream.RedirectError, or *UnauthorizedError) is
-// returned without tearing down the session, so the caller may Close or try
-// another track.
+// *ResponseError, or *audiostream.RedirectError) is returned without tearing
+// down the session, so the caller may Close or try another track. A 401 is
+// answered and retried automatically, so it reaches the caller only as an error
+// matching ErrAuthFailed, which wraps the challenge that was refused.
 //
 // A Transport this client rejects (ErrNoInterleaved, ErrBadChannelPair,
 // ErrChannelConflict, ErrMalformedTransport) is not the same case. The server
@@ -84,7 +85,7 @@ func (c *Client) Setup(ctx context.Context, trk Track, opts SetupOptions) error 
 		return fmt.Errorf("track %d: %w (Transport: %q)", trk.ID, cerr, raw)
 	}
 
-	tr := newTrack(trk.ID, desc, opts, gotRTP, gotRTCP, c.cfg.Logger)
+	tr := newTrack(trk.ID, desc, opts, gotRTCP, c.cfg.Logger)
 	return c.publishTrack(tr, gotRTP, gotRTCP)
 }
 

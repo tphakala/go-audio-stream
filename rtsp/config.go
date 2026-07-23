@@ -49,7 +49,9 @@ type Config struct {
 	Timeout time.Duration
 	// ReadIdle is the watchdog window: once playing, no interleaved frame
 	// within ReadIdle ends Wait with audiostream.ErrReadTimeout. Zero or
-	// negative disables it.
+	// negative disables it. Any interleaved frame counts, including one this
+	// client then drops: the watchdog answers "is the peer still sending", not
+	// "is the audio still usable".
 	ReadIdle time.Duration
 	// TLSConfig is used for rtsps. Nil means verified TLS with the URL host as
 	// the server name, unless InsecureTLS is set. A non-nil config is cloned;
@@ -83,9 +85,9 @@ type Config struct {
 // their defaults, and normalizes a negative ReadIdle to zero (disabled).
 func (c *Config) applyDefaults() {
 	if c.ReadIdle < 0 {
-		// Normalized to the documented "disabled" value so a negative can
-		// never reach a timer. time.NewTicker panics on a non-positive
-		// interval, and the keepalive task will build one from this.
+		// Normalized to the documented "disabled" value so a negative can never
+		// reach a deadline computation, where it would put the read deadline in
+		// the past and kill the session on its first read.
 		c.ReadIdle = 0
 	}
 	if c.Timeout <= 0 {
@@ -123,8 +125,9 @@ type Track struct {
 }
 
 // SetupOptions controls one Setup. Discard sets up a track whose frames are
-// dropped inside the reader without per-packet allocation or delivery; it is
-// recorded on the track now and takes effect when frame delivery lands.
+// dropped inside the reader without per-packet allocation or delivery, which is
+// how a caller keeps a video track's channels bound (so the server streams the
+// session it negotiated) without paying to parse it.
 type SetupOptions struct {
 	// Discard drops this track's frames in the reader, counting them in Stats
 	// but never depacketizing or delivering them.

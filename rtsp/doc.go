@@ -16,12 +16,18 @@
 // Client therefore holds a socket and a goroutine, and must be released with
 // Close; Wait reports the terminal cause. Close, Wait, Stats and SessionInfo
 // are safe from any goroutine. Describe and Setup discover the tracks and
-// negotiate their interleaved channels, and Play starts delivery: from then on
-// the reader routes each interleaved frame to its track, depacketizes it, and
-// calls Config.OnFrame on the reader goroutine, while a timer goroutine sends
-// RTSP keepalives and RTCP Receiver Reports. A 401 on any of those verbs is
-// answered and retried automatically.
+// negotiate their interleaved channels. Routing begins with the first
+// successful Setup, not with Play: from then on the reader routes each
+// interleaved frame to its track, depacketizes it, and calls Config.OnFrame on
+// the reader goroutine. Play is what asks the server to start sending, and it
+// also starts a timer goroutine that emits RTSP keepalives and RTCP Receiver
+// Reports. A 401 on Describe, Setup or Play is answered and retried
+// automatically; Dial's OPTIONS probe tolerates one instead, since it only reads
+// the Public header.
 //
-// One thing is still missing from a complete session: the UDP transport. This
-// client speaks only the TCP-interleaved profile.
+// This client speaks only the TCP-interleaved profile; there is no UDP
+// transport. Several details within that profile are deliberately coarse for
+// now, and each says so where it is implemented: Receiver Reports carry no
+// jitter or fraction-lost estimate, only AAC-hbr among RFC 3640's modes is
+// depacketized, and AAC PTS interpolation assumes 1024 samples per frame.
 package rtsp

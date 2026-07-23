@@ -160,6 +160,15 @@ func (h Header) Add(name, v string) {
 	h[c] = append(h[c], v)
 }
 
+// Del removes every value stored under name. Deleting an absent field is a
+// no-op. It completes the Get/Values/Set/Add set, and exists because a request
+// that is retried needs a way to take a header back off rather than only to
+// overwrite it: an Authorization computed for one attempt must not survive into
+// the next when the recomputation fails.
+func (h Header) Del(name string) {
+	delete(h, canonicalHeaderName(name))
+}
+
 // Request is an outbound RTSP request (client to server) or a parsed
 // server-initiated request.
 type Request struct {

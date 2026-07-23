@@ -45,8 +45,10 @@ func (c *Client) Play(ctx context.Context) error {
 
 	c.seedFromRTPInfo(resp.Header.Get("RTP-Info"))
 
-	// Store the watchdog origin before taking mu so the reader (which may
-	// already be delivering early frames) never blocks on the lifecycle lock.
+	// Stamp the watchdog origin before playing is set. armReadDeadline derives
+	// the read deadline from this value, so a zero here plus playing would mean
+	// a 1970 deadline that expired decades ago, killing a healthy stream on its
+	// first read.
 	c.lastFrameAt.Store(time.Now().UnixNano())
 
 	// Take mu for the transition and the timer launch together. wg.Add(1) runs
@@ -77,9 +79,16 @@ func (c *Client) Play(ctx context.Context) error {
 // The RTP-Info seed applies only to the very first baseline (tr.baselineFixed
 // is still false): with a plausible seed (seed <= firstTS, so PTS never goes
 // negative) the advertised origin is used, otherwise the first packet's
-// timestamp is the baseline. Once a baseline has ever been fixed, the seed is
-// permanently ignored (decision 6), so a later SSRC reset re-baselines cleanly
-// from its first packet rather than re-applying the stale origin.
+// timestamp is the baseline. Once a baseline has ever been fixed the seed is
+// permanently ignored, so a later SSRC reset re-baselines cleanly from its
+// first packet rather than re-applying the stale origin.
+//
+// The seed is therefore best-effort by construction. Play stores it after the
+// PLAY response returns, while the reader may already be routing frames that
+// arrived in the same TCP segment as that response, so a server that starts
+// streaming with its PLAY response can fix the baseline from a packet before
+// the seed lands. Both outcomes are correct baselines; only the origin differs,
+// and the first delivered frame winning is what makes the rule simple.
 func (c *Client) seededOrigin(tr *track, firstTS uint64) uint64 {
 	if !tr.baselineFixed && tr.hasSeed.Load() {
 		if seed := tr.seed.Load(); seed <= firstTS {
@@ -90,8 +99,10 @@ func (c *Client) seededOrigin(tr *track, firstTS uint64) uint64 {
 }
 
 // seedFromRTPInfo parses an RTP-Info header and records the timestamp origin
-// for each matched track. Only the origin is seeded, never the sequence
-// (decision 6). An absent or unparseable header is ignored, leaving the
+// for each matched track. Only the origin is seeded, never the sequence: a
+// server's advertised sequence number is not needed to interpret the stream,
+// and trusting it would desynchronize loss accounting for no gain. An absent or
+// unparseable header is ignored, leaving the
 // first-packet baseline. The seed is published atomically because the reader
 // may already be delivering early frames on the caller's goroutine.
 func (c *Client) seedFromRTPInfo(header string) {
@@ -124,9 +135,14 @@ func (c *Client) seedFromRTPInfo(header string) {
 // 32-bit integers (the plausibility test); rtptime is returned widened to
 // uint64. The seq value itself is unused (sequence is never seeded), only its
 // presence gates plausibility.
+//
+// A url carrying a control character is rejected outright. It is a header a
+// remote server controls, and it flows into URL resolution and into comparisons
+// against this client's own control URLs, so it has no business carrying CR, LF
+// or NUL; the fuzz target asserts this.
 func parseRTPInfoEntry(entry string) (url string, seq, rtptime uint64, ok bool) {
 	var haveSeq, haveTime bool
-	for _, part := range strings.Split(entry, ";") {
+	for part := range strings.SplitSeq(entry, ";") {
 		name, val, has := strings.Cut(strings.TrimSpace(part), "=")
 		if !has {
 			continue
@@ -145,12 +161,23 @@ func parseRTPInfoEntry(entry string) (url string, seq, rtptime uint64, ok bool) 
 			}
 		}
 	}
+	if strings.ContainsAny(url, "\r\n\x00") {
+		return "", 0, 0, false
+	}
 	return url, seq, rtptime, haveSeq && haveTime
 }
 
 // matchTrack maps an RTP-Info entry to a set-up track by resolved-control
 // equality, falling back to positional order (the entry's index across the
-// set-up tracks) when the url is absent or matches no track.
+// set-up tracks) only when the entry carries no url at all.
+//
+// A url that resolves to no set-up track yields no match rather than the
+// positional one. Servers commonly report only their primary track, so an entry
+// naming a track this client did not set up is a routine case, and treating it
+// positionally would seed the wrong track: with video reported and only audio
+// set up, the audio track would take the video stream's origin and every PTS
+// would be wrong by the offset between the two clocks. Declining to seed costs
+// nothing, because the first-packet baseline is already the correct fallback.
 func matchTrack(tracks []*track, base, rawURL string, pos int) *track {
 	if rawURL != "" {
 		resolved := rawURL
@@ -162,8 +189,9 @@ func matchTrack(tracks []*track, base, rawURL string, pos int) *track {
 				return tr
 			}
 		}
+		return nil
 	}
-	if pos >= 0 && pos < len(tracks) {
+	if pos < len(tracks) {
 		return tracks[pos]
 	}
 	return nil

@@ -25,19 +25,20 @@ type describedTrack struct {
 	control string
 	codec   audiostream.Codec
 	// payloadType is the RTP payload type the codec was resolved from, or
-	// payloadTypeUnknown when the m= line named no format. The pipeline keeps
-	// it so the reader can reject a packet carrying a different PT on this
-	// track's channel; an m= line listing several formats resolves to the
-	// first one the SDP layer recognized, and the others are not this track.
+	// payloadTypeUnknown when the m= line named no format. It is the FIRST
+	// format the m= line lists, recognized or not, which is why the pipeline
+	// treats it as the expected payload type rather than an enforced one: see
+	// track.acceptPayloadType.
 	payloadType int
 	clockRate   int
 	media       audiostream.MediaKind
 	aac         *sdp.AACParams
 }
 
-// payloadTypeUnknown is describedTrack.payloadType when the SDP named no
-// usable format, matching the sentinel sdp.Track uses. The reader skips the
-// payload-type check for such a track rather than dropping every packet.
+// payloadTypeUnknown is describedTrack.payloadType when the SDP named no usable
+// format, matching the sentinel sdp.DescribedTrack.PayloadType uses. A track
+// with no declared payload type simply has nothing to compare an observed one
+// against, so no mismatch is ever reported for it.
 const payloadTypeUnknown = -1
 
 // Describe issues a DESCRIBE, parses the SDP body, resolves the session base
@@ -50,8 +51,9 @@ const payloadTypeUnknown = -1
 // succeeded, a second call returns a *StateError.
 //
 // Errors it can return: *audiostream.RedirectError for a 3xx, which is never
-// followed; ErrAuthFailed when a 401 survived the authentication retries (the
-// retry is automatic, so a *UnauthorizedError does not reach the caller);
+// followed; an error matching ErrAuthFailed when a 401 could not be answered or
+// survived the retries, which wraps the *UnauthorizedError so the challenge is
+// still readable with errors.As;
 // *ResponseError for any other non-2xx; ErrNotSDP when the response body is
 // not application/sdp. All of them leave the session open so the caller may
 // Close or retry.

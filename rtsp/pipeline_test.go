@@ -54,7 +54,7 @@ func TestNewTrackAACHbrCaseInsensitive(t *testing.T) {
 				media:     audiostream.MediaAudio,
 				aac:       &sdp.AACParams{Mode: tc.mode, SizeLength: 13, IndexLength: 3, IndexDeltaLength: 3},
 			}
-			tr := newTrack(0, desc, SetupOptions{}, 0, 1, nil)
+			tr := newTrack(0, desc, SetupOptions{}, 1, nil)
 			if tr.kind != tc.wantKind {
 				t.Errorf("kind = %d, want %d", tr.kind, tc.wantKind)
 			}
@@ -74,7 +74,7 @@ func TestNewTrackInvalidAACFmtpFallsBackToRaw(t *testing.T) {
 		media: audiostream.MediaAudio,
 		aac:   &sdp.AACParams{Mode: testAACHbrMode, SizeLength: 0},
 	}
-	tr := newTrack(0, desc, SetupOptions{}, 0, 1, nil)
+	tr := newTrack(0, desc, SetupOptions{}, 1, nil)
 	if tr.kind != deliverRaw {
 		t.Errorf("kind = %d, want deliverRaw for invalid fmtp", tr.kind)
 	}
@@ -98,7 +98,7 @@ func TestNewTrackCodecSelection(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			desc := describedTrack{codec: tc.codec, media: audiostream.MediaAudio}
-			tr := newTrack(0, desc, SetupOptions{}, 0, 1, nil)
+			tr := newTrack(0, desc, SetupOptions{}, 1, nil)
 			if tr.kind != tc.wantKind {
 				t.Errorf("kind = %d, want %d", tr.kind, tc.wantKind)
 			}
@@ -151,7 +151,7 @@ func TestNewTrackNonAudioFallsBackToRaw(t *testing.T) {
 				media:     media,
 				aac:       aacParams,
 			}
-			tr := newTrack(0, desc, SetupOptions{}, 0, 1, nil)
+			tr := newTrack(0, desc, SetupOptions{}, 1, nil)
 			if tr.kind != deliverRaw {
 				t.Errorf("kind = %d, want deliverRaw for a %s track", tr.kind, media)
 			}
@@ -166,7 +166,7 @@ func TestNewTrackDiscardRecorded(t *testing.T) {
 	t.Parallel()
 	desc := describedTrack{codec: audiostream.CodecOpus{}, media: audiostream.MediaAudio}
 	for _, want := range []bool{false, true} {
-		if got := newTrack(0, desc, SetupOptions{Discard: want}, 0, 1, nil).discard; got != want {
+		if got := newTrack(0, desc, SetupOptions{Discard: want}, 1, nil).discard; got != want {
 			t.Errorf("discard = %v, want %v", got, want)
 		}
 	}
@@ -404,7 +404,9 @@ func TestDeliverAACMultipleAUs(t *testing.T) {
 		t.Errorf("SeqGaps = %d/%d/%d, want 5/0/0", frames[0].SeqGap, frames[1].SeqGap, frames[2].SeqGap)
 	}
 	// PTS interpolates by SamplesPerFrame (1024) per AU at 16000 Hz.
-	wantPTS := []time.Duration{0, ptsTicks(1024, 16000), ptsTicks(2048, 16000)}
+	// 1024 and 2048 ticks at 16 kHz. Literals rather than a re-derivation, so
+	// the assertion cannot drift along with the arithmetic it is checking.
+	wantPTS := []time.Duration{0, 64 * time.Millisecond, 128 * time.Millisecond}
 	for i := range frames {
 		if frames[i].PTS != wantPTS[i] {
 			t.Errorf("frame %d PTS = %v, want %v", i, frames[i].PTS, wantPTS[i])
@@ -525,9 +527,11 @@ func TestMatchTrack(t *testing.T) {
 	if got := matchTrack(tracks, base, "video", 0); got != tr1 {
 		t.Errorf("relative-url match = %v, want tr1", got)
 	}
-	// No url match falls back to positional order.
-	if got := matchTrack(tracks, base, "rtsp://cam/stream/other", 0); got != tr0 {
-		t.Errorf("no-match fallback = %v, want positional tr0", got)
+	// A url naming a track this client did not set up yields NO match. Falling
+	// back positionally there would seed this entry's origin onto an unrelated
+	// track, which is far worse than not seeding it at all.
+	if got := matchTrack(tracks, base, "rtsp://cam/stream/other", 0); got != nil {
+		t.Errorf("unmatched url = %v, want nil rather than the positional track", got)
 	}
 	// An absent url uses positional order directly.
 	if got := matchTrack(tracks, base, "", 1); got != tr1 {
@@ -559,15 +563,14 @@ func TestZeroAllocSteadyStateDelivery(t *testing.T) {
 		name string
 		tr   *track
 		pkt  rtp.Packet
-		// maxAlloc is the permitted allocations per frame. The Opus, G.711, and
-		// raw paths and the delivered Frame value are allocation-free (0). AAC
-		// carries exactly one unavoidable allocation per packet: the M3
-		// depacketizer allocates its AU-headers slice inside Depacketize, which
-		// this package must not modify. That allocation is in aac.Depacketize,
-		// not in the reader hot path or the Frame boundary.
+		// maxAlloc is the permitted allocations per frame, and it is zero for
+		// every path. The AAC depacketizer reuses its AU-header and AU slices
+		// across calls (its own benchmarks report 0 allocs/op), so the tolerance
+		// of 1 this table used to carry for AAC was slack that would have
+		// absorbed a real regression rather than a cost anything actually paid.
 		maxAlloc float64
 	}{
-		{name: "aac", tr: aacTr, pkt: aacPkt, maxAlloc: 1},
+		{name: "aac", tr: aacTr, pkt: aacPkt, maxAlloc: 0},
 		{name: "opus", tr: opusTr, pkt: opusPkt, maxAlloc: 0},
 		{name: "g711", tr: g711Tr, pkt: g711Pkt, maxAlloc: 0},
 		{name: "raw", tr: rawTr, pkt: rawPkt, maxAlloc: 0},
@@ -602,12 +605,6 @@ func TestDiscardTrackDropsAllocationFree(t *testing.T) {
 	}
 }
 
-// ptsTicks computes the PTS a delta of tickDelta clock ticks yields at the
-// given rate, mirroring ptsOf for the AAC interpolation assertions.
-func ptsTicks(tickDelta, rate uint64) time.Duration {
-	return time.Duration(tickDelta/rate)*time.Second + time.Duration((tickDelta%rate)*uint64(time.Second)/rate)
-}
-
 // copyFrame deep-copies a Frame's Data so a test may retain it past the
 // delivery callback, honoring the Frame.Data ownership contract.
 func copyFrame(f *audiostream.Frame) audiostream.Frame {
@@ -616,40 +613,71 @@ func copyFrame(f *audiostream.Frame) audiostream.Frame {
 	return cp
 }
 
-// A track accepts only the payload type its m= line resolved it from, unless
-// the SDP named none, in which case it accepts everything rather than dropping
-// every packet.
-func TestAcceptsPayloadType(t *testing.T) {
+// A track latches its payload type from the first packet it sees and rejects
+// every other one thereafter, whatever the SDP declared.
+func TestAcceptPayloadTypeLatchesFromTheWire(t *testing.T) {
 	t.Parallel()
-	bound := &track{payloadType: 96}
-	if !bound.acceptsPayloadType(96) {
-		t.Error("acceptsPayloadType(96) = false for a PT 96 track, want true")
+	// A camera whose stream disagrees with its own SDP keeps working: the
+	// first packet's PT wins, and only a THIRD format is rejected.
+	lying := &track{sdpPayloadType: 97}
+	if !lying.acceptPayloadType(96, nil) {
+		t.Error("first packet rejected; the wire must be authoritative over the SDP")
 	}
-	if bound.acceptsPayloadType(97) {
-		t.Error("acceptsPayloadType(97) = true for a PT 96 track, want false")
+	if !lying.acceptPayloadType(96, nil) {
+		t.Error("second packet of the latched type rejected")
 	}
-	unknown := &track{payloadType: payloadTypeUnknown}
-	for _, pt := range []uint8{0, 96, 127} {
-		if !unknown.acceptsPayloadType(pt) {
-			t.Errorf("acceptsPayloadType(%d) = false for a track with no resolved PT, want true", pt)
-		}
+	if lying.acceptPayloadType(97, nil) {
+		t.Error("a second format was accepted after the track latched")
+	}
+	if got := lying.wirePayloadType; got != 96 {
+		t.Errorf("wirePayloadType = %d, want the latched 96", got)
+	}
+
+	// A track with no declared payload type behaves identically: there is
+	// simply no mismatch to report.
+	unknown := &track{sdpPayloadType: payloadTypeUnknown}
+	if !unknown.acceptPayloadType(0, nil) {
+		t.Error("first packet rejected for a track with no declared PT")
+	}
+	if unknown.acceptPayloadType(8, nil) {
+		t.Error("a second format was accepted after the track latched")
+	}
+
+	// The zero value must not filter: a track built by any path that does not
+	// set sdpPayloadType would otherwise accept only PT 0.
+	var zero track
+	if !zero.acceptPayloadType(96, nil) {
+		t.Error("the zero-value track filtered to PT 0 instead of latching")
 	}
 }
 
 // A timestamp below the baseline (a reordered packet, or an AU offset applied
 // to one) clamps to zero rather than wrapping the unsigned subtraction into an
-// enormous PTS.
-func TestPtsOfBelowBaselineClamps(t *testing.T) {
+// enormous PTS, and a timestamp far above it clamps to what a Duration holds
+// rather than wrapping negative.
+func TestPtsOfClamps(t *testing.T) {
 	t.Parallel()
 	tr := &track{clockRate: 16000, baseTS: 1000}
 	if got := tr.ptsOf(999); got != 0 {
 		t.Errorf("ptsOf(below baseline) = %v, want 0", got)
 	}
+	// A sender may advance the RTP timestamp by up to 2^31 per packet, so the
+	// unwrapped 64-bit value can reach a delta whose seconds term overflows an
+	// int64 nanosecond count.
+	huge := tr.ptsOf(^uint64(0))
+	if huge < 0 {
+		t.Errorf("ptsOf(max timestamp) = %v, want a clamp rather than a negative wrap", huge)
+	}
+	if want := time.Duration(maxPTSSeconds) * time.Second; huge != want {
+		t.Errorf("ptsOf(max timestamp) = %v, want the clamp %v", huge, want)
+	}
 }
 
-// The RFC 3550 report block carries 24 bits of cumulative loss, so a larger
-// count saturates instead of wrapping around and claiming the stream recovered.
-func TestCumulativeLostSaturates(t *testing.T) {
+// The RFC 3550 report block carries cumulative loss as a SIGNED 24-bit field,
+// so the clamp is 0x7FFFFF (Appendix A.3), not 0xFFFFFF. Saturating at the
+// unsigned maximum would put -1 on the wire: one packet MORE than expected, the
+// opposite of the very lossy stream being reported.
+func TestCumulativeLostSaturatesAtTheSignedMaximum(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
 		in   uint64
@@ -657,13 +685,20 @@ func TestCumulativeLostSaturates(t *testing.T) {
 	}{
 		{in: 0, want: 0},
 		{in: 1234, want: 1234},
-		{in: 0x00FFFFFF, want: 0x00FFFFFF},
-		{in: 0x01000000, want: 0x00FFFFFF},
-		{in: ^uint64(0), want: 0x00FFFFFF},
+		{in: 0x7FFFFF, want: 0x7FFFFF},
+		{in: 0x800000, want: 0x7FFFFF},
+		{in: 0xFFFFFF, want: 0x7FFFFF},
+		{in: ^uint64(0), want: 0x7FFFFF},
 	}
 	for _, tc := range cases {
-		if got := cumulativeLost(tc.in); got != tc.want {
-			t.Errorf("cumulativeLost(%d) = %d, want %d", tc.in, got, tc.want)
+		got := cumulativeLost(tc.in)
+		if got != tc.want {
+			t.Errorf("cumulativeLost(%d) = %#x, want %#x", tc.in, got, tc.want)
+		}
+		// Whatever the input, the value must stay non-negative once the wire
+		// truncates it to 24 bits and a receiver sign-extends it.
+		if signed := int32(got<<8) >> 8; signed < 0 {
+			t.Errorf("cumulativeLost(%d) = %#x, which decodes as %d in a signed 24-bit field", tc.in, got, signed)
 		}
 	}
 }
