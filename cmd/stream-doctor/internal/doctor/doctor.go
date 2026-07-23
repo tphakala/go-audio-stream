@@ -2,6 +2,7 @@ package doctor
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -232,9 +233,24 @@ func (r *runner) listen() {
 
 	res, err := writeWAV(f, r.audio, r.frames)
 	if err != nil {
-		res = ListenResult{Skipped: true, SkipReason: err.Error()}
+		res = ListenResult{Skipped: true, SkipReason: sanitizeWriteErr(err)}
 	}
 	r.report.Listen = res
+}
+
+// sanitizeWriteErr redacts a writeWAV failure for the report's SkipReason.
+// Most such failures are I/O errors on the --wav output file, which the
+// standard library wraps in an *os.PathError (a type alias for
+// *fs.PathError) carrying the local filesystem path in its Path field;
+// unwrapping to the underlying cause strips that path, matching the
+// os.Create branch above. No path fragment may reach the report, which
+// deliberately never shows the --wav path.
+func sanitizeWriteErr(err error) string {
+	var pathErr *os.PathError
+	if errors.As(err, &pathErr) {
+		return "wav write failed: " + pathErr.Err.Error()
+	}
+	return "wav write failed: " + err.Error()
 }
 
 // render writes the walkthrough (and, under --report, the Markdown report)
