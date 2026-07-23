@@ -43,3 +43,24 @@ func TestDepacketizeSingleByte(t *testing.T) {
 		t.Errorf("Depacketize = % x, want 08", got)
 	}
 }
+
+func TestDepacketizeAliasesPayload(t *testing.T) {
+	t.Parallel()
+	// The doc promises the result aliases the payload rather than copying
+	// it, which is what lets the delivery path stay allocation free. Byte
+	// equality alone would still pass if a copy crept in, so assert the
+	// aliasing directly by mutating the payload underneath the result.
+	payload := []byte{0x78, 0x01, 0x02, 0x03}
+	got, err := opus.Depacketize(payload)
+	if err != nil {
+		t.Fatalf("Depacketize() = %v", err)
+	}
+	if len(got) != len(payload) {
+		t.Fatalf("len(got) = %d, want %d", len(got), len(payload))
+	}
+
+	payload[0] = 0xFF
+	if got[0] != 0xFF {
+		t.Errorf("got[0] = %#x after mutating payload[0], want %#x: the result copied instead of aliasing", got[0], 0xFF)
+	}
+}

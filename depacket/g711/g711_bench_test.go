@@ -36,6 +36,10 @@ func BenchmarkDepacketizeDst(b *testing.B) {
 	}
 }
 
+// sinkPCM keeps the allocated result reachable so the compiler cannot
+// discard the allocation the benchmark exists to measure.
+var sinkPCM []byte
+
 // BenchmarkDepacketizeAlloc measures the allocating convenience wrapper,
 // for contrast against BenchmarkDepacketizeDst's reused buffer.
 func BenchmarkDepacketizeAlloc(b *testing.B) {
@@ -45,6 +49,6 @@ func BenchmarkDepacketizeAlloc(b *testing.B) {
 	b.SetBytes(int64(len(payload)))
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		_ = g711.DepacketizeAlloc(payload, audiostream.MuLaw)
+		sinkPCM, _ = g711.DepacketizeAlloc(payload, audiostream.MuLaw)
 	}
 }

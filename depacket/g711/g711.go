@@ -11,6 +11,12 @@ import (
 // the expanded PCM (it needs 2*len(payload) bytes).
 var ErrShortBuffer = errors.New("g711: destination buffer too small")
 
+// ErrUnknownLaw is returned when law is neither audiostream.MuLaw nor
+// audiostream.ALaw. Decoding with the wrong table produces plausible but
+// wrong audio, which is worse than a clear failure, so an unrecognized
+// law is refused rather than defaulted.
+var ErrUnknownLaw = errors.New("g711: unknown companding law")
+
 // muLawExpand expands one mu-law companded byte to a signed 16-bit PCM
 // sample, following the ITU-T G.711 (Sun/CCITT g711.c) reference decode:
 // invert all bits, split into sign, 3-bit exponent, and 4-bit mantissa,
@@ -72,8 +78,13 @@ func init() {
 // (audiostream.MuLaw, PCMU) or A-law (audiostream.ALaw, PCMA). If dst is
 // shorter than 2*len(payload), Depacketize writes nothing and returns
 // (0, ErrShortBuffer). An empty payload writes nothing and returns
-// (0, nil). No allocation occurs; dst is caller-owned and reusable across
-// packets.
+// (0, nil). A law that is neither of the two returns (0, ErrUnknownLaw)
+// rather than decoding with an arbitrary table. No allocation occurs;
+// dst is caller-owned and reusable across packets.
+//
+// dst and payload must not overlap. Each input byte expands to two
+// output bytes, so a shared buffer would overwrite input that has not
+// been read yet and silently corrupt the samples after the first.
 func Depacketize(dst, payload []byte, law audiostream.Law) (int, error) {
 	if len(payload) == 0 {
 		return 0, nil
@@ -82,9 +93,14 @@ func Depacketize(dst, payload []byte, law audiostream.Law) (int, error) {
 	if len(dst) < need {
 		return 0, ErrShortBuffer
 	}
-	table := &muLawTable
-	if law == audiostream.ALaw {
+	var table *[256]int16
+	switch law {
+	case audiostream.MuLaw:
+		table = &muLawTable
+	case audiostream.ALaw:
 		table = &aLawTable
+	default:
+		return 0, ErrUnknownLaw
 	}
 	for i, b := range payload {
 		binary.LittleEndian.PutUint16(dst[2*i:], uint16(table[b]))
@@ -96,8 +112,13 @@ func Depacketize(dst, payload []byte, law audiostream.Law) (int, error) {
 // PCM slice of length 2*len(payload). It is the allocating convenience
 // wrapper over Depacketize for callers that do not manage their own
 // buffer. It never constructs audiostream.Frame.
-func DepacketizeAlloc(payload []byte, law audiostream.Law) []byte {
+//
+// The buffer it allocates is always correctly sized, so the only error it
+// can return is ErrUnknownLaw, and it returns a nil slice with it.
+func DepacketizeAlloc(payload []byte, law audiostream.Law) ([]byte, error) {
 	dst := make([]byte, 2*len(payload))
-	_, _ = Depacketize(dst, payload, law) // dst is always correctly sized
-	return dst
+	if _, err := Depacketize(dst, payload, law); err != nil {
+		return nil, err
+	}
+	return dst, nil
 }

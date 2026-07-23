@@ -1,6 +1,7 @@
 package g711_test
 
 import (
+	"bytes"
 	"encoding/binary"
 	"errors"
 	"testing"
@@ -62,7 +63,10 @@ func TestMuLawAnchors(t *testing.T) {
 		if got := refMuLawTable[b]; got != want {
 			t.Fatalf("reference table disagrees: refMuLawTable[%#02x] = %d, want %d", b, got, want)
 		}
-		out := g711.DepacketizeAlloc([]byte{b}, audiostream.MuLaw)
+		out, err := g711.DepacketizeAlloc([]byte{b}, audiostream.MuLaw)
+		if err != nil {
+			t.Fatalf("DepacketizeAlloc(mu-law) = %v", err)
+		}
 		if got := int16(binary.LittleEndian.Uint16(out)); got != want {
 			t.Errorf("mu-law %#02x -> %d, want %d", b, got, want)
 		}
@@ -76,7 +80,10 @@ func TestALawAnchors(t *testing.T) {
 		if got := refALawTable[b]; got != want {
 			t.Fatalf("reference table disagrees: refALawTable[%#02x] = %d, want %d", b, got, want)
 		}
-		out := g711.DepacketizeAlloc([]byte{b}, audiostream.ALaw)
+		out, err := g711.DepacketizeAlloc([]byte{b}, audiostream.ALaw)
+		if err != nil {
+			t.Fatalf("DepacketizeAlloc(a-law) = %v", err)
+		}
 		if got := int16(binary.LittleEndian.Uint16(out)); got != want {
 			t.Errorf("a-law %#02x -> %d, want %d", b, got, want)
 		}
@@ -87,11 +94,11 @@ func TestFullTableCrosscheck(t *testing.T) {
 	t.Parallel()
 	for i := 0; i < 256; i++ {
 		b := byte(i)
-		muOut := g711.DepacketizeAlloc([]byte{b}, audiostream.MuLaw)
+		muOut, _ := g711.DepacketizeAlloc([]byte{b}, audiostream.MuLaw)
 		if got := int16(binary.LittleEndian.Uint16(muOut)); got != refMuLawTable[b] {
 			t.Errorf("mu-law %#02x = %d, want %d", b, got, refMuLawTable[b])
 		}
-		aOut := g711.DepacketizeAlloc([]byte{b}, audiostream.ALaw)
+		aOut, _ := g711.DepacketizeAlloc([]byte{b}, audiostream.ALaw)
 		if got := int16(binary.LittleEndian.Uint16(aOut)); got != refALawTable[b] {
 			t.Errorf("a-law %#02x = %d, want %d", b, got, refALawTable[b])
 		}
@@ -135,7 +142,45 @@ func TestDepacketizeEmpty(t *testing.T) {
 	if err != nil || n != 0 {
 		t.Errorf("empty: n=%d err=%v, want 0/nil", n, err)
 	}
-	if out := g711.DepacketizeAlloc(nil, audiostream.ALaw); len(out) != 0 {
+	if out, err := g711.DepacketizeAlloc(nil, audiostream.ALaw); err != nil || len(out) != 0 {
 		t.Errorf("DepacketizeAlloc(nil) len = %d, want 0", len(out))
+	}
+}
+
+func TestDepacketizeUnknownLaw(t *testing.T) {
+	t.Parallel()
+	// Decoding with the wrong table yields plausible but wrong audio,
+	// which is harder to diagnose than a refusal, so a law that is
+	// neither of the two defined ones is rejected rather than defaulted.
+	dst := make([]byte, 8)
+	n, err := g711.Depacketize(dst, []byte{0x01, 0x02}, audiostream.Law(99))
+	if !errors.Is(err, g711.ErrUnknownLaw) {
+		t.Errorf("Depacketize(law 99) err = %v, want ErrUnknownLaw", err)
+	}
+	if n != 0 {
+		t.Errorf("Depacketize(law 99) n = %d, want 0", n)
+	}
+	if out, err := g711.DepacketizeAlloc([]byte{0x01}, audiostream.Law(99)); !errors.Is(err, g711.ErrUnknownLaw) || out != nil {
+		t.Errorf("DepacketizeAlloc(law 99) = (%v, %v), want (nil, ErrUnknownLaw)", out, err)
+	}
+}
+
+func TestDepacketizeShortBufferLeavesDstUntouched(t *testing.T) {
+	t.Parallel()
+	// The contract says a short destination writes nothing, so a partial
+	// write would leave a caller reusing the buffer with a mix of new and
+	// stale samples.
+	dst := []byte{0xAA, 0xBB, 0xCC, 0xDD}
+	before := append([]byte(nil), dst...)
+
+	n, err := g711.Depacketize(dst, []byte{0x01, 0x02, 0x03}, audiostream.MuLaw)
+	if !errors.Is(err, g711.ErrShortBuffer) {
+		t.Fatalf("err = %v, want ErrShortBuffer", err)
+	}
+	if n != 0 {
+		t.Errorf("n = %d, want 0", n)
+	}
+	if !bytes.Equal(dst, before) {
+		t.Errorf("dst = % x, want it untouched % x", dst, before)
 	}
 }
