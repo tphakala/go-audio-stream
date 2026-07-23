@@ -169,7 +169,7 @@ func TestParseSkipsOutOfRangePayloadTypes(t *testing.T) {
 	// rather than stored, so a caller ranging over RTPMaps or FMTPs never
 	// sees a key that Formats could not contain.
 	body := []byte("v=0\r\n" +
-		"m=audio 0 RTP/AVP 97\r\n" +
+		"m=audio 0 RTP/AVP 97 128 -1 99999\r\n" +
 		"a=rtpmap:97 opus/48000/2\r\n" +
 		"a=rtpmap:128 BOGUS/8000\r\n" +
 		"a=rtpmap:-1 BOGUS/8000\r\n" +
@@ -186,6 +186,9 @@ func TestParseSkipsOutOfRangePayloadTypes(t *testing.T) {
 	}
 	m := s.Media[0]
 
+	if len(m.Formats) != 1 || m.Formats[0] != 97 {
+		t.Errorf("Formats = %v, want [97] (the m= line also lists 128, -1 and 99999)", m.Formats)
+	}
 	if len(m.RTPMaps) != 1 {
 		t.Errorf("len(RTPMaps) = %d, want 1 (only payload type 97): %v", len(m.RTPMaps), m.RTPMaps)
 	}
