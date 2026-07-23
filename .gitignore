@@ -28,3 +28,4 @@ coverage.txt
 
 # Orchestration scratch (session-local, never committed)
 /.superpowers/
+/.serena/
