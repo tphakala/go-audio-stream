@@ -35,21 +35,26 @@ const (
 // starts sending. A Config value carries credentials; do not log it.
 type Config struct {
 	// URL is the rtsp:// or rtsps:// target. Credentials may be embedded in
-	// the userinfo; they are never logged and are redacted in any
-	// stringification.
+	// the userinfo. Redact it with RedactURL before logging it: this package
+	// never logs the URL itself, but Config has no String method, so printing
+	// a Config with %v exposes both the userinfo and Password verbatim.
 	URL string
 	// Username and Password supply credentials when URL has no userinfo.
 	// Ignored when the URL carries userinfo. Never logged.
 	Username string
 	Password string
-	// Timeout bounds the dial and each request/response round-trip. Zero uses
-	// DefaultTimeout.
+	// Timeout bounds the dial and, separately, each request/response
+	// round-trip, so an rtsps Dial can take up to three of them (connect, TLS
+	// handshake, OPTIONS probe). Zero or negative uses DefaultTimeout.
 	Timeout time.Duration
 	// ReadIdle is the watchdog window: once playing, no interleaved frame
-	// within ReadIdle ends Wait with ErrReadTimeout. Zero disables it.
+	// within ReadIdle ends Wait with audiostream.ErrReadTimeout. Zero or
+	// negative disables it.
 	ReadIdle time.Duration
-	// TLSConfig is used for rtsps. Nil means verified TLS with the URL host
-	// as the server name.
+	// TLSConfig is used for rtsps. Nil means verified TLS with the URL host as
+	// the server name, unless InsecureTLS is set. A non-nil config is cloned;
+	// an empty ServerName is filled in from the URL host and an unset
+	// MinVersion is raised to TLS 1.2.
 	TLSConfig *tls.Config
 	// InsecureTLS opts into skipping certificate verification for rtsps
 	// (self-signed cameras). Ignored when TLSConfig is non-nil.
@@ -57,18 +62,29 @@ type Config struct {
 	// UserAgent is sent on every request. Zero uses DefaultUserAgent.
 	UserAgent string
 	// OnFrame receives every delivered frame on the reader goroutine. It must
-	// not block and must not call Describe, Setup, Play, or Wait (only Close
-	// and Stats are callback-safe). Frame.Data is valid only for the duration
-	// of the call. Nil is allowed: frames are then counted in Stats but not
-	// delivered.
+	// not block and must not call Describe, Setup, Play, or Wait (Close, Stats
+	// and SessionInfo are the callback-safe ones). Frame.Data is valid only
+	// for the duration of the call. Nil is allowed: frames are then counted in
+	// Stats but not delivered.
+	//
+	// Frame delivery arrives with track setup in a later change; today no
+	// frames are delivered and none are counted.
 	OnFrame func(audiostream.Frame)
-	// Logger receives diagnostics; nil disables logging. URLs are passed
-	// through RedactURL before logging; credentials are never logged.
+	// Logger is reserved for diagnostics and is not read yet; the package
+	// currently emits no log output. When it is wired, URLs will be passed
+	// through RedactURL and credentials will never be logged.
 	Logger *slog.Logger
 }
 
-// applyDefaults fills zero-valued Timeout and UserAgent with their defaults.
+// applyDefaults fills a zero or negative Timeout and a zero UserAgent with
+// their defaults, and normalizes a negative ReadIdle to zero (disabled).
 func (c *Config) applyDefaults() {
+	if c.ReadIdle < 0 {
+		// Normalized to the documented "disabled" value so a negative can
+		// never reach a timer. time.NewTicker panics on a non-positive
+		// interval, and the keepalive task will build one from this.
+		c.ReadIdle = 0
+	}
 	if c.Timeout <= 0 {
 		c.Timeout = DefaultTimeout
 	}
@@ -77,7 +93,9 @@ func (c *Config) applyDefaults() {
 	}
 }
 
-// Track is one media track discovered by Describe and passed to Setup.
+// Track is one media track discovered by Describe and passed to Setup. Both
+// verbs arrive in a later change; the type is declared here so the shape is
+// visible, and nothing in this package produces or consumes it yet.
 type Track struct {
 	// ID is a stable per-session id (the SDP media index).
 	ID int
@@ -93,7 +111,8 @@ type Track struct {
 	Control string
 }
 
-// SetupOptions controls one Setup. Discard sets up a track whose frames are
+// SetupOptions controls one Setup. Setup arrives in a later change; nothing in
+// this package consumes this type yet. Discard sets up a track whose frames are
 // dropped inside the reader without per-packet allocation or delivery.
 type SetupOptions struct {
 	// Discard drops this track's frames in the reader, counting them in Stats
@@ -113,10 +132,11 @@ type target struct {
 	password   string
 }
 
-// parseTarget resolves cfg.URL into a target. It validates the scheme
-// (rtsp or rtsps), supplies the default port when absent, extracts
-// credentials (URL userinfo overrides Config), and strips userinfo from the
-// request URL. It returns ErrInvalidURL (wrapped) on any malformed input.
+// parseTarget resolves cfg.URL into a target. It validates the scheme (rtsp or
+// rtsps) and the port range, supplies the default port when absent, extracts
+// credentials (a non-empty URL userinfo overrides Config) and rejects control
+// characters in them, and strips the userinfo and fragment from the request
+// URL. It returns ErrInvalidURL (wrapped) on any malformed input.
 func parseTarget(cfg *Config) (target, error) {
 	raw := strings.TrimSpace(cfg.URL)
 	if raw == "" {
@@ -145,20 +165,42 @@ func parseTarget(cfg *Config) (target, error) {
 	port := u.Port()
 	if port == "" {
 		port = strconv.Itoa(defPort)
+	} else {
+		// url.Parse only guarantees the port is digits, so an out-of-range
+		// value reaches DialContext and surfaces as a connection error rather
+		// than the documented ErrInvalidURL.
+		n, perr := strconv.Atoi(port)
+		if perr != nil || n < 1 || n > 65535 {
+			return target{}, fmt.Errorf("%w: port %q out of range", ErrInvalidURL, port)
+		}
 	}
 
 	username, password := cfg.Username, cfg.Password
-	if u.User != nil {
+	// A userinfo carrying no username ("rtsp://@host" or "rtsp://:@host", what
+	// a URL template produces when its substitution variables are unset) is
+	// treated as absent rather than as an override, so it cannot silently
+	// discard the credentials the caller supplied in Config. Note url.User is
+	// non-nil for both of those, and User.String() is ":" for the second, so
+	// neither a nil check nor an empty-string check catches them.
+	if u.User != nil && u.User.Username() != "" {
 		username = u.User.Username()
-		if p, ok := u.User.Password(); ok {
-			password = p
-		} else {
-			password = ""
-		}
+		password, _ = u.User.Password()
+	}
+	// Userinfo is percent-decoded, so url.Parse's rejection of raw control
+	// characters does not cover "%0D%0A". These values flow into an
+	// Authorization header; MarshalRequest would catch CRLF one hop later, but
+	// the boundary that extracts them from an untrusted URL is where they
+	// should be rejected.
+	if strings.ContainsAny(username, "\r\n\x00") || strings.ContainsAny(password, "\r\n\x00") {
+		return target{}, fmt.Errorf("%w: control character in credentials", ErrInvalidURL)
 	}
 
 	reqURL := *u
 	reqURL.User = nil
+	// A fragment is a client-side construct and has no meaning on an RTSP
+	// request line; leaving it on would send it to the server verbatim.
+	reqURL.Fragment = ""
+	reqURL.RawFragment = ""
 	return target{
 		tls:        tlsOn,
 		address:    net.JoinHostPort(host, port),

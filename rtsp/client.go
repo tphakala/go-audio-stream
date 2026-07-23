@@ -26,7 +26,8 @@ const (
 	maxResyncBytes = 4096
 )
 
-// Exported errors, in addition to the reused audiostream and M4a errors.
+// Exported errors, in addition to the ones reused from the audiostream root
+// package and the wire layer.
 var (
 	// ErrServerTeardown ends Wait when the server sent a TEARDOWN.
 	ErrServerTeardown = errors.New("rtsp: server sent TEARDOWN")
@@ -36,6 +37,12 @@ var (
 	// ErrAuthFailed ends a request when authentication was rejected after the
 	// permitted retries.
 	ErrAuthFailed = errors.New("rtsp: authentication failed")
+	// ErrRequestTimeout ends a request when the server did not answer within
+	// Config.Timeout. It is the request-path counterpart to
+	// audiostream.ErrReadTimeout, which covers the read-idle watchdog: both
+	// mean the peer went quiet, so a caller retrying on one usually wants to
+	// retry on the other.
+	ErrRequestTimeout = errors.New("rtsp: request timeout")
 )
 
 // ChannelPair is the RTP and RTCP interleaved channel numbers the server
@@ -50,16 +57,19 @@ type ChannelPair struct {
 }
 
 // SessionInfo is a read-only snapshot of the negotiated session, for
-// diagnostics such as the M5 stream-doctor handshake walkthrough. It carries
-// no credentials and no counters.
+// diagnostics such as a handshake walkthrough tool. It carries no credentials
+// and no counters. Every field except KeepaliveMethod is populated by the
+// lifecycle verbs, so on a freshly dialed client only KeepaliveMethod is set.
 type SessionInfo struct {
 	// SessionID is the negotiated RTSP session identifier, "" before Setup.
 	SessionID string
 	// SessionTimeout is the advertised (or defaulted) session timeout.
 	SessionTimeout time.Duration
-	// AuthScheme names the authentication scheme in use ("none", "Basic", or
-	// "Digest").
-	AuthScheme string
+	// AuthScheme is the authentication scheme in use, AuthNone before any
+	// challenge has been answered. It is the same type the wire layer's
+	// ParseChallenges and SelectChallenge use, so a caller can compare the two
+	// directly.
+	AuthScheme AuthScheme
 	// KeepaliveMethod is the negotiated keepalive method ("OPTIONS" or
 	// "GET_PARAMETER"), "" before Dial's OPTIONS completes.
 	KeepaliveMethod string
@@ -68,10 +78,12 @@ type SessionInfo struct {
 	Channels []ChannelPair
 }
 
-// Client is a single RTSP session. Methods other than Close, Wait, and Stats
-// are not safe for concurrent use and must be called in lifecycle order
-// (Describe, Setup, Play) from one goroutine. Close, Wait, and Stats are safe
-// from any goroutine.
+// Client is a single RTSP session. Close, Wait, Stats and SessionInfo are safe
+// from any goroutine; of those, only Close, Stats and SessionInfo may be
+// called from inside OnFrame, because Wait blocks until the reader goroutine
+// has finished and would deadlock it. The lifecycle calls (Describe, Setup,
+// Play) are not safe for concurrent use and must be made in order from one
+// goroutine.
 type Client struct {
 	cfg  Config
 	conn net.Conn
@@ -90,13 +102,16 @@ type Client struct {
 	sessionID       string
 	sessionTimeout  time.Duration
 	keepaliveMethod string
-	authScheme      string
+	authScheme      AuthScheme
 	baseURL         string
 	channelPairs    []ChannelPair
 	termErr         error
 
-	// lastFrameAt is the watchdog clock (UnixNano). It is written by Play on
-	// the caller goroutine and by the reader on every frame, so it is atomic.
+	// lastFrameAt is the watchdog clock (UnixNano), written by the reader on
+	// every frame and read when arming the read deadline, so it is atomic.
+	// Play must stamp it before setting playing: armReadDeadline derives the
+	// deadline from it, so a zero value would produce a 1970 deadline that has
+	// already expired and would kill a healthy stream on its first read.
 	lastFrameAt atomic.Int64
 	// playing gates the read-idle watchdog; false until Play.
 	playing atomic.Bool
@@ -193,6 +208,12 @@ func tlsConfigFor(cfg *Config, tgt *target) *tls.Config {
 		if tc.ServerName == "" {
 			tc.ServerName = tgt.serverName
 		}
+		// The clone is already normalized (ServerName above), so leaving the
+		// floor unset here would silently give a caller who passed only
+		// RootCAs whatever minimum the toolchain currently defaults to.
+		if tc.MinVersion == 0 {
+			tc.MinVersion = tls.VersionTLS12
+		}
 		return tc
 	}
 	return &tls.Config{
@@ -253,18 +274,23 @@ func (c *Client) termError() error {
 
 // Close ends the session. It is idempotent and safe from any goroutine,
 // including from inside OnFrame. It signals the reader loop, which sends a
-// best-effort TEARDOWN and closes the connection; Wait then returns
-// ErrClosed. Close returns nil.
+// best-effort TEARDOWN when a session was established and then closes the
+// connection. Wait afterwards returns audiostream.ErrClosed, unless an earlier
+// cause had already ended the session, since the first cause wins. Close
+// returns nil.
 func (c *Client) Close() error {
 	c.initiateShutdown(audiostream.ErrClosed)
 	return nil
 }
 
-// Wait blocks until the session ends and returns the terminal error:
-// ErrClosed after Close, ctx.Err() if ctx cancels first, ErrServerTeardown on
-// a server TEARDOWN, ErrReadTimeout on watchdog expiry, or ErrConnectionClosed
-// (wrapping the cause) on connection loss. After Wait returns, OnFrame will
-// not be called again.
+// Wait blocks until the session ends and returns the terminal error. The
+// common causes are audiostream.ErrClosed after Close, ctx.Err() if ctx
+// cancels first, ErrServerTeardown on a server TEARDOWN,
+// audiostream.ErrReadTimeout on watchdog expiry, ErrRequestTimeout when a
+// request went unanswered, and ErrConnectionClosed (wrapping the cause) on
+// connection loss. The list is not exhaustive: a framing or marshalling
+// failure surfaces the wire layer's own error. After Wait returns, OnFrame
+// will not be called again.
 func (c *Client) Wait(ctx context.Context) error {
 	select {
 	case <-c.done:
@@ -276,9 +302,9 @@ func (c *Client) Wait(ctx context.Context) error {
 	}
 }
 
-// Stats returns a deep-copied snapshot of per-track receive counters. The
-// returned map is freshly allocated and never aliases internal state. In this
-// milestone no track is set up, so the map is empty.
+// Stats returns a snapshot of per-track receive counters in a freshly
+// allocated map that never aliases internal state. Tracks holds one entry per
+// track set up with Setup, so it is empty until the first Setup returns.
 func (c *Client) Stats() audiostream.Stats {
 	return audiostream.Stats{Tracks: make(map[int]audiostream.TrackStats)}
 }
@@ -289,10 +315,6 @@ func (c *Client) Stats() audiostream.Stats {
 func (c *Client) SessionInfo() SessionInfo {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	scheme := c.authScheme
-	if scheme == "" {
-		scheme = "none"
-	}
 	var chans []ChannelPair
 	if len(c.channelPairs) > 0 {
 		chans = make([]ChannelPair, len(c.channelPairs))
@@ -301,7 +323,7 @@ func (c *Client) SessionInfo() SessionInfo {
 	return SessionInfo{
 		SessionID:       c.sessionID,
 		SessionTimeout:  c.sessionTimeout,
-		AuthScheme:      scheme,
+		AuthScheme:      c.authScheme,
 		KeepaliveMethod: c.keepaliveMethod,
 		Channels:        chans,
 	}
@@ -317,7 +339,14 @@ func (c *Client) advance(method string) error {
 	if !legalIn(method, c.state) {
 		return &StateError{Method: method, State: c.state.String()}
 	}
-	c.state = destState(method)
+	dest, ok := destState(method)
+	if !ok {
+		// Unreachable while legalIn and destState agree. Refusing rather than
+		// defaulting keeps a future divergence a visible error instead of a
+		// silent transition to closed.
+		return &StateError{Method: method, State: c.state.String()}
+	}
+	c.state = dest
 	return nil
 }
 
@@ -326,9 +355,40 @@ func (c *Client) advance(method string) error {
 func (c *Client) writeMessage(raw []byte) error {
 	c.writeMu.Lock()
 	defer c.writeMu.Unlock()
-	if err := c.conn.SetWriteDeadline(time.Now().Add(c.cfg.Timeout)); err != nil {
+	if err := c.armWriteDeadline(c.cfg.Timeout); err != nil {
 		return err
 	}
 	_, err := c.conn.Write(raw)
 	return err
+}
+
+// armWriteDeadline sets the socket write deadline d from now, under deadlineMu
+// so it can never race past a shutdown. When shutdown has begun it sets an
+// immediate deadline instead.
+//
+// The read side has always done this (armReadDeadline); the write side did not,
+// which made initiateShutdown's documented "interrupts a blocked read or write
+// on both directions" false for one of the two. A write reaching the deadline
+// call after the interrupt re-armed it to now+Timeout, so Close could leave the
+// reader parked in Write for the full 10s default while sendTeardownBestEffort
+// queued behind it on writeMu and Wait blocked for the same window.
+func (c *Client) armWriteDeadline(d time.Duration) error {
+	c.deadlineMu.Lock()
+	defer c.deadlineMu.Unlock()
+	deadline := time.Now().Add(d)
+	if c.shuttingDown {
+		deadline = time.Now()
+	}
+	return c.conn.SetWriteDeadline(deadline)
+}
+
+// armTeardownReadDeadline bounds the discard read that follows a best-effort
+// TEARDOWN. It goes through deadlineMu for the same reason armWriteDeadline
+// does; unlike armReadDeadline it does not collapse to an immediate deadline
+// during shutdown, because shutdown is the only time it runs and the point is
+// to give the server a bounded chance to answer.
+func (c *Client) armTeardownReadDeadline() error {
+	c.deadlineMu.Lock()
+	defer c.deadlineMu.Unlock()
+	return c.conn.SetReadDeadline(time.Now().Add(teardownDeadline))
 }

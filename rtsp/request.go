@@ -61,16 +61,44 @@ func (c *Client) roundTrip(ctx context.Context, req *Request) (*Response, error)
 	case resp := <-ch:
 		return resp, nil
 	case <-ctx.Done():
+		if resp, ok := drain(ch); ok {
+			return resp, nil
+		}
 		c.initiateShutdown(ctx.Err())
 		return nil, ctx.Err()
 	case <-timer.C:
-		terr := fmt.Errorf("rtsp: request timeout after %v", c.cfg.Timeout)
+		if resp, ok := drain(ch); ok {
+			return resp, nil
+		}
+		terr := fmt.Errorf("%w after %v", ErrRequestTimeout, c.cfg.Timeout)
 		c.initiateShutdown(terr)
 		return nil, terr
 	case <-c.done:
+		if resp, ok := drain(ch); ok {
+			return resp, nil
+		}
 		if te := c.termError(); te != nil {
 			return nil, te
 		}
 		return nil, ErrConnectionClosed
+	}
+}
+
+// drain reports whether a response was already delivered to ch, without
+// blocking. Every terminal branch of roundTrip's select must consult it first.
+//
+// select picks uniformly at random among ready cases, and dispatchResponse
+// hands the response to a buffered channel without yielding, so the reader can
+// close done (or the deadline can elapse) before the waiter is scheduled. Both
+// cases are then ready and the waiter takes the terminal branch half the time,
+// discarding a fully parsed, valid response. Reproduced at roughly 1 in 10000
+// dials against a server that answers OPTIONS and ends the session in the same
+// segment, which is what any server closing after a response produces.
+func drain(ch <-chan *Response) (*Response, bool) {
+	select {
+	case resp := <-ch:
+		return resp, true
+	default:
+		return nil, false
 	}
 }

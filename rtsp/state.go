@@ -1,6 +1,9 @@
 package rtsp
 
-import "errors"
+import (
+	"errors"
+	"strconv"
+)
 
 // state is the client lifecycle state, guarded by Client.mu.
 type state int
@@ -20,31 +23,21 @@ const (
 	stateClosed
 )
 
-// State name strings, shared by String and the state tests so the lowercase
-// spellings live in one place.
-const (
-	stateNameIdle      = "idle"
-	stateNameDescribed = "described"
-	stateNameSetup     = "setup"
-	stateNamePlaying   = "playing"
-	stateNameClosed    = "closed"
-)
-
 // String returns the lowercase state name used in diagnostics and StateError.
 func (s state) String() string {
 	switch s {
 	case stateIdle:
-		return stateNameIdle
+		return "idle"
 	case stateDescribed:
-		return stateNameDescribed
+		return "described"
 	case stateSetup:
-		return stateNameSetup
+		return "setup"
 	case statePlaying:
-		return stateNamePlaying
+		return "playing"
 	case stateClosed:
-		return stateNameClosed
+		return "closed"
 	default:
-		return "unknown"
+		return "state(" + strconv.Itoa(int(s)) + ")"
 	}
 }
 
@@ -84,8 +77,14 @@ func (e *StateError) Is(target error) bool {
 
 // legalIn reports whether the named lifecycle method may run in state s.
 // Describe runs only from idle; Setup from described or setup; Play only from
-// setup. Every method is illegal in closed.
+// setup. The closed state is terminal, enforced by the leading guard rather
+// than left to emerge from the individual arms. OPTIONS and TEARDOWN are
+// absent deliberately: they are not lifecycle transitions and never go through
+// advance.
 func legalIn(method string, s state) bool {
+	if s == stateClosed {
+		return false
+	}
 	switch method {
 	case methodDescribe:
 		return s == stateIdle
@@ -98,16 +97,20 @@ func legalIn(method string, s state) bool {
 	}
 }
 
-// destState is the state a legal method transitions into.
-func destState(method string) state {
+// destState is the state a legal method transitions into, and whether the
+// method is one advance knows. Returning the second value rather than
+// defaulting to stateClosed matters: legalIn and destState enumerate the same
+// method set by hand, so a method added to one and forgotten in the other
+// would otherwise report success while silently terminating the session.
+func destState(method string) (state, bool) {
 	switch method {
 	case methodDescribe:
-		return stateDescribed
+		return stateDescribed, true
 	case methodSetup:
-		return stateSetup
+		return stateSetup, true
 	case methodPlay:
-		return statePlaying
+		return statePlaying, true
 	default:
-		return stateClosed
+		return stateIdle, false
 	}
 }

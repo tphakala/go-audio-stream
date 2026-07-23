@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"strings"
 	"testing"
 	"time"
 
@@ -141,17 +142,115 @@ func startRawServer(t *testing.T, handle func(rc *rawConn, url string)) string {
 		t.Fatalf("listen: %v", err)
 	}
 	url := "rtsp://" + ln.Addr().String() + "/stream"
+	done := make(chan struct{})
 	go func() {
+		defer close(done)
 		conn, err := ln.Accept()
 		if err != nil {
 			return
 		}
+		defer func() { _ = conn.Close() }()
 		rc := &rawConn{conn: conn}
 		handle(rc, url)
-		_ = conn.Close()
 	}()
-	t.Cleanup(func() { _ = ln.Close() })
+	// The listener close alone does not reach an accepted connection, and
+	// nothing waited for the handler, so a handler blocked in Read outlived
+	// the test and leaked a goroutine and a socket into every later test.
+	t.Cleanup(func() {
+		_ = ln.Close()
+		<-done
+	})
 	return url
+}
+
+// serveOptionsThen answers the Dial OPTIONS probe and then hands the raw
+// connection to after, which writes whatever the test needs on the wire.
+func serveOptionsThen(t *testing.T, after func(rc *rawConn)) string {
+	t.Helper()
+	return startRawServer(t, func(rc *rawConn, _ string) {
+		req, err := rc.readReq()
+		if err != nil {
+			t.Errorf("readReq: %v", err)
+			return
+		}
+		if err := rc.writeResp(req, 200, "OK", publicHeader()); err != nil {
+			t.Errorf("writeResp: %v", err)
+			return
+		}
+		after(rc)
+	})
+}
+
+// Garbage that classifies as FrameUnknown: not '$', and no two-byte prefix
+// ClassifyStream treats as the start of a message.
+func unclassifiableBytes(n int) []byte {
+	b := make([]byte, n)
+	for i := range b {
+		b[i] = 0xFF
+	}
+	return b
+}
+
+// A run of garbage shorter than the budget is skipped byte at a time and the
+// session survives to parse the next real unit.
+func TestResyncRecoversFromGarbage(t *testing.T) {
+	url := serveOptionsThen(t, func(rc *rawConn) {
+		_, _ = rc.conn.Write(unclassifiableBytes(64))
+		_, _ = rc.sendServerReq("TEARDOWN", "rtsp://x/stream")
+		for {
+			if _, err := rc.readReq(); err != nil {
+				return
+			}
+		}
+	})
+
+	ctx := context.Background()
+	c, err := rtsp.Dial(ctx, rtsp.Config{URL: url, Timeout: testTimeout})
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	waitCtx, cancel := context.WithTimeout(ctx, testTimeout)
+	defer cancel()
+	// Reaching the TEARDOWN proves the garbage was skipped rather than
+	// terminating the session or desynchronizing the framing.
+	if err := c.Wait(waitCtx); !errors.Is(err, rtsp.ErrServerTeardown) {
+		t.Errorf("Wait = %v, want ErrServerTeardown", err)
+	}
+}
+
+// A run longer than the budget is fatal. This also pins the fix for the
+// interleaved latch: the garbage contains 0x24 bytes, and ParseInterleaved
+// accepts any '$' plus three bytes, so honouring one mid-resync would consume
+// a bogus frame and reset the counter, leaving the budget unable to fire.
+func TestResyncBudgetIsBoundedDespiteInterleavedLatch(t *testing.T) {
+	url := serveOptionsThen(t, func(rc *rawConn) {
+		junk := unclassifiableBytes(3 * 4096)
+		// Latches start after the first byte so the reader is already
+		// resynchronizing when it meets one. A '$' as the very first byte is
+		// an in-sync frame start by protocol, not a latch.
+		for i := 200; i < len(junk); i += 200 {
+			junk[i] = '$'
+		}
+		_, _ = rc.conn.Write(junk)
+		for {
+			if _, err := rc.readReq(); err != nil {
+				return
+			}
+		}
+	})
+
+	ctx := context.Background()
+	c, err := rtsp.Dial(ctx, rtsp.Config{URL: url, Timeout: testTimeout})
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	defer func() { _ = c.Close() }()
+	waitCtx, cancel := context.WithTimeout(ctx, testTimeout)
+	defer cancel()
+	err = c.Wait(waitCtx)
+	if err == nil || !strings.Contains(err.Error(), "resync exceeded") {
+		t.Errorf("Wait = %v, want a resync budget framing error", err)
+	}
 }
 
 func publicHeader() rtsp.Header {
@@ -272,4 +371,59 @@ func TestReadIdleWatchdogDisabledPrePlay(t *testing.T) {
 		t.Errorf("Wait = %v, want DeadlineExceeded (pre-play watchdog must be inert)", err)
 	}
 	_ = c.Close()
+}
+
+// A server that answers OPTIONS and ends the session in the SAME segment must
+// still produce a successful Dial: the reader has to parse both units out of
+// one fill and deliver the response before acting on the teardown.
+//
+// This covers the coalesced-segment parse path end to end. It does NOT cover
+// the delivered-response-versus-shutdown race in roundTrip's select: by the
+// time the server writes, the caller is already parked in the select, so the
+// response case commits before done closes. That race needs the caller to be
+// preempted between the write and the select, which
+// TestRoundTripPrefersDeliveredResponseOverShutdown forces deterministically.
+func TestDialSucceedsWhenResponseAndTeardownShareASegment(t *testing.T) {
+	const iterations = 5
+	for i := range iterations {
+		url := startRawServer(t, func(rc *rawConn, _ string) {
+			req, err := rc.readReq()
+			if err != nil {
+				return
+			}
+			resp, err := rtsp.MarshalResponse(&rtsp.Response{
+				StatusCode: 200, Reason: "OK", CSeq: req.CSeq, Header: publicHeader(),
+			})
+			if err != nil {
+				t.Errorf("MarshalResponse: %v", err)
+				return
+			}
+			teardown, err := rtsp.MarshalRequest(&rtsp.Request{
+				Method: "TEARDOWN", URL: "rtsp://x/stream", CSeq: 1,
+			})
+			if err != nil {
+				t.Errorf("MarshalRequest: %v", err)
+				return
+			}
+			// One write, so the reader parses both units from one fill.
+			if _, err := rc.conn.Write(append(resp, teardown...)); err != nil {
+				return
+			}
+			for {
+				if _, err := rc.readReq(); err != nil {
+					return
+				}
+			}
+		})
+
+		ctx := context.Background()
+		c, err := rtsp.Dial(ctx, rtsp.Config{URL: url, Timeout: testTimeout})
+		if err != nil {
+			t.Fatalf("iteration %d: Dial = %v, want success (the server answered 200)", i, err)
+		}
+		_ = c.Close()
+		waitCtx, cancel := context.WithTimeout(ctx, testTimeout)
+		_ = c.Wait(waitCtx)
+		cancel()
+	}
 }

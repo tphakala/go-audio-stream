@@ -1,16 +1,20 @@
 // Package rtsp implements an RTSP 1.0 client for audio ingestion from
 // IP cameras and restreamers.
 //
-// The package is being assembled in pieces. What is present so far is
-// the wire layer: serializing requests, parsing responses and
-// server-initiated requests, framing interleaved binary data, and
-// classifying response status codes into typed errors. The session
-// client that drives DESCRIBE, SETUP and PLAY over these primitives,
-// along with authentication, TLS and frame delivery, arrives in
-// subsequent changes.
+// The package is being assembled in pieces. Two layers are present.
 //
-// Everything here is pure: no sockets, no goroutines, and no state
-// beyond what the caller passes in. The input arrives from the network
-// and is treated as hostile, so sizes are capped and every parser is
-// total.
+// The wire layer is pure: serializing requests, parsing responses and
+// server-initiated requests, framing interleaved binary data, resolving
+// control URLs, answering authentication challenges, and classifying response
+// status codes into typed errors. It holds no state beyond what the caller
+// passes in. Its input arrives from the network and is treated as hostile, so
+// sizes are capped and every parser is total.
+//
+// The session client is built on that layer. Dial opens a TCP (or, for rtsps,
+// TLS) connection, starts a reader goroutine that owns every socket read for
+// the connection's life, and probes OPTIONS to learn the keepalive method. A
+// Client therefore holds a socket and a goroutine, and must be released with
+// Close; Wait reports the terminal cause. Close, Wait, Stats and SessionInfo
+// are safe from any goroutine. The verbs that drive a session (DESCRIBE,
+// SETUP, PLAY) and frame delivery arrive in subsequent changes.
 package rtsp

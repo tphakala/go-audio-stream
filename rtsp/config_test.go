@@ -1,6 +1,8 @@
 package rtsp
 
 import (
+	"errors"
+	"strings"
 	"testing"
 	"time"
 )
@@ -93,9 +95,103 @@ func TestParseTargetCredentials(t *testing.T) {
 
 func TestParseTargetInvalid(t *testing.T) {
 	t.Parallel()
-	for _, in := range []string{"", "   ", "http://host/x", "://bad", "rtsp://", "rtsp:///nohost"} {
-		if _, err := parseTarget(&Config{URL: in}); err == nil {
-			t.Errorf("parseTarget(%q) = nil error, want error", in)
+	// Every case asserts ErrInvalidURL, not merely that some error occurred:
+	// the wrapping IS the documented contract, and a regression that returned
+	// a bare error would break errors.Is for every caller while still passing
+	// a non-nil check.
+	cases := []struct {
+		name string
+		url  string
+	}{
+		{"empty", ""},
+		{"whitespace only", "   "},
+		{"wrong scheme", "http://host/x"},
+		{"unparseable", "://bad"},
+		{"no host", "rtsp://"},
+		{"empty host with path", "rtsp:///nohost"},
+		{"port above range", "rtsp://host:65536/cam"},
+		{"port zero", "rtsp://host:0/cam"},
+		{"credentials carrying CRLF", "rtsp://a%0D%0AX-Injected:%20y@host/cam"},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			_, err := parseTarget(&Config{URL: tt.url})
+			if !errors.Is(err, ErrInvalidURL) {
+				t.Errorf("parseTarget(%q) error = %v, want ErrInvalidURL", tt.url, err)
+			}
+		})
+	}
+}
+
+// An empty userinfo is what a URL template produces when its substitution
+// variables are unset. Treating it as an override would silently discard the
+// credentials the caller supplied in Config and surface as a 401.
+func TestParseTargetEmptyUserinfoKeepsConfigCredentials(t *testing.T) {
+	t.Parallel()
+	for _, raw := range []string{"rtsp://@host/cam", "rtsp://:@host/cam"} {
+		tgt, err := parseTarget(&Config{URL: raw, Username: "u", Password: "p"})
+		if err != nil {
+			t.Fatalf("parseTarget(%q): %v", raw, err)
 		}
+		if tgt.username != "u" || tgt.password != "p" {
+			t.Errorf("parseTarget(%q) credentials = %q/%q, want u/p", raw, tgt.username, tgt.password)
+		}
+	}
+}
+
+// A username-only userinfo deliberately clears the Config password, so a
+// URL-supplied identity cannot pick up an unrelated secret.
+func TestParseTargetUsernameOnlyClearsPassword(t *testing.T) {
+	t.Parallel()
+	tgt, err := parseTarget(&Config{URL: "rtsp://user@host/cam", Username: "u2", Password: "p2"})
+	if err != nil {
+		t.Fatalf("parseTarget: %v", err)
+	}
+	if tgt.username != "user" || tgt.password != "" {
+		t.Errorf("credentials = %q/%q, want user/empty", tgt.username, tgt.password)
+	}
+}
+
+// A fragment is client-side only and must not reach the request line.
+func TestParseTargetStripsFragment(t *testing.T) {
+	t.Parallel()
+	tgt, err := parseTarget(&Config{URL: "rtsp://host/path#frag"})
+	if err != nil {
+		t.Fatalf("parseTarget: %v", err)
+	}
+	if strings.Contains(tgt.requestURL, "#") {
+		t.Errorf("requestURL = %q, want no fragment", tgt.requestURL)
+	}
+}
+
+// An IPv6 literal must survive host/port splitting and rejoining, and the TLS
+// server name must be the bare address without brackets.
+func TestParseTargetIPv6(t *testing.T) {
+	t.Parallel()
+	tgt, err := parseTarget(&Config{URL: "rtsps://[::1]:8554/cam"})
+	if err != nil {
+		t.Fatalf("parseTarget: %v", err)
+	}
+	if tgt.address != "[::1]:8554" {
+		t.Errorf("address = %q, want [::1]:8554", tgt.address)
+	}
+	if tgt.serverName != "::1" {
+		t.Errorf("serverName = %q, want ::1", tgt.serverName)
+	}
+}
+
+// applyDefaults treats a negative Timeout like a zero one, and normalizes a
+// negative ReadIdle to the documented disabled value so it can never reach a
+// timer that panics on a non-positive interval.
+func TestApplyDefaultsNegative(t *testing.T) {
+	t.Parallel()
+	cfg := Config{Timeout: -1, ReadIdle: -1}
+	cfg.applyDefaults()
+	if cfg.Timeout != DefaultTimeout {
+		t.Errorf("Timeout = %v, want DefaultTimeout", cfg.Timeout)
+	}
+	if cfg.ReadIdle != 0 {
+		t.Errorf("ReadIdle = %v, want 0", cfg.ReadIdle)
 	}
 }

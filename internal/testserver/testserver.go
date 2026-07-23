@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"math/big"
 	"net"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -21,6 +22,11 @@ import (
 
 	"github.com/tphakala/go-audio-stream/rtsp"
 )
+
+// readTimeout bounds a single server-side read. Generous enough never to fire
+// on a healthy scripted exchange, short enough that a stalled client fails the
+// test rather than hanging the package.
+const readTimeout = 10 * time.Second
 
 // readChunk is the per-read buffer size for the connection accumulation
 // buffer. It is a plain constant, not tuned: the wire units are small and
@@ -38,9 +44,10 @@ type Server struct {
 	port    int
 	certPEM []byte
 
-	mu    sync.Mutex
-	conns []net.Conn
-	wg    sync.WaitGroup
+	mu     sync.Mutex
+	conns  []net.Conn
+	closed bool
+	wg     sync.WaitGroup
 }
 
 // Options configures a Server.
@@ -130,6 +137,14 @@ func (s *Server) acceptLoop() {
 			return
 		}
 		s.mu.Lock()
+		if s.closed {
+			// stop() has already snapshotted and closed the connection set, so
+			// this conn would never be closed and wg.Wait would block forever
+			// on its handler, hanging the whole test binary inside t.Cleanup.
+			s.mu.Unlock()
+			_ = conn.Close()
+			return
+		}
 		s.conns = append(s.conns, conn)
 		s.mu.Unlock()
 		s.wg.Add(1)
@@ -151,10 +166,7 @@ func (s *Server) handle(conn net.Conn) {
 func (s *Server) stop() {
 	_ = s.ln.Close()
 	s.mu.Lock()
-	// A conn accepted in the narrow window between this snapshot and the
-	// listener close taking effect would miss this close set, so wg.Wait
-	// below could block on its handler; unreachable in the scripted tests
-	// (each closes its own client conn), noted for a future maintainer.
+	s.closed = true
 	conns := s.conns
 	s.conns = nil
 	s.mu.Unlock()
@@ -207,7 +219,8 @@ type ServerConn struct {
 	start int
 	// cseq is the monotonic CSeq allocator for server-initiated requests.
 	cseq int
-	// skipped records interleaved frames ReadRequest stepped over, so a
+	// skipped records interleaved frames ReadRequest and ReadResponse stepped
+	// over, so a
 	// test can assert on client-sent data that preceded a request.
 	skipped []rtsp.InterleavedFrame
 }
@@ -221,8 +234,13 @@ func (sc *ServerConn) fill() error {
 		sc.buf = sc.buf[:copy(sc.buf, sc.buf[sc.start:])]
 		sc.start = 0
 	}
-	tmp := make([]byte, readChunk)
-	n, err := sc.conn.Read(tmp)
+	// Without a deadline a client that connects and then goes quiet (exactly
+	// what a bug in the code under test produces) blocks here forever, so the
+	// package dies on the 10-minute timeout with a stack pointing at the
+	// harness rather than failing at the assertion.
+	_ = sc.conn.SetReadDeadline(time.Now().Add(readTimeout))
+	var tmp [readChunk]byte
+	n, err := sc.conn.Read(tmp[:])
 	if n > 0 {
 		sc.buf = append(sc.buf, tmp[:n]...)
 		return nil
@@ -344,16 +362,23 @@ func (sc *ServerConn) ReadResponse() (*rtsp.Response, error) {
 	}
 }
 
-// SkippedFrames returns the interleaved frames ReadRequest stepped over so
+// SkippedFrames returns a copy of the interleaved frames ReadRequest and
+// ReadResponse stepped over so
 // far, in arrival order, for tests that assert on client-sent data.
 func (sc *ServerConn) SkippedFrames() []rtsp.InterleavedFrame {
-	return sc.skipped
+	return slices.Clone(sc.skipped)
 }
 
 // Respond writes a response to req, echoing req.CSeq, with the given
 // status, headers (may be nil), and body (may be nil). Content-Length is
 // set by MarshalResponse.
 func (sc *ServerConn) Respond(req *rtsp.Request, code int, reason string, headers rtsp.Header, body []byte) error {
+	if req == nil {
+		// A handler that logs a ReadRequest error and forgets to return would
+		// otherwise panic here, and a panic on this goroutine aborts the whole
+		// test binary with a stack that points nowhere near the mistake.
+		return errors.New("testserver: Respond called with a nil request")
+	}
 	raw, err := rtsp.MarshalResponse(&rtsp.Response{
 		StatusCode: code,
 		Reason:     reason,
@@ -408,16 +433,16 @@ func (sc *ServerConn) Close() error {
 
 // HandshakeConfig parameterizes the standard exchange Handshake performs.
 type HandshakeConfig struct {
-	SDP             string   // DESCRIBE response body (application/sdp)
-	ContentType     string   // "" defaults to "application/sdp"
-	ContentBase     string   // "" omits the Content-Base header
-	ContentLocation string   // "" omits the Content-Location header
-	SessionID       string   // Session id echoed from SETUP on
-	SessionTimeout  int      // seconds; 0 omits the ;timeout= parameter
-	PublicMethods   []string // OPTIONS Public header; nil omits it
-	InterleavedBase int      // first RTP channel the server assigns (renumber quirk); RTCP is +1, next track +2
+	SDP             string    // DESCRIBE response body (application/sdp)
+	ContentType     string    // "" defaults to "application/sdp"
+	ContentBase     string    // "" omits the Content-Base header
+	ContentLocation string    // "" omits the Content-Location header
+	SessionID       string    // Session id echoed from SETUP on
+	SessionTimeout  int       // seconds; 0 omits the ;timeout= parameter
+	PublicMethods   []string  // OPTIONS Public header; nil omits it
+	InterleavedBase int       // first RTP channel the server assigns (renumber quirk); RTCP is +1, next track +2
 	Auth            *AuthSpec // nil = no auth required
-	TrackControls   []string  // per-track control values the server expects at SETUP, in order; informational for assertions
+	TrackControls   []string  // reserved; declared for the SETUP URI assertion Handshake does not yet make
 	RangeEcho       bool      // when true, echo the PLAY Range header back
 	RTPInfo         string    // "" omits RTP-Info on the PLAY response
 }
@@ -439,12 +464,19 @@ type AuthSpec struct {
 type ChannelPair struct{ RTP, RTCP int }
 
 // Handshake runs OPTIONS, DESCRIBE, SETUP (one per m= section in cfg.SDP),
-// and PLAY, applying cfg, and returns once PLAY has been answered 200,
-// with the connection left in the playing state and the negotiated
-// interleaved channels reported. The test then injects frames. Handshake
-// fails the test (via the stored *testing.T) on any protocol deviation it
-// did not script.
-//nolint:gocritic // value receiver is the documented M4b brief API that later client tasks consume; Handshake runs once per connection, not on a hot path.
+// and PLAY, applying cfg, and returns once PLAY has been answered 200, with
+// the connection left in the playing state and the negotiated interleaved
+// channels reported. The test then injects frames.
+//
+// It fails the test (via the stored *testing.T) when a request arrives with an
+// unexpected method, and when cfg.Auth is set and the Authorization header
+// does not match. That is the whole of what it asserts: it does NOT check the
+// request URI, the Transport header, the Session echo, or CSeq monotonicity,
+// so a passing Handshake means the method sequence was right, not that the
+// client spoke correct RTSP. A test that cares about those must assert on the
+// requests itself.
+//
+//nolint:gocritic // hugeParam: cfg is a value because the scripted-handshake API takes a config literal; Handshake runs once per connection, not on a hot path.
 func (sc *ServerConn) Handshake(cfg HandshakeConfig) (channels []ChannelPair, err error) {
 	sc.t.Helper()
 	if err := sc.handshakeOptions(&cfg); err != nil {
@@ -475,7 +507,7 @@ func (sc *ServerConn) handshakeOptions(cfg *HandshakeConfig) error {
 	if len(cfg.PublicMethods) > 0 {
 		h.Set("Public", strings.Join(cfg.PublicMethods, ", "))
 	}
-	return sc.Respond(req, 200, "OK", h, nil)
+	return sc.Respond(req, rtsp.StatusOK, "OK", h, nil)
 }
 
 // handshakeDescribe reads DESCRIBE (challenging first when cfg.Auth is set)
@@ -497,7 +529,7 @@ func (sc *ServerConn) handshakeDescribe(cfg *HandshakeConfig) error {
 	if cfg.ContentLocation != "" {
 		h.Set("Content-Location", cfg.ContentLocation)
 	}
-	return sc.Respond(req, 200, "OK", h, []byte(cfg.SDP))
+	return sc.Respond(req, rtsp.StatusOK, "OK", h, []byte(cfg.SDP))
 }
 
 // readDescribeWithAuth returns the DESCRIBE request that should be answered
@@ -551,7 +583,7 @@ func (sc *ServerConn) readDescribeAgain() (*rtsp.Request, error) {
 func (sc *ServerConn) sendChallenge(req *rtsp.Request, spec *AuthSpec, stale bool) error {
 	h := rtsp.Header{}
 	h.Set("WWW-Authenticate", buildChallenge(spec, stale))
-	return sc.Respond(req, 401, "Unauthorized", h, nil)
+	return sc.Respond(req, rtsp.StatusUnauthorized, "Unauthorized", h, nil)
 }
 
 // buildChallenge renders a WWW-Authenticate value for spec.
@@ -615,10 +647,19 @@ func (sc *ServerConn) handshakeSetup(cfg *HandshakeConfig) ([]ChannelPair, error
 		sc.expectMethod(req, "SETUP")
 		rtpCh := cfg.InterleavedBase + 2*i
 		rtcpCh := rtpCh + 1
+		// An interleaved channel is a single byte on the wire, so an
+		// InterleavedBase high enough to push a pair past 255 produces a
+		// Transport header the client accepts and frames it can never send:
+		// MarshalInterleaved rejects the channel later, far from the
+		// misconfiguration that caused it.
+		if cfg.InterleavedBase < 0 || rtcpCh > 255 {
+			return nil, fmt.Errorf("testserver: InterleavedBase %d puts track %d channels (%d-%d) outside 0..255",
+				cfg.InterleavedBase, i, rtpCh, rtcpCh)
+		}
 		h := rtsp.Header{}
 		h.Set("Transport", rtsp.BuildTransport(rtpCh, rtcpCh))
 		h.Set("Session", sessionHeader(cfg))
-		if err := sc.Respond(req, 200, "OK", h, nil); err != nil {
+		if err := sc.Respond(req, rtsp.StatusOK, "OK", h, nil); err != nil {
 			return nil, err
 		}
 		pairs = append(pairs, ChannelPair{RTP: rtpCh, RTCP: rtcpCh})
@@ -644,7 +685,7 @@ func (sc *ServerConn) handshakePlay(cfg *HandshakeConfig) error {
 	if cfg.RTPInfo != "" {
 		h.Set("RTP-Info", cfg.RTPInfo)
 	}
-	return sc.Respond(req, 200, "OK", h, nil)
+	return sc.Respond(req, rtsp.StatusOK, "OK", h, nil)
 }
 
 // expectMethod fails the test when req.Method is not want.

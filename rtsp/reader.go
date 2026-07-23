@@ -14,15 +14,18 @@ import (
 const readChunk = 4096
 
 // errBufferFull is the backstop when the accumulation buffer would exceed
-// maxReadBuffer. The M4a per-unit caps make it unreachable for well-formed
-// units.
+// maxReadBuffer. MaxHeaderBytes and MaxBodySize bound every well-formed unit
+// below that ceiling, so it is unreachable except on a desynchronized or
+// hostile stream.
 var errBufferFull = errors.New("rtsp: read buffer limit exceeded")
 
 // reader is the single reader goroutine. It owns every socket read for the
-// connection's whole life. A deferred recover funnels any unexpected panic
-// (including one from a consumer callback in a later task) into shutdown, so
-// the library never brings down the host process. When the framing loop ends,
-// it performs the terminal teardown and, as its final act, closes done.
+// connection's whole life. A deferred recover funnels a panic raised inside
+// the framing loop (including one from a consumer callback in a later task)
+// into shutdown, so such a panic becomes a clean session end rather than a
+// process crash. It does not cover the terminal sequence that runs after it,
+// nor any other goroutine. When the framing loop ends, it performs the
+// terminal teardown and, as its final act, closes done.
 func (c *Client) reader() {
 	defer close(c.done)
 	defer c.teardownAndJoin()
@@ -53,15 +56,15 @@ func (c *Client) readLoop() {
 				return
 			}
 		case FrameInterleaved:
-			if !c.consume(c.stepInterleaved) {
+			if !c.consume(c.stepInterleaved, unvalidatedUnit) {
 				return
 			}
 		case FrameResponse:
-			if !c.consume(c.stepResponse) {
+			if !c.consume(c.stepResponse, validatedUnit) {
 				return
 			}
 		case FrameRequest:
-			if !c.consume(c.stepRequest) {
+			if !c.consume(c.stepRequest, validatedUnit) {
 				return
 			}
 		case FrameUnknown:
@@ -74,17 +77,52 @@ func (c *Client) readLoop() {
 
 // stepFunc parses one wire unit from buf, handles it, and returns the byte
 // count consumed. ErrIncomplete signals "read more".
+//
+// A unit handed to a step aliases rbuf and is valid only until the next fill,
+// so a step must copy anything it keeps.
 type stepFunc func(buf []byte) (int, error)
+
+// Whether a step's parser structurally validates the unit it accepts, which
+// decides if the unit may be trusted while resynchronizing. The message
+// parsers check the start line, the header caps and Content-Length;
+// ParseInterleaved checks only the leading '$'.
+const (
+	validatedUnit   = true
+	unvalidatedUnit = false
+)
 
 // consume runs one step, handling ErrIncomplete by filling and a hard error
 // by funneling a fatal framing shutdown. It returns false when the loop must
 // exit.
-func (c *Client) consume(step stepFunc) bool {
+func (c *Client) consume(step stepFunc, validated bool) bool {
+	resyncing := c.resync > 0
+
+	// While resynchronizing, only a structurally validated unit may be
+	// accepted. ParseInterleaved takes any '$' plus three bytes as a frame of
+	// up to 65535 bytes without checking the channel or the length, and 0x24
+	// recurs roughly every 256 bytes of RTP payload, so honouring it here
+	// would discard up to 64 KiB of stream (swallowing any genuine response
+	// inside it) and then clear the resync budget. maxResyncBytes could then
+	// only fire on a 4096-byte run containing no '$' and no two-byte method
+	// prefix, leaving the budget inert on exactly the binary streams it exists
+	// to bound.
+	if resyncing && !validated {
+		return c.resyncOne()
+	}
+
 	n, err := step(c.rbuf[c.start:])
 	switch {
 	case errors.Is(err, ErrIncomplete):
 		return c.fillMore()
 	case err != nil:
+		// ClassifyStream commits to a message on a two-byte prefix. While
+		// resynchronizing those two bytes came from the garbage itself, so a
+		// parse failure means "no unit starts here", not "the stream is
+		// corrupt": a stray "PL" inside an RTP payload must not kill a session
+		// that the FrameUnknown path one branch away would have recovered.
+		if resyncing {
+			return c.resyncOne()
+		}
 		c.initiateShutdown(fmt.Errorf("rtsp: framing error: %w", err))
 		return false
 	default:
@@ -126,11 +164,13 @@ func (c *Client) stepRequest(buf []byte) (int, error) {
 	return n, nil
 }
 
-// resyncOne discards one unrecognized leading byte, bounded by maxResyncBytes.
+// resyncOne discards one unrecognized leading byte, bounded by maxResyncBytes
+// CONSECUTIVE bytes: consume resets the counter on every successfully parsed
+// unit, so the budget bounds one run of garbage, not the session total.
 func (c *Client) resyncOne() bool {
 	c.resync++
 	if c.resync > maxResyncBytes {
-		c.initiateShutdown(fmt.Errorf("rtsp: framing error: resync exceeded %d bytes", maxResyncBytes))
+		c.initiateShutdown(fmt.Errorf("rtsp: framing error: resync exceeded %d consecutive bytes", maxResyncBytes))
 		return false
 	}
 	c.start++
@@ -142,6 +182,13 @@ func (c *Client) resyncOne() bool {
 // interleaved-channel routing table, per-track depacketization, and OnFrame
 // delivery are added in a later task.
 func (c *Client) handleInterleaved(f InterleavedFrame) {
+	// Stamped here even though nothing is routed yet. armReadDeadline derives
+	// the watchdog deadline from this value, so if Play set playing before the
+	// first frame stamped it, the deadline would be 1970+ReadIdle, already
+	// expired, and a healthy stream would die with ErrReadTimeout on its first
+	// read. Advancing it from the moment frames arrive removes that ordering
+	// hazard from the task that adds routing.
+	c.lastFrameAt.Store(time.Now().UnixNano())
 }
 
 // dispatchResponse routes a response to the caller waiting on its CSeq. An
@@ -197,7 +244,10 @@ func (c *Client) fill() error {
 		c.rbuf = c.rbuf[:copy(c.rbuf, c.rbuf[c.start:])]
 		c.start = 0
 	}
-	if len(c.rbuf) >= maxReadBuffer {
+	// Checked against the post-read length, not the pre-read one: testing
+	// len(rbuf) alone lets a readChunk-sized append overshoot the stated
+	// ceiling by up to readChunk-1 bytes.
+	if len(c.rbuf)+readChunk > maxReadBuffer {
 		return errBufferFull
 	}
 	c.armReadDeadline()
@@ -286,11 +336,18 @@ func (c *Client) sendTeardownBestEffort() {
 	}
 
 	c.writeMu.Lock()
-	_ = c.conn.SetWriteDeadline(time.Now().Add(teardownDeadline))
+	// Both deadlines go through the guarded helpers. Setting them directly
+	// would push the socket deadline FORWARD, which is exactly what
+	// deadlineMu exists to stop: initiateShutdown closes c.closing before it
+	// takes deadlineMu, so the reader can observe the shutdown and reach here
+	// while the interrupt is still in flight, and an unguarded set would
+	// either be clobbered by it (aborting the TEARDOWN) or would itself undo
+	// the immediate deadline the interrupt just installed.
+	_ = c.armWriteDeadline(teardownDeadline)
 	_, _ = c.conn.Write(raw)
 	c.writeMu.Unlock()
 
-	_ = c.conn.SetReadDeadline(time.Now().Add(teardownDeadline))
+	_ = c.armTeardownReadDeadline()
 	var scratch [readChunk]byte
 	_, _ = c.conn.Read(scratch[:])
 }

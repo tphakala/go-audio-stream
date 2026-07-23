@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net"
 	"net/url"
+	"strings"
 	"testing"
 
 	"github.com/tphakala/go-audio-stream/rtsp"
@@ -91,7 +92,12 @@ func (c *testClient) fill() error {
 	tmp := make([]byte, 4096)
 	n, err := c.conn.Read(tmp)
 	if n > 0 {
+		// Matches ServerConn.fill and the production reader: a short read that
+		// carried a full unit must be parsed before the error surfaces on the
+		// next call, or a (n>0, io.EOF) from a server that responds and closes
+		// discards a response that is already buffered.
 		c.buf = append(c.buf, tmp[:n]...)
+		return nil
 	}
 	return err
 }
@@ -346,6 +352,10 @@ func TestServerSendServerRequest(t *testing.T) {
 	reqURL := "rtsp://127.0.0.1/stream"
 	cseqCh := make(chan int, 1)
 	s := New(t, Options{Handle: func(sc *ServerConn) {
+		// Closed on every path: an unconditional receive below would otherwise
+		// block to the 10-minute package timeout on the error return, hiding
+		// the t.Errorf that explains what actually went wrong.
+		defer close(cseqCh)
 		cseq, err := sc.SendServerRequest("OPTIONS", reqURL, nil)
 		if err != nil {
 			t.Errorf("SendServerRequest: %v", err)
@@ -419,6 +429,9 @@ func TestServerHandshakeAAC(t *testing.T) {
 	t.Parallel()
 	resultCh := make(chan []ChannelPair, 1)
 	s := New(t, Options{Handle: func(sc *ServerConn) {
+		// Closed on every path so the receive below cannot block forever when
+		// Handshake returns an error.
+		defer close(resultCh)
 		pairs, err := sc.Handshake(HandshakeConfig{
 			SDP:           aacSDP,
 			SessionID:     "sess-aac",
@@ -448,6 +461,9 @@ func TestServerHandshakeRenumbered(t *testing.T) {
 	t.Parallel()
 	resultCh := make(chan []ChannelPair, 1)
 	s := New(t, Options{Handle: func(sc *ServerConn) {
+		// Closed on every path so the receive below cannot block forever when
+		// Handshake returns an error.
+		defer close(resultCh)
 		pairs, err := sc.Handshake(HandshakeConfig{
 			SDP:             aacSDP,
 			SessionID:       "sess-renum",
@@ -490,7 +506,7 @@ func TestServerTLS(t *testing.T) {
 		t.Fatal("CertPEM is nil for a TLS server")
 	}
 	u := s.URL("/stream")
-	if len(u) < 6 || u[:6] != "rtsps:" {
+	if !strings.HasPrefix(u, "rtsps://") {
 		t.Errorf("TLS URL scheme: got %q, want rtsps://", u)
 	}
 
@@ -530,7 +546,7 @@ func TestServerNonTLSCertPEMNil(t *testing.T) {
 	if s.CertPEM() != nil {
 		t.Error("CertPEM should be nil for a non-TLS server")
 	}
-	if got := s.URL("/x"); len(got) < 5 || got[:5] != "rtsp:" {
+	if got := s.URL("/x"); !strings.HasPrefix(got, "rtsp://") {
 		t.Errorf("non-TLS URL scheme: got %q, want rtsp://", got)
 	}
 }
