@@ -58,8 +58,12 @@ type ChannelPair struct {
 
 // SessionInfo is a read-only snapshot of the negotiated session, for
 // diagnostics such as a handshake walkthrough tool. It carries no credentials
-// and no counters. Every field except KeepaliveMethod is populated by the
-// lifecycle verbs, so on a freshly dialed client only KeepaliveMethod is set.
+// and no counters. Dial sets KeepaliveMethod. Setup sets Channels, and sets
+// SessionID and SessionTimeout from the first SETUP response that carries a
+// Session header, so they stay empty against a server that omits it.
+// AuthScheme stays AuthNone until the authentication retry is wired into the
+// lifecycle verbs, which has not happened yet, so it currently reports
+// AuthNone on every client.
 type SessionInfo struct {
 	// SessionID is the negotiated RTSP session identifier, "" before Setup.
 	SessionID string
@@ -96,6 +100,17 @@ type Client struct {
 	pending map[int]chan *Response
 	cseq    atomic.Uint32
 
+	// lifecycleMu serializes one lifecycle call end to end, across its network
+	// round trip. Client documents that Describe, Setup and Play come from a
+	// single goroutine, and mu alone cannot enforce that: each verb validates
+	// under mu, releases it for the round trip, then re-acquires it to commit,
+	// so two concurrent Setups would both pass the already-set-up check and
+	// both propose the same channel pair, and the second would overwrite the
+	// first's binding in the routing table with no error. Holding this for the
+	// whole call makes the documented contract structural. Lock order is
+	// lifecycleMu then mu, never the reverse.
+	lifecycleMu sync.Mutex
+
 	// mu guards the state machine and negotiated session fields below.
 	mu              sync.Mutex
 	state           state
@@ -106,6 +121,22 @@ type Client struct {
 	baseURL         string
 	channelPairs    []ChannelPair
 	termErr         error
+
+	// described retains Describe's per-track descriptors, indexed by track ID,
+	// so Setup can build the pipeline without re-parsing the SDP. Written by
+	// Describe under mu, read by Setup under mu.
+	described []describedTrack
+	// tracks holds the constructed per-track pipelines in Setup order, appended
+	// by Setup under mu. Stats will read it once per-track counting is wired;
+	// nothing reads it today.
+	tracks []*track
+
+	// channels is the immutable channel-to-track routing table. Setup publishes
+	// a new table by copy-on-write and an atomic store. It sits outside mu so
+	// that the reader can load it lock-free once it routes frames, rather than
+	// blocking on the lock the lifecycle calls hold; that routing has not
+	// landed, so nothing loads it yet.
+	channels atomic.Pointer[channelTable]
 
 	// lastFrameAt is the watchdog clock (UnixNano), written by the reader on
 	// every frame and read when arming the read deadline, so it is atomic.
@@ -310,8 +341,9 @@ func (c *Client) Wait(ctx context.Context) error {
 }
 
 // Stats returns a snapshot of per-track receive counters in a freshly
-// allocated map that never aliases internal state. No track can be set up yet,
-// so the map is always empty; per-track counting arrives with Setup.
+// allocated map that never aliases internal state. The map is always empty
+// today: tracks can be set up, but nothing increments their counters until
+// frame delivery lands, so reporting them would only assert zeros.
 func (c *Client) Stats() audiostream.Stats {
 	return audiostream.Stats{Tracks: make(map[int]audiostream.TrackStats)}
 }

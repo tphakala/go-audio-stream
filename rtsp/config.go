@@ -66,13 +66,14 @@ type Config struct {
 	// and SessionInfo are the callback-safe ones). Frame.Data is valid only
 	// for the duration of the call.
 	//
-	// Frame delivery arrives with track setup in a later change; today no
-	// frames are delivered. Once it lands, nil will be allowed and frames will
-	// then be counted in Stats without being delivered.
+	// Frame delivery arrives in a later change; today no frames are
+	// delivered. Once it lands, nil will be allowed and frames will then be
+	// counted in Stats without being delivered.
 	OnFrame func(audiostream.Frame)
-	// Logger is reserved for diagnostics and is not read yet; the package
-	// currently emits no log output. When it is wired, URLs will be passed
-	// through RedactURL and credentials will never be logged.
+	// Logger receives diagnostics for conditions this package handles rather
+	// than fails on: a track degraded to raw delivery by an unsupported codec
+	// or a quirky fmtp, and a SETUP response whose Session header is missing or
+	// inconsistent. Credentials are never logged.
 	Logger *slog.Logger
 }
 
@@ -93,9 +94,12 @@ func (c *Config) applyDefaults() {
 	}
 }
 
-// Track is one media track discovered by Describe and passed to Setup. Both
-// verbs arrive in a later change; the type is declared here so the shape is
-// visible, and nothing in this package produces or consumes it yet.
+// Track is one media track discovered by Describe and passed to Setup. The ID
+// selects the retained descriptor that builds the depacketizer while Control
+// names the stream the SETUP addresses, so Setup checks that the two still
+// agree with what Describe resolved and returns ErrUnknownTrack when they do
+// not. Pass Tracks through unmodified; pairing one track's ID with another's
+// Control would otherwise set up one stream and decode it as another.
 type Track struct {
 	// ID is a stable per-session id (the SDP media index).
 	ID int
@@ -105,15 +109,20 @@ type Track struct {
 	Codec audiostream.Codec
 	// ClockRate is the RTP clock rate in Hz from the rtpmap.
 	ClockRate int
-	// Channels is the audio channel count from the rtpmap, 0 when absent.
+	// Channels is the channel count from the rtpmap. It is 1 rather than 0
+	// whenever the rtpmap names an encoding but omits the channel segment,
+	// including for an encoding this package does not decode and for a video
+	// track, because the SDP layer defaults it from the presence of the
+	// encoding name alone. It is 0 only when there was no rtpmap to read.
+	// Do not use it to detect an unsupported codec; compare Codec instead.
 	Channels int
 	// Control is the resolved absolute control URL for this track.
 	Control string
 }
 
-// SetupOptions controls one Setup. Setup arrives in a later change; nothing in
-// this package consumes this type yet. Discard sets up a track whose frames are
-// dropped inside the reader without per-packet allocation or delivery.
+// SetupOptions controls one Setup. Discard sets up a track whose frames are
+// dropped inside the reader without per-packet allocation or delivery; it is
+// recorded on the track now and takes effect when frame delivery lands.
 type SetupOptions struct {
 	// Discard drops this track's frames in the reader, counting them in Stats
 	// but never depacketizing or delivering them.

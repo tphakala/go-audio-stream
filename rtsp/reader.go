@@ -107,12 +107,19 @@ func (c *Client) consume(step stepFunc, validated bool) bool {
 	// prefix, leaving the budget inert on exactly the binary streams it exists
 	// to bound.
 	//
-	// Known consequence, to be removed with the channel routing table: once a
-	// session is playing, the stream is almost entirely interleaved frames, so
-	// a desync there cannot re-lock on a frame and will exhaust the budget
-	// unless a real message arrives within maxResyncBytes. The discriminator
-	// should become semantic (accept a frame mid-resync when its channel is in
-	// the negotiated set) as soon as Setup populates channelPairs.
+	// Known consequence: once a session is playing, the stream is almost
+	// entirely interleaved frames, so a desync there cannot re-lock on a frame
+	// and will exhaust the budget unless a real message arrives within
+	// maxResyncBytes.
+	//
+	// Setup now publishes the channel routing table this needs, so the
+	// remaining work is to make the discriminator semantic: accept a frame
+	// mid-resync when c.channels binds the channel byte at c.rbuf[c.start+1],
+	// and fill rather than discard when that byte has not arrived yet, so a
+	// header split across two reads is not mistaken for garbage. That is
+	// deliberately left until the reader consults c.channels for routing as
+	// well, so the table gains its two readers in one change rather than being
+	// read for resync while frames are still dropped on the floor.
 	if resyncing && !validated {
 		return c.resyncOne()
 	}
@@ -184,10 +191,11 @@ func (c *Client) resyncOne() bool {
 	return true
 }
 
-// handleInterleaved handles one interleaved frame. In this milestone no track
-// is set up, so there is nothing to route to and every frame is skipped. The
-// interleaved-channel routing table, per-track depacketization, and OnFrame
-// delivery are added in a later task.
+// handleInterleaved handles one interleaved frame. Setup now publishes a
+// channel-to-track routing table, but this function does not consult it yet, so
+// every frame is still skipped. Routing, per-track depacketization and OnFrame
+// delivery are added in a later task, which is also when the resync gate above
+// gains its semantic discriminator.
 func (c *Client) handleInterleaved(f InterleavedFrame) {
 	// Stamped here even though nothing is routed yet. armReadDeadline derives
 	// the watchdog deadline from this value, so if Play set playing before the

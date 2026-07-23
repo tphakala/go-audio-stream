@@ -287,7 +287,7 @@ func TestTeardownIsActuallyWritten(t *testing.T) {
 	c := newClient(&cfg, conn, &target{requestURL: scriptedURL})
 	// A session id is what gates the teardown; Setup will set this for real.
 	c.mu.Lock()
-	c.sessionID = "sess-1"
+	c.sessionID = testInternalSessionID
 	c.mu.Unlock()
 
 	go c.reader()

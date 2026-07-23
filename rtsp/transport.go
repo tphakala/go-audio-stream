@@ -137,7 +137,8 @@ func (t TransportHeader) InterleavedChannels(claimed map[int]bool) (rtp, rtcp in
 	if !t.Interleaved {
 		return 0, 0, ErrNoInterleaved
 	}
-	if t.RTCPChannel != t.RTPChannel+1 || t.RTPChannel < 0 || t.RTPChannel > 255 || t.RTCPChannel < 0 || t.RTCPChannel > 255 {
+	if t.RTCPChannel != t.RTPChannel+1 || t.RTPChannel < 0 || t.RTPChannel > maxInterleavedChannel ||
+		t.RTCPChannel < 0 || t.RTCPChannel > maxInterleavedChannel {
 		return 0, 0, ErrBadChannelPair
 	}
 	if claimed[t.RTPChannel] || claimed[t.RTCPChannel] {
@@ -145,6 +146,11 @@ func (t TransportHeader) InterleavedChannels(claimed map[int]bool) (rtp, rtcp in
 	}
 	return t.RTPChannel, t.RTCPChannel, nil
 }
+
+// maxInterleavedChannel is the highest channel number an interleaved frame
+// header can carry. The channel occupies one byte of the four-byte header, so
+// the format imposes this ceiling; it is not a policy this package chose.
+const maxInterleavedChannel = 255
 
 // BuildTransport builds the client SETUP Transport proposal for the
 // TCP-interleaved profile with the given channel pair (RTP then RTCP):
