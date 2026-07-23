@@ -3,11 +3,14 @@ package testserver
 import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
+	"crypto/md5" //nolint:gosec // reproduces the client's RFC 7616 Digest math in a test double, not a security primitive.
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/pem"
 	"errors"
 	"fmt"
@@ -416,6 +419,15 @@ func (sc *ServerConn) InjectFrame(channel int, payload []byte) error {
 	return err
 }
 
+// WriteRaw writes bytes straight to the connection, bypassing every framing
+// helper, so a test can inject a byte run that desynchronizes the client's
+// framing loop ahead of a real unit. It is the escape hatch for reader-framing
+// tests; use InjectFrame, Respond, or SendServerRequest for everything else.
+func (sc *ServerConn) WriteRaw(b []byte) error {
+	_, err := sc.conn.Write(b)
+	return err
+}
+
 // SendServerRequest writes a server-initiated request (for example a
 // mid-session OPTIONS or a TEARDOWN) with a fresh server CSeq and returns
 // that CSeq so the test can await the client's 200 OK.
@@ -468,6 +480,10 @@ type AuthSpec struct {
 	Username  string
 	Password  string
 	Stale     bool // when set, the first post-auth 401 carries stale=true once
+	// StaleNonce is the nonce the stale=true challenge rotates to. Empty reuses
+	// Nonce, which makes the retry indistinguishable from a plain resend and
+	// leaves a client that ignores the rotation undetectable.
+	StaleNonce string
 }
 
 // ChannelPair is the RTP/RTCP interleaved channel pair the server assigned
@@ -566,16 +582,25 @@ func (sc *ServerConn) readDescribeWithAuth(cfg *HandshakeConfig) (*rtsp.Request,
 			return nil, err
 		}
 	}
-	if cfg.Auth.Stale {
-		if err := sc.sendChallenge(req, cfg.Auth, true); err != nil {
+	spec := cfg.Auth
+	if spec.Stale {
+		if err := sc.sendChallenge(req, spec, true); err != nil {
 			return nil, err
 		}
 		req, err = sc.readDescribeAgain()
 		if err != nil {
 			return nil, err
 		}
+		if spec.StaleNonce != "" {
+			// Validate the retry against the ROTATED nonce. Checking it against
+			// the original would accept a client that ignored the rotation
+			// entirely, which is the whole behaviour the stale path exists for.
+			rotated := *spec
+			rotated.Nonce = spec.StaleNonce
+			spec = &rotated
+		}
 	}
-	sc.validateAuthorization(req, cfg.Auth)
+	sc.validateAuthorization(req, spec)
 	return req, nil
 }
 
@@ -602,8 +627,12 @@ func buildChallenge(spec *AuthSpec, stale bool) string {
 	if strings.EqualFold(spec.Scheme, "Basic") {
 		return `Basic realm="` + spec.Realm + `"`
 	}
+	nonce := spec.Nonce
+	if stale && spec.StaleNonce != "" {
+		nonce = spec.StaleNonce
+	}
 	parts := make([]string, 0, 5)
-	parts = append(parts, `realm="`+spec.Realm+`"`, `nonce="`+spec.Nonce+`"`)
+	parts = append(parts, `realm="`+spec.Realm+`"`, `nonce="`+nonce+`"`)
 	if spec.Algorithm != "" {
 		parts = append(parts, "algorithm="+spec.Algorithm)
 	}
@@ -636,11 +665,90 @@ func (sc *ServerConn) validateAuthorization(req *rtsp.Request, spec *AuthSpec) {
 	case strings.EqualFold(spec.Scheme, "Digest"):
 		if !strings.HasPrefix(got, "Digest ") {
 			sc.t.Errorf("testserver: expected Digest authorization")
-		} else if spec.Nonce != "" && !strings.Contains(got, spec.Nonce) {
-			sc.t.Errorf("testserver: Digest authorization missing challenge nonce")
+			return
 		}
+		sc.verifyDigest(req, spec)
 	default:
 		sc.t.Errorf("testserver: unsupported auth scheme %q", spec.Scheme)
+	}
+}
+
+// verifyDigest independently recomputes the RFC 7616 (or RFC 2069 legacy)
+// Digest response from the client's Authorization header and spec's
+// credentials, failing the test on any mismatch. This is what makes the auth
+// integration tests validate the client's digest math end to end rather than
+// only checking that some header was sent.
+func (sc *ServerConn) verifyDigest(req *rtsp.Request, spec *AuthSpec) {
+	sc.t.Helper()
+	params := parseDigestParams(req.Header.Get("Authorization"))
+	if params["nonce"] != spec.Nonce {
+		sc.t.Errorf("testserver: Digest nonce = %q, want %q", params["nonce"], spec.Nonce)
+		return
+	}
+	// The digest URI is checked against the request line rather than merely
+	// fed into the hash. Deriving HA2 from whatever the client claimed would
+	// verify the client against itself: a client that digests over the session
+	// base URL instead of the track control URL is internally consistent and
+	// would pass here while a real camera answers it 401.
+	if params["uri"] != req.URL {
+		sc.t.Errorf("testserver: Digest uri = %q, want the request URI %q", params["uri"], req.URL)
+		return
+	}
+	// Likewise the qop: taking the client's word for it would accept a legacy
+	// response to a qop challenge and a qop response to a legacy one, which are
+	// the two ways the RFC 2069 and RFC 7616 formulas get confused.
+	if (spec.QOP == "") != (params["qop"] == "") {
+		sc.t.Errorf("testserver: Digest qop = %q, want %q", params["qop"], spec.QOP)
+		return
+	}
+	if spec.QOP != "" && (params["nc"] == "" || params["cnonce"] == "") {
+		sc.t.Errorf("testserver: Digest with qop must carry nc and cnonce, got nc=%q cnonce=%q",
+			params["nc"], params["cnonce"])
+		return
+	}
+	h := digestHasher(spec.Algorithm)
+	ha1 := h(spec.Username + ":" + spec.Realm + ":" + spec.Password)
+	ha2 := h(req.Method + ":" + req.URL)
+	var want string
+	if qop := params["qop"]; qop != "" {
+		want = h(strings.Join([]string{ha1, spec.Nonce, params["nc"], params["cnonce"], qop, ha2}, ":"))
+	} else {
+		want = h(strings.Join([]string{ha1, spec.Nonce, ha2}, ":"))
+	}
+	if params["response"] != want {
+		sc.t.Errorf("testserver: Digest response mismatch: got %q, want %q", params["response"], want)
+	}
+}
+
+// parseDigestParams splits a Digest Authorization value into its auth-params,
+// lowercasing names and stripping surrounding quotes. It is sufficient for the
+// test payloads, whose values carry no embedded commas.
+func parseDigestParams(header string) map[string]string {
+	params := map[string]string{}
+	for _, part := range strings.Split(strings.TrimPrefix(header, "Digest "), ",") {
+		k, v, ok := strings.Cut(strings.TrimSpace(part), "=")
+		if !ok {
+			continue
+		}
+		params[strings.ToLower(strings.TrimSpace(k))] = strings.Trim(strings.TrimSpace(v), `"`)
+	}
+	return params
+}
+
+// digestHasher returns a hex-hashing function for the challenge algorithm:
+// SHA-256 when named, otherwise MD5, which RFC 7616 section 3.3 makes the
+// default when the algorithm directive is absent (it also registers SHA-256 and
+// discourages MD5, which is why both are supported here). It reproduces the
+// client's arithmetic and is never used as a security primitive.
+func digestHasher(algorithm string) func(string) string {
+	newHash := md5.New
+	if strings.EqualFold(algorithm, "SHA-256") {
+		newHash = sha256.New
+	}
+	return func(s string) string {
+		hh := newHash()
+		_, _ = hh.Write([]byte(s))
+		return hex.EncodeToString(hh.Sum(nil))
 	}
 }
 

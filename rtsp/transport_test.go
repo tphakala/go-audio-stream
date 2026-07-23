@@ -210,7 +210,7 @@ func TestParsePublicAndKeepaliveMethod(t *testing.T) {
 
 	withGetParam := "OPTIONS, DESCRIBE, SETUP, PLAY, TEARDOWN, GET_PARAMETER"
 	methods := rtsp.ParsePublic(withGetParam)
-	want := []string{methodOptions, "DESCRIBE", "SETUP", "PLAY", "TEARDOWN", methodGetParameter}
+	want := []string{methodOptions, "DESCRIBE", methodSetup, methodPlay, methodTeardown, methodGetParameter}
 	if len(methods) != len(want) {
 		t.Fatalf("ParsePublic(%q) = %v, want %v", withGetParam, methods, want)
 	}

@@ -37,9 +37,10 @@ var (
 // else is ErrUnknownTrack, and a track already set up is ErrTrackAlreadySetUp.
 //
 // A clean protocol response the caller may recover from (a non-2xx
-// *ResponseError, *audiostream.RedirectError, or *UnauthorizedError) is
-// returned without tearing down the session, so the caller may Close or try
-// another track.
+// *ResponseError, or *audiostream.RedirectError) is returned without tearing
+// down the session, so the caller may Close or try another track. A 401 is
+// answered and retried automatically, so it reaches the caller only as an error
+// matching ErrAuthFailed, which wraps the challenge that was refused.
 //
 // A Transport this client rejects (ErrNoInterleaved, ErrBadChannelPair,
 // ErrChannelConflict, ErrMalformedTransport) is not the same case. The server
@@ -84,7 +85,7 @@ func (c *Client) Setup(ctx context.Context, trk Track, opts SetupOptions) error 
 		return fmt.Errorf("track %d: %w (Transport: %q)", trk.ID, cerr, raw)
 	}
 
-	tr := newTrack(trk.ID, desc, opts, gotRTP, gotRTCP, c.cfg.Logger)
+	tr := newTrack(trk.ID, desc, opts, gotRTCP, c.cfg.Logger)
 	return c.publishTrack(tr, gotRTP, gotRTCP)
 }
 
@@ -95,8 +96,8 @@ func (c *Client) Setup(ctx context.Context, trk Track, opts SetupOptions) error 
 func (c *Client) describedTrackFor(trk Track) (describedTrack, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.state != stateDescribed && c.state != stateSetup {
-		return describedTrack{}, &StateError{Method: methodSetup, State: c.state.String()}
+	if serr := c.requireState(methodSetup); serr != nil {
+		return describedTrack{}, serr
 	}
 	if trk.ID < 0 || trk.ID >= len(c.described) {
 		return describedTrack{}, fmt.Errorf("%w: id %d, Describe returned %d track(s)",
@@ -206,9 +207,19 @@ func (c *Client) claimedChannels() map[int]bool {
 
 // publishTrack atomically publishes tr into the channel routing table and
 // records it under mu. The atomic store establishes the happens-before edge the
-// reader will rely on once it routes frames, so tr must be fully initialized
-// before this call. When shutdown has already begun (the terminal error is set)
-// it does not resurrect the state and returns that terminal error.
+// reader relies on to route frames, so tr must be fully initialized before this
+// call. When shutdown has already begun (the terminal error is set) it does not
+// resurrect the state and returns that terminal error.
+//
+// The table is published only AFTER the SETUP response, so interleaved frames a
+// server sends between the request and the response are routed to no track and
+// dropped. That is deliberate. Pre-publishing the proposed pair would bind
+// channels the server has not confirmed, and a server that renumbers (which is
+// why nextChannelPair reads the claimed set rather than a count) would then have
+// another track's packets fed to this track's depacketizer for as long as the
+// stale binding stood. Losing frames a server should not have sent before PLAY
+// costs a few pre-roll packets; mis-binding costs the session. Frames dropped
+// here are counted nowhere, since there is no track to count them against.
 func (c *Client) publishTrack(tr *track, rtpCh, rtcpCh int) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -218,6 +229,6 @@ func (c *Client) publishTrack(tr *track, rtpCh, rtcpCh int) error {
 	c.channels.Store(newChannelTable(c.channels.Load(), tr, rtpCh, rtcpCh))
 	c.tracks = append(c.tracks, tr)
 	c.channelPairs = append(c.channelPairs, ChannelPair{TrackID: tr.id, RTP: rtpCh, RTCP: rtcpCh})
-	c.state = stateSetup
+	c.commitState(methodSetup)
 	return nil
 }

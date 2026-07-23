@@ -7,13 +7,18 @@ type TrackStats struct {
 	// Bytes is the total payload bytes accepted. For an active (parsed)
 	// track this counts the RTP payload only, with the RTP header stripped.
 	// For a discard track it counts the full interleaved payload, RTP
-	// header included, because discard tracks are deliberately never parsed
-	// and so cannot cheaply strip the header.
+	// header included, because a discard track is validated but never
+	// depacketized, so its header is not stripped.
 	Bytes uint64
 	// SeqGaps is the total number of packets lost per sequence
 	// number tracking.
 	SeqGaps uint64
-	// Malformed is the number of packets discarded as unparseable.
+	// Malformed is the number of packets discarded without being delivered,
+	// for any reason: an RTP header that will not parse, a payload type the
+	// track does not carry (a second format multiplexed onto the same
+	// channel), or a codec depacketizer rejecting the payload. A steadily
+	// climbing count is not by itself evidence of a corrupt stream, because a
+	// multiplexed second format increments it on a healthy session.
 	Malformed uint64
 	// SSRCResets is the number of mid-stream SSRC changes tolerated.
 	SSRCResets uint64

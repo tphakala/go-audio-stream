@@ -61,10 +61,11 @@ func TestDestState(t *testing.T) {
 	}
 }
 
-// The full legal lifecycle, asserted through advance so destState's mapping is
-// pinned rather than inferred. Swapping the SETUP and PLAY arms of destState
-// used to leave the whole suite green.
-func TestAdvanceLifecycle(t *testing.T) {
+// The full legal lifecycle, asserted through the requireState/commitState pair
+// the verbs use, so destState's mapping is pinned rather than inferred.
+// Swapping the SETUP and PLAY arms of destState used to leave the whole suite
+// green.
+func TestLifecycleTransitions(t *testing.T) {
 	t.Parallel()
 	c := &Client{state: stateIdle}
 	steps := []struct {
@@ -77,9 +78,10 @@ func TestAdvanceLifecycle(t *testing.T) {
 		{methodPlay, statePlaying},
 	}
 	for _, st := range steps {
-		if err := c.advance(st.method); err != nil {
-			t.Fatalf("advance(%q): %v", st.method, err)
+		if err := c.requireState(st.method); err != nil {
+			t.Fatalf("requireState(%q): %v", st.method, err)
 		}
+		c.commitState(st.method)
 		if c.state != st.want {
 			t.Fatalf("after %q state = %v, want %v", st.method, c.state, st.want)
 		}
@@ -88,16 +90,28 @@ func TestAdvanceLifecycle(t *testing.T) {
 
 // Every method is refused once the session is closed, including the ones that
 // are legal earlier in the lifecycle.
-func TestAdvanceClosedIsTerminal(t *testing.T) {
+func TestRequireStateClosedIsTerminal(t *testing.T) {
 	t.Parallel()
 	for _, m := range []string{methodDescribe, methodSetup, methodPlay, methodOptions, methodTeardown} {
 		c := &Client{state: stateClosed}
-		if err := c.advance(m); !errors.Is(err, ErrInvalidState) {
-			t.Errorf("advance(%q) from closed = %v, want ErrInvalidState", m, err)
+		if err := c.requireState(m); !errors.Is(err, ErrInvalidState) {
+			t.Errorf("requireState(%q) from closed = %v, want ErrInvalidState", m, err)
 		}
 		if c.state != stateClosed {
-			t.Errorf("advance(%q) mutated a closed state to %v", m, c.state)
+			t.Errorf("requireState(%q) mutated a closed state to %v", m, c.state)
 		}
+	}
+}
+
+// commitState refuses to move the state for a method destState does not know,
+// so a legalIn/destState divergence leaves the lifecycle stuck rather than
+// silently rewinding it to idle.
+func TestCommitStateUnknownMethodDoesNotMove(t *testing.T) {
+	t.Parallel()
+	c := &Client{state: stateSetup}
+	c.commitState(methodTeardown)
+	if c.state != stateSetup {
+		t.Errorf("commitState(TEARDOWN) moved state to %s, want setup", c.state)
 	}
 }
 
@@ -133,23 +147,24 @@ func TestLegalIn(t *testing.T) {
 	}
 }
 
-func TestAdvanceGuards(t *testing.T) {
+func TestRequireStateGuards(t *testing.T) {
 	t.Parallel()
 
 	// A legal transition moves the state and returns nil.
 	c := &Client{state: stateIdle}
-	if err := c.advance(methodDescribe); err != nil {
-		t.Fatalf("advance DESCRIBE from idle: %v", err)
+	if err := c.requireState(methodDescribe); err != nil {
+		t.Fatalf("requireState DESCRIBE from idle: %v", err)
 	}
+	c.commitState(methodDescribe)
 	if c.state != stateDescribed {
 		t.Fatalf("after DESCRIBE state = %s, want described", c.state)
 	}
 
 	// An illegal transition returns a *StateError and does not change state.
-	err := c.advance(methodPlay)
+	err := c.requireState(methodPlay)
 	var se *StateError
 	if !errors.As(err, &se) {
-		t.Fatalf("advance PLAY from described: err = %v, want *StateError", err)
+		t.Fatalf("requireState PLAY from described: err = %v, want *StateError", err)
 	}
 	if se.Method != methodPlay || se.State != wantDescribed {
 		t.Errorf("StateError = {Method:%q State:%q}, want {PLAY described}", se.Method, se.State)
@@ -158,7 +173,7 @@ func TestAdvanceGuards(t *testing.T) {
 		t.Errorf("StateError does not match ErrInvalidState")
 	}
 	if c.state != stateDescribed {
-		t.Errorf("illegal advance changed state to %s", c.state)
+		t.Errorf("refused requireState changed state to %s", c.state)
 	}
 }
 

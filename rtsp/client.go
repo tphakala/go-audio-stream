@@ -2,7 +2,9 @@ package rtsp
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/tls"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"net"
@@ -19,7 +21,8 @@ const (
 	// read during shutdown.
 	teardownDeadline = 2 * time.Second
 	// maxReadBuffer is a backstop ceiling on the reader accumulation buffer.
-	// The M4a per-unit caps make it unreachable for well-formed units.
+	// MaxHeaderBytes and MaxBodySize cap every well-formed unit below it, so it
+	// is reachable only on a desynchronized or hostile stream.
 	maxReadBuffer = MaxHeaderBytes + MaxBodySize
 	// maxResyncBytes bounds byte-at-a-time resynchronization before the
 	// reader declares a fatal framing error.
@@ -34,8 +37,11 @@ var (
 	// ErrConnectionClosed wraps the underlying cause when the control
 	// connection was lost unexpectedly.
 	ErrConnectionClosed = errors.New("rtsp: connection closed")
-	// ErrAuthFailed ends a request when authentication was rejected after the
-	// permitted retries.
+	// ErrAuthFailed ends a request whose 401 this client could not answer: no
+	// usable challenge was offered, or the credentials were still refused after
+	// the permitted retries. The returned error wraps the *UnauthorizedError, so
+	// errors.As recovers the challenge (its realm, for prompting) even though
+	// the retry was automatic.
 	ErrAuthFailed = errors.New("rtsp: authentication failed")
 	// ErrRequestTimeout ends a request when the server did not answer within
 	// Config.Timeout. It is the request-path counterpart to
@@ -61,9 +67,8 @@ type ChannelPair struct {
 // and no counters. Dial sets KeepaliveMethod. Setup sets Channels, and sets
 // SessionID and SessionTimeout from the first SETUP response that carries a
 // Session header, so they stay empty against a server that omits it.
-// AuthScheme stays AuthNone until the authentication retry is wired into the
-// lifecycle verbs, which has not happened yet, so it currently reports
-// AuthNone on every client.
+// AuthScheme stays AuthNone until a 401 has been answered, so it reports
+// AuthNone against a server that never challenges.
 type SessionInfo struct {
 	// SessionID is the negotiated RTSP session identifier, "" before Setup.
 	SessionID string
@@ -117,34 +122,48 @@ type Client struct {
 	sessionID       string
 	sessionTimeout  time.Duration
 	keepaliveMethod string
-	authScheme      AuthScheme
 	baseURL         string
 	channelPairs    []ChannelPair
 	termErr         error
+	// auth is the active authentication state. Once a 401 has been answered,
+	// every outgoing request carries an Authorization header computed from it,
+	// with the nonce count incremented per request under the same server nonce.
+	// It is also what SessionInfo reports the scheme from, so the scheme is
+	// stored once rather than kept in a second field that has to be updated in
+	// step. The password and the header value are never logged.
+	auth authState
+
+	// username and password are the resolved credentials (URL userinfo wins
+	// over Config) used to answer an authentication challenge. Set once by
+	// newClient and never logged.
+	username string
+	password string
+	// reporterSSRC is this client's RTCP reporter SSRC, a random 32-bit value
+	// chosen at Dial and read by the keepalive timer when it builds Receiver
+	// Reports. Immutable after newClient, so it needs no lock.
+	reporterSSRC uint32
 
 	// described retains Describe's per-track descriptors, indexed by track ID,
 	// so Setup can build the pipeline without re-parsing the SDP. Written by
 	// Describe under mu, read by Setup under mu.
 	described []describedTrack
 	// tracks holds the constructed per-track pipelines in Setup order, appended
-	// by Setup under mu. Stats will read it once per-track counting is wired;
-	// nothing reads it today.
+	// by Setup under mu and read under mu by Stats, Play's RTP-Info seeding,
+	// and the keepalive timer's Receiver Reports.
 	tracks []*track
 
 	// channels is the immutable channel-to-track routing table. Setup publishes
 	// a new table by copy-on-write and an atomic store. It sits outside mu so
-	// that the reader can load it lock-free once it routes frames, rather than
-	// blocking on the lock the lifecycle calls hold; that routing has not
-	// landed, so nothing loads it yet.
+	// that the reader can load it lock-free on every interleaved frame, rather
+	// than blocking on the lock the lifecycle calls hold.
 	channels atomic.Pointer[channelTable]
 
 	// lastFrameAt is the watchdog clock (UnixNano), written by the reader on
 	// every frame and read when arming the read deadline, so it is atomic.
-	//
-	// TODO(play): whichever code sets playing must stamp this first.
-	// armReadDeadline derives the deadline from it, so flipping playing while
-	// this is still zero yields a 1970 deadline that has already expired and
-	// kills a healthy stream on its first read.
+	// Play stamps it before it sets playing, because armReadDeadline derives
+	// the deadline from it: flipping playing while this is still zero would
+	// yield a 1970 deadline that has already expired and would kill a healthy
+	// stream on its first read.
 	lastFrameAt atomic.Int64
 	// playing gates the read-idle watchdog; false until Play.
 	playing atomic.Bool
@@ -159,10 +178,14 @@ type Client struct {
 	done      chan struct{}
 	wg        sync.WaitGroup
 
-	// Reader-owned accumulation buffer and parse offset.
-	rbuf   []byte
-	start  int
-	resync int
+	// Reader-owned accumulation buffer, parse offset, and read scratch. The
+	// scratch is a field rather than a local in fill() because conn is an
+	// interface, so escape analysis cannot see the callee and heap-allocates a
+	// local array on every single socket read.
+	rbuf     []byte
+	start    int
+	resync   int
+	rscratch [readChunk]byte
 }
 
 // Dial connects to cfg.URL, starts the reader goroutine, and sends an OPTIONS
@@ -200,14 +223,29 @@ func Dial(ctx context.Context, cfg Config) (*Client, error) {
 // newClient builds a Client around an established connection.
 func newClient(cfg *Config, conn net.Conn, tgt *target) *Client {
 	return &Client{
-		cfg:     *cfg,
-		conn:    conn,
-		pending: make(map[int]chan *Response),
-		baseURL: tgt.requestURL,
-		closing: make(chan struct{}),
-		done:    make(chan struct{}),
-		state:   stateIdle,
+		cfg:          *cfg,
+		conn:         conn,
+		pending:      make(map[int]chan *Response),
+		baseURL:      tgt.requestURL,
+		username:     tgt.username,
+		password:     tgt.password,
+		reporterSSRC: randomSSRC(),
+		closing:      make(chan struct{}),
+		done:         make(chan struct{}),
+		state:        stateIdle,
 	}
+}
+
+// randomSSRC returns a random 32-bit RTCP reporter SSRC.
+//
+// crypto/rand.Read has been documented never to return an error since Go 1.24:
+// it crashes the program irrecoverably if the system source fails. There is
+// therefore no error branch to write, and any fallback constant here would be
+// unreachable code pretending to be a degraded mode.
+func randomSSRC() uint32 {
+	var b [4]byte
+	_, _ = rand.Read(b[:]) // cannot fail; see above.
+	return binary.BigEndian.Uint32(b[:])
 }
 
 // dialConn performs the TCP connect and, for rtsps, the TLS handshake, both
@@ -341,11 +379,29 @@ func (c *Client) Wait(ctx context.Context) error {
 }
 
 // Stats returns a snapshot of per-track receive counters in a freshly
-// allocated map that never aliases internal state. The map is always empty
-// today: tracks can be set up, but nothing increments their counters until
-// frame delivery lands, so reporting them would only assert zeros.
+// allocated map that never aliases internal state, keyed by track ID. It is
+// safe from any goroutine, including from inside OnFrame: the reader is the
+// only writer and the counters are atomic, so it takes mu only to read the
+// track slice.
+//
+// The counters are read one at a time rather than under a single barrier, so a
+// snapshot taken mid-packet can show a packet counted and its bytes not yet.
+// They are cumulative diagnostics, never a ledger to reconcile.
 func (c *Client) Stats() audiostream.Stats {
-	return audiostream.Stats{Tracks: make(map[int]audiostream.TrackStats)}
+	c.mu.Lock()
+	tracks := c.tracks
+	c.mu.Unlock()
+	m := make(map[int]audiostream.TrackStats, len(tracks))
+	for _, tr := range tracks {
+		m[tr.id] = audiostream.TrackStats{
+			Packets:    tr.packets.Load(),
+			Bytes:      tr.bytes.Load(),
+			SeqGaps:    tr.seqGaps.Load(),
+			Malformed:  tr.malformed.Load(),
+			SSRCResets: tr.ssrcResets.Load(),
+		}
+	}
+	return audiostream.Stats{Tracks: m}
 }
 
 // SessionInfo returns a snapshot of the negotiated session details known so
@@ -360,33 +416,46 @@ func (c *Client) SessionInfo() SessionInfo {
 		copy(chans, c.channelPairs)
 	}
 	return SessionInfo{
-		SessionID:       c.sessionID,
-		SessionTimeout:  c.sessionTimeout,
-		AuthScheme:      c.authScheme,
+		SessionID:      c.sessionID,
+		SessionTimeout: c.sessionTimeout,
+		// The zero Challenge carries AuthNone, so an unauthenticated session
+		// reports AuthNone without a separate "is auth active" test.
+		AuthScheme:      c.auth.challenge.Scheme,
 		KeepaliveMethod: c.keepaliveMethod,
 		Channels:        chans,
 	}
 }
 
-// advance validates that method is legal in the current state and, when it
-// is, transitions to the destination state. It returns a *StateError
-// (matching ErrInvalidState) without changing state when the call is illegal.
-// Close and fatal shutdown move to closed through setTermErr, not advance.
-func (c *Client) advance(method string) error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
+// requireState returns a *StateError (matching ErrInvalidState) when method is
+// not legal in the current state, and nil when it is. The caller must hold mu.
+//
+// Validation and transition are two calls rather than one because every verb
+// validates, releases mu for its network round trip, then re-acquires mu to
+// commit: a combined advance would transition on the request rather than on
+// the response, and a Describe that failed while parsing would leave a client
+// that can never retry. Each verb pairs this with commitState on success.
+func (c *Client) requireState(method string) error {
 	if !legalIn(method, c.state) {
 		return &StateError{Method: method, State: c.state.String()}
 	}
+	return nil
+}
+
+// commitState moves the client into the state method transitions into. The
+// caller must hold mu, must have passed requireState, and must have confirmed
+// no terminal error was recorded while mu was released. Close and fatal
+// shutdown move to closed through setTermErr, never through here.
+func (c *Client) commitState(method string) {
 	dest, ok := destState(method)
 	if !ok {
-		// Unreachable while legalIn and destState agree. Refusing rather than
-		// defaulting keeps a future divergence a visible error instead of a
-		// silent transition to closed.
-		return &StateError{Method: method, State: c.state.String()}
+		// Unreachable while legalIn and destState enumerate the same methods,
+		// which is the invariant destState's second return exists to keep.
+		// Leaving the state untouched makes a future divergence a stuck
+		// lifecycle (the next verb reports a *StateError naming the state it
+		// was stuck in) rather than a silent jump to idle.
+		return
 	}
 	c.state = dest
-	return nil
 }
 
 // writeMessage serializes one socket write under writeMu with a Timeout-bound

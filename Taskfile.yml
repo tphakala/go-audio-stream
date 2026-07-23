@@ -49,6 +49,7 @@ tasks:
       - go test -run '^$' -fuzz '^FuzzResolveBaseURL$' -fuzztime=2m ./rtsp
       - go test -run '^$' -fuzz '^FuzzParseTransport$' -fuzztime=2m ./rtsp
       - go test -run '^$' -fuzz '^FuzzParseSession$' -fuzztime=2m ./rtsp
+      - go test -run '^$' -fuzz '^FuzzParseRTPInfoEntry$' -fuzztime=2m ./rtsp
 
   tidy:
     desc: Tidy and verify go.mod

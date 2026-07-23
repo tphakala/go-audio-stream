@@ -49,7 +49,9 @@ type Config struct {
 	Timeout time.Duration
 	// ReadIdle is the watchdog window: once playing, no interleaved frame
 	// within ReadIdle ends Wait with audiostream.ErrReadTimeout. Zero or
-	// negative disables it.
+	// negative disables it. Any interleaved frame counts, including one this
+	// client then drops: the watchdog answers "is the peer still sending", not
+	// "is the audio still usable".
 	ReadIdle time.Duration
 	// TLSConfig is used for rtsps. Nil means verified TLS with the URL host as
 	// the server name, unless InsecureTLS is set. A non-nil config is cloned;
@@ -66,9 +68,11 @@ type Config struct {
 	// and SessionInfo are the callback-safe ones). Frame.Data is valid only
 	// for the duration of the call.
 	//
-	// Frame delivery arrives in a later change; today no frames are
-	// delivered. Once it lands, nil will be allowed and frames will then be
-	// counted in Stats without being delivered.
+	// Nil is allowed: packets are still parsed and counted in Stats, they are
+	// simply not delivered. That is the shape a caller wants for a track it
+	// only wants statistics from; SetupOptions.Discard is the cheaper one for a
+	// track it wants nothing from at all, since a discard track is never
+	// parsed.
 	OnFrame func(audiostream.Frame)
 	// Logger receives diagnostics for conditions this package handles rather
 	// than fails on: a track degraded to raw delivery by an unsupported codec
@@ -81,9 +85,9 @@ type Config struct {
 // their defaults, and normalizes a negative ReadIdle to zero (disabled).
 func (c *Config) applyDefaults() {
 	if c.ReadIdle < 0 {
-		// Normalized to the documented "disabled" value so a negative can
-		// never reach a timer. time.NewTicker panics on a non-positive
-		// interval, and the keepalive task will build one from this.
+		// Normalized to the documented "disabled" value so that every later
+		// reader can test it with a single > 0, rather than each having to
+		// decide for itself what a negative window means.
 		c.ReadIdle = 0
 	}
 	if c.Timeout <= 0 {
@@ -121,8 +125,9 @@ type Track struct {
 }
 
 // SetupOptions controls one Setup. Discard sets up a track whose frames are
-// dropped inside the reader without per-packet allocation or delivery; it is
-// recorded on the track now and takes effect when frame delivery lands.
+// dropped inside the reader without per-packet allocation or delivery, which is
+// how a caller keeps a video track's channels bound (so the server streams the
+// session it negotiated) without paying to parse it.
 type SetupOptions struct {
 	// Discard drops this track's frames in the reader, counting them in Stats
 	// but never depacketizing or delivering them.

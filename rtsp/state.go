@@ -80,7 +80,7 @@ func (e *StateError) Is(target error) bool {
 // setup. The closed state is terminal; the leading guard states that outright
 // rather than leaving it to emerge from the individual arms, which each happen
 // to exclude it today. OPTIONS and TEARDOWN are absent deliberately: they are
-// not lifecycle transitions and never go through advance.
+// not lifecycle transitions and never go through the lifecycle gate.
 func legalIn(method string, s state) bool {
 	if s == stateClosed {
 		return false
@@ -98,7 +98,7 @@ func legalIn(method string, s state) bool {
 }
 
 // destState is the state a legal method transitions into, and whether the
-// method is one advance knows. Returning the second value rather than
+// method is one commitState knows. Returning the second value rather than
 // defaulting to stateClosed matters: legalIn and destState enumerate the same
 // method set by hand, so a method added to one and forgotten in the other
 // would otherwise report success while silently terminating the session.

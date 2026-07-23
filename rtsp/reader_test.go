@@ -9,6 +9,8 @@ import (
 	"testing"
 	"time"
 
+	audiostream "github.com/tphakala/go-audio-stream"
+	"github.com/tphakala/go-audio-stream/internal/testserver"
 	"github.com/tphakala/go-audio-stream/rtsp"
 )
 
@@ -234,6 +236,10 @@ func TestResyncRecoversFromGarbage(t *testing.T) {
 // interleaved latch: the garbage contains 0x24 bytes, and ParseInterleaved
 // accepts any '$' plus three bytes, so honouring one mid-resync would consume
 // a bogus frame and reset the counter, leaving the budget unable to fire.
+//
+// The session here never reaches Setup, so no channel is bound and the resync
+// gate vouches for none of those latches. TestResyncRelocksOnBoundChannel
+// covers the other side: once a channel IS bound, a frame on it does re-lock.
 func TestResyncBudgetIsBoundedDespiteInterleavedLatch(t *testing.T) {
 	url := serveOptionsThen(t, func(rc *rawConn) {
 		junk := unclassifiableBytes(3 * 4096)
@@ -415,7 +421,7 @@ func TestDialSucceedsWhenResponseAndTeardownShareASegment(t *testing.T) {
 				return
 			}
 			teardown, err := rtsp.MarshalRequest(&rtsp.Request{
-				Method: "TEARDOWN", URL: "rtsp://x/stream", CSeq: 1,
+				Method: methodTeardown, URL: "rtsp://x/stream", CSeq: 1,
 			})
 			if err != nil {
 				t.Errorf("MarshalRequest: %v", err)
@@ -441,5 +447,56 @@ func TestDialSucceedsWhenResponseAndTeardownShareASegment(t *testing.T) {
 		waitCtx, cancel := context.WithTimeout(ctx, testTimeout)
 		_ = c.Wait(waitCtx)
 		cancel()
+	}
+}
+
+func TestBlockedWriteShutdownIsPrompt(t *testing.T) {
+	s := testserver.New(t, testserver.Options{Handle: func(sc *testserver.ServerConn) {
+		if _, err := sc.Handshake(testserver.HandshakeConfig{
+			SDP:            opusSDP,
+			SessionID:      testSessionID,
+			SessionTimeout: 2, // keepalive interval = 1s, so the timer contends for writeMu
+		}); err != nil {
+			return
+		}
+		// Stop reading and flood the client with server-initiated requests so
+		// its send buffer fills and a reader or timer write blocks under
+		// writeMu with a future write deadline armed.
+		for {
+			if _, err := sc.SendServerRequest(methodOptions, "rtsp://camera/stream", nil); err != nil {
+				return
+			}
+		}
+	}})
+	c, err := rtsp.Dial(context.Background(), rtsp.Config{
+		URL: s.URL("/stream"),
+		// A large Timeout is the whole point: if the deadlineMu/shuttingDown
+		// write gate failed, a blocked write would park teardown for this long.
+		Timeout: 30 * time.Second,
+	})
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	describeSetupPlay(t, c, nil)
+
+	// Let the flood fill the socket buffer and a keepalive fire and contend for
+	// writeMu behind the buffer-blocked reader write.
+	time.Sleep(1200 * time.Millisecond)
+
+	start := time.Now()
+	_ = c.Close()
+	waitErr := c.Wait(context.Background())
+	elapsed := time.Since(start)
+	if !errors.Is(waitErr, audiostream.ErrClosed) {
+		t.Errorf("Wait = %v, want ErrClosed", waitErr)
+	}
+	// The write-side deadlineMu/shuttingDown gate must let initiateShutdown's
+	// now-deadline unblock the buffer-blocked write so teardown is not parked
+	// for Config.Timeout. The client goroutines all exit before Wait returns;
+	// the testserver's own flood goroutine stays blocked on the half-dead
+	// socket until t.Cleanup closes it, so a leak assertion here would measure
+	// the server, not the client.
+	if elapsed > 5*time.Second {
+		t.Fatalf("shutdown took %v, want well under Config.Timeout (30s)", elapsed)
 	}
 }
