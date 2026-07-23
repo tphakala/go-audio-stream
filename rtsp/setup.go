@@ -6,13 +6,6 @@ import (
 	"fmt"
 )
 
-// maxInterleavedChannel is the highest channel number an interleaved frame
-// header can carry. The channel occupies one byte of the four-byte header, so
-// this ceiling is imposed by the format, not chosen by this package.
-// BuildTransport is a pure serializer that assigns the range check to whoever
-// allocates the pair, which is nextChannelPair below.
-const maxInterleavedChannel = 255
-
 var (
 	// ErrUnknownTrack is returned by Setup when the Track did not come from
 	// this client's most recent Describe: either its ID does not index the
@@ -28,9 +21,11 @@ var (
 	// ID, so one of the two would silently win.
 	ErrTrackAlreadySetUp = errors.New("rtsp: track is already set up")
 
-	// ErrTooManyTracks is returned by Setup when no interleaved channel pair
-	// remains below maxInterleavedChannel.
-	ErrTooManyTracks = errors.New("rtsp: no interleaved channel pair left")
+	// ErrNoChannelsLeft is returned by Setup when no interleaved channel pair
+	// remains below maxInterleavedChannel. It is channel-space exhaustion
+	// rather than a track count: a server that renumbers the first track to
+	// 254-255 exhausts the space with one track set up.
+	ErrNoChannelsLeft = errors.New("rtsp: no interleaved channel pair left")
 )
 
 // Setup issues a SETUP for one track over the TCP-interleaved profile,
@@ -103,8 +98,11 @@ func (c *Client) describedTrackFor(trk Track) (describedTrack, error) {
 	}
 	desc := c.described[trk.ID]
 	if trk.Control != desc.control {
-		return describedTrack{}, fmt.Errorf("%w: id %d resolves to %s, not %s",
-			ErrUnknownTrack, trk.ID, RedactURL(desc.control), RedactURL(trk.Control))
+		// The URLs are deliberately not interpolated: RedactURL masks userinfo
+		// but not query parameters, and some firmware carries credentials
+		// there. The id is enough to identify which Track was mispaired.
+		return describedTrack{}, fmt.Errorf("%w: id %d does not carry the control URL Describe resolved for it",
+			ErrUnknownTrack, trk.ID)
 	}
 	for _, p := range c.channelPairs {
 		if p.TrackID == trk.ID {
@@ -141,7 +139,7 @@ func (c *Client) nextChannelPair() (rtpCh, rtcpCh int, err error) {
 	}
 	if base+1 > maxInterleavedChannel {
 		return 0, 0, fmt.Errorf("%w: next pair would be %d-%d, above %d",
-			ErrTooManyTracks, base, base+1, maxInterleavedChannel)
+			ErrNoChannelsLeft, base, base+1, maxInterleavedChannel)
 	}
 	return base, base + 1, nil
 }
@@ -150,19 +148,19 @@ func (c *Client) nextChannelPair() (rtpCh, rtcpCh int, err error) {
 // SETUP that reports a different id is a server quirk: the first id governs the
 // aggregate session and the mismatch is logged, not fatal.
 //
-// It refuses to write once shutdown has begun, for publishTrack's reason and
-// one more that is specific to the session id. The reader evaluates
-// sessionEstablished exactly once, in its terminal sequence; a SETUP response
-// landing after that check could otherwise stamp the first session id onto an
-// already-closing client, and the TEARDOWN that id exists to authorize would
-// never be sent. The camera would hold the session until its own timeout, and
-// one with a single-session limit would refuse the next Dial.
+// It deliberately does NOT carry publishTrack's terminal-error guard, even
+// though the two are siblings that both write mu-guarded session state. That
+// guard exists to stop a late success from resurrecting the state machine, and
+// this function does not touch state: it writes only the session id and
+// timeout. Refusing to record them during shutdown is actively harmful, because
+// initiateShutdown sets the terminal error before the reader has unwound to its
+// terminal sequence, so a SETUP response arriving in that window would be
+// dropped and sessionEstablished would then report no session. The TEARDOWN
+// would never be sent and the camera would hold the session until its own
+// timeout, which is the failure this guard would look like it was preventing.
 func (c *Client) recordSession(trackID int, sh SessionHeader) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.termErr != nil {
-		return
-	}
 	if c.sessionID != "" {
 		if sh.ID != "" && sh.ID != c.sessionID {
 			logWarn(c.cfg.Logger, "SETUP returned a session id different from the established one",

@@ -58,10 +58,12 @@ type ChannelPair struct {
 
 // SessionInfo is a read-only snapshot of the negotiated session, for
 // diagnostics such as a handshake walkthrough tool. It carries no credentials
-// and no counters. Dial sets KeepaliveMethod; Setup sets SessionID,
-// SessionTimeout and Channels. AuthScheme stays AuthNone until the
-// authentication retry is wired into the lifecycle verbs, which has not
-// happened yet, so it currently reports AuthNone on every client.
+// and no counters. Dial sets KeepaliveMethod. Setup sets Channels, and sets
+// SessionID and SessionTimeout from the first SETUP response that carries a
+// Session header, so they stay empty against a server that omits it.
+// AuthScheme stays AuthNone until the authentication retry is wired into the
+// lifecycle verbs, which has not happened yet, so it currently reports
+// AuthNone on every client.
 type SessionInfo struct {
 	// SessionID is the negotiated RTSP session identifier, "" before Setup.
 	SessionID string

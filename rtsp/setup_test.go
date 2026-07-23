@@ -44,19 +44,12 @@ func describeOne(t *testing.T, sdp string, setupFn func(sc *testserver.ServerCon
 // with the suite still green.
 func answerSetup(t *testing.T, sc *testserver.ServerConn, proposeRTP, proposeRTCP, rtpCh, rtcpCh int) {
 	t.Helper()
-	req, err := sc.ReadRequest()
-	if err != nil {
-		t.Errorf("read SETUP: %v", err)
+	req := serve(t, sc, methodSetup, 200, "OK", setupHeaders(rtpCh, rtcpCh, testSessionID, testTimeoutS), nil)
+	if req == nil {
 		return
-	}
-	if req.Method != methodSetup {
-		t.Errorf("got method %s, want %s", req.Method, methodSetup)
 	}
 	if got, want := req.Header.Get("Transport"), rtsp.BuildTransport(proposeRTP, proposeRTCP); got != want {
 		t.Errorf("SETUP proposed Transport %q, want %q", got, want)
-	}
-	if err := sc.Respond(req, 200, "OK", setupHeaders(rtpCh, rtcpCh, testSessionID, testTimeoutS), nil); err != nil {
-		t.Errorf("respond SETUP: %v", err)
 	}
 }
 
@@ -217,8 +210,11 @@ func TestSessionInfoAfterSetup(t *testing.T) {
 	// The fixture advertises GET_PARAMETER, so this fails if the Public header
 	// is not actually parsed. Asserting OPTIONS instead would hold for a nil
 	// list, an empty list, and a list that merely omits GET_PARAMETER.
-	if info.KeepaliveMethod != "GET_PARAMETER" {
-		t.Errorf("KeepaliveMethod = %q, want GET_PARAMETER (advertised in Public)", info.KeepaliveMethod)
+	if info.KeepaliveMethod != methodGetParameter {
+		t.Errorf("KeepaliveMethod = %q, want %s (advertised in Public)", info.KeepaliveMethod, methodGetParameter)
+	}
+	if info.AuthScheme != rtsp.AuthNone {
+		t.Errorf("AuthScheme = %v, want AuthNone (this handshake is unauthenticated)", info.AuthScheme)
 	}
 	if len(info.Channels) != 2 {
 		t.Fatalf("Channels = %v, want two pairs", info.Channels)

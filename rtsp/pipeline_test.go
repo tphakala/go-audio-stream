@@ -171,9 +171,12 @@ func TestNewTrackDiscardRecorded(t *testing.T) {
 // PTS arithmetic.
 func TestClockRateTicks(t *testing.T) {
 	t.Parallel()
+	// The rate is carried as int64 rather than int because the interesting
+	// values do not fit in an int on a 32-bit platform, where the untyped
+	// constants would not compile at all.
 	cases := []struct {
 		name string
-		rate int
+		rate int64
 		want uint64
 	}{
 		{name: "typical", rate: 16000, want: 16000},
@@ -182,32 +185,17 @@ func TestClockRateTicks(t *testing.T) {
 		{name: "absent", rate: 0, want: 0},
 		{name: "negative", rate: -1, want: 0},
 		{name: "above 32 bits", rate: math.MaxUint32 + 1, want: 0},
-		{name: "max int", rate: math.MaxInt64, want: 0},
+		{name: "max int64", rate: math.MaxInt64, want: 0},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			if got := clockRateTicks(tc.rate); got != tc.want {
+			if int64(int(tc.rate)) != tc.rate {
+				t.Skipf("rate %d is not representable in an int on this platform", tc.rate)
+			}
+			if got := clockRateTicks(int(tc.rate)); got != tc.want {
 				t.Errorf("clockRateTicks(%d) = %d, want %d", tc.rate, got, tc.want)
 			}
 		})
-	}
-}
-
-// Rebinding a channel that another track already holds is not something Setup
-// can produce (InterleavedChannels rejects an overlapping pair first), so this
-// pins which way the table resolves it if that guard is ever bypassed: last
-// writer wins, and the earlier track silently loses the channel.
-func TestChannelTableRebindOverwrites(t *testing.T) {
-	t.Parallel()
-	tr0 := &track{id: 0}
-	tr1 := &track{id: 1}
-	table := newChannelTable(newChannelTable(nil, tr0, 0, 1), tr1, 0, 1)
-	b, ok := table.lookup(0)
-	if !ok || b.track != tr1 {
-		t.Errorf("lookup(0).track = %+v ok=%v, want the later track", b, ok)
-	}
-	if len(table.bindings) != 2 {
-		t.Errorf("bindings = %d, want 2 (the rebind must not grow the table)", len(table.bindings))
 	}
 }

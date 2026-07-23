@@ -190,8 +190,9 @@ func modeOf(params *sdp.AACParams) string {
 }
 
 // deliver depacketizes one RTP packet for its track and hands each resulting
-// frame to onFrame. The body is implemented in a later task; Task 3 wires the
-// pipeline and channel table so only the per-codec delivery logic remains.
+// frame to onFrame. The pipeline and the channel table are in place, so only
+// the per-codec delivery logic remains; it lands with the reader's frame
+// routing.
 func (tr *track) deliver(pkt rtp.Packet, up rtp.Update, now time.Time, onFrame func(audiostream.Frame)) {
 	// Delivery is implemented in a later task.
 }
@@ -237,9 +238,10 @@ func newChannelTable(old *channelTable, tr *track, rtpCh, rtcpCh int) *channelTa
 	return &channelTable{bindings: bindings}
 }
 
-// logWarn logs at warn level when a logger is configured. Callers must not
-// pass credentials: URLs go through RedactURL first, and no call site passes a
-// password, a nonce, or an Authorization value.
+// logWarn logs at warn level when a logger is configured. No call site passes
+// a credential, and none passes a URL; a caller that needs to log one must put
+// it through RedactURL first, and note that RedactURL masks userinfo but not
+// query parameters.
 func logWarn(logger *slog.Logger, msg string, args ...any) {
 	if logger != nil {
 		logger.Warn(msg, args...)

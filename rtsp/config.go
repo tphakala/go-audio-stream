@@ -70,10 +70,10 @@ type Config struct {
 	// delivered. Once it lands, nil will be allowed and frames will then be
 	// counted in Stats without being delivered.
 	OnFrame func(audiostream.Frame)
-	// Logger receives diagnostics for conditions that degrade a track without
-	// failing the session, such as an unsupported codec or a quirky fmtp.
-	// Nothing else logs yet. URLs are passed through RedactURL and credentials
-	// are never logged.
+	// Logger receives diagnostics for conditions this package handles rather
+	// than fails on: a track degraded to raw delivery by an unsupported codec
+	// or a quirky fmtp, and a SETUP response whose Session header is missing or
+	// inconsistent. Credentials are never logged.
 	Logger *slog.Logger
 }
 
@@ -94,11 +94,12 @@ func (c *Config) applyDefaults() {
 	}
 }
 
-// Track is one media track discovered by Describe and passed to Setup. Setup
-// accepts only a Track that came from the same client's most recent Describe:
-// the ID selects the retained descriptor that builds the depacketizer while
-// Control names the stream, so a Track assembled by hand is rejected with
-// ErrUnknownTrack rather than setting up one track and decoding it as another.
+// Track is one media track discovered by Describe and passed to Setup. The ID
+// selects the retained descriptor that builds the depacketizer while Control
+// names the stream the SETUP addresses, so Setup checks that the two still
+// agree with what Describe resolved and returns ErrUnknownTrack when they do
+// not. Pass Tracks through unmodified; pairing one track's ID with another's
+// Control would otherwise set up one stream and decode it as another.
 type Track struct {
 	// ID is a stable per-session id (the SDP media index).
 	ID int
@@ -108,10 +109,12 @@ type Track struct {
 	Codec audiostream.Codec
 	// ClockRate is the RTP clock rate in Hz from the rtpmap.
 	ClockRate int
-	// Channels is the audio channel count. It is 1 rather than 0 when a
-	// recognized encoding's rtpmap omits the channel segment, because the SDP
-	// layer applies the RFC 4566 default there; 0 means no encoding was
-	// recognized at all.
+	// Channels is the channel count from the rtpmap. It is 1 rather than 0
+	// whenever the rtpmap names an encoding but omits the channel segment,
+	// including for an encoding this package does not decode and for a video
+	// track, because the SDP layer defaults it from the presence of the
+	// encoding name alone. It is 0 only when there was no rtpmap to read.
+	// Do not use it to detect an unsupported codec; compare Codec instead.
 	Channels int
 	// Control is the resolved absolute control URL for this track.
 	Control string

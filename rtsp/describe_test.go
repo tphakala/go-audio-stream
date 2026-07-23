@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	audiostream "github.com/tphakala/go-audio-stream"
 	"github.com/tphakala/go-audio-stream/internal/testserver"
@@ -114,19 +115,25 @@ func drainRequests(sc *testserver.ServerConn) {
 
 // closeAndWait closes the client and asserts Wait returns ErrClosed (or nil).
 //
-// The wait is bounded even though Close is expected to end it promptly. Every
-// test in this file defers this helper, so an unbounded wait would turn any
-// regression that stops the reader from finishing into a ten-minute hang of the
-// whole package with no indication of which test was stuck.
+// Every test in both files defers this helper, so a regression that stops the
+// reader from finishing must fail one test rather than hang the package until
+// the go test timeout. Passing a deadline to Wait does NOT achieve that: on
+// ctx expiry Wait initiates shutdown and then blocks on the reader's done
+// channel with no bound of its own, and it would return the ErrClosed that
+// Close already recorded, so the assertion could not tell a timeout from
+// success. Waiting off the test goroutine is what actually bounds it.
 func closeAndWait(t *testing.T, c *rtsp.Client) {
 	t.Helper()
-	if err := c.Close(); err != nil {
-		t.Errorf("Close: %v", err)
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
-	defer cancel()
-	if err := c.Wait(ctx); err != nil && !errors.Is(err, audiostream.ErrClosed) {
-		t.Errorf("Wait after Close = %v, want ErrClosed", err)
+	_ = c.Close() // documented to always return nil
+	done := make(chan error, 1)
+	go func() { done <- c.Wait(context.Background()) }()
+	select {
+	case err := <-done:
+		if err != nil && !errors.Is(err, audiostream.ErrClosed) {
+			t.Errorf("Wait after Close = %v, want ErrClosed", err)
+		}
+	case <-time.After(testTimeout):
+		t.Errorf("Wait did not return within %v after Close", testTimeout)
 	}
 }
 

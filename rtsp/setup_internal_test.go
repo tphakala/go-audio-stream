@@ -66,14 +66,17 @@ func TestPublishTrackRefusesAfterShutdown(t *testing.T) {
 }
 
 const (
-	audioControl = "rtsp://cam/s/audio"
-	videoControl = "rtsp://cam/s/video"
+	testAudioControl = "rtsp://cam/s/audio"
+	testVideoControl = "rtsp://cam/s/video"
+	// Shared with request_race_test.go, which already uses this id for the
+	// session that gates its TEARDOWN assertions.
+	testInternalSessionID = "sess-1"
 )
 
 func describedFixture() []describedTrack {
 	return []describedTrack{
-		{control: audioControl, codec: audiostream.CodecAAC{}, clockRate: 16000, media: audiostream.MediaAudio},
-		{control: videoControl, codec: audiostream.CodecUnknown{}, clockRate: 90000, media: audiostream.MediaVideo},
+		{control: testAudioControl, codec: audiostream.CodecAAC{}, clockRate: 16000, media: audiostream.MediaAudio},
+		{control: testVideoControl, codec: audiostream.CodecUnknown{}, clockRate: 90000, media: audiostream.MediaVideo},
 	}
 }
 
@@ -83,7 +86,7 @@ func describedFixture() []describedTrack {
 func TestDescribedTrackForSelectsByID(t *testing.T) {
 	t.Parallel()
 	c := &Client{state: stateDescribed, described: describedFixture()}
-	desc, err := c.describedTrackFor(Track{ID: 1, Control: videoControl})
+	desc, err := c.describedTrackFor(Track{ID: 1, Control: testVideoControl})
 	if err != nil {
 		t.Fatalf("describedTrackFor: %v", err)
 	}
@@ -104,13 +107,13 @@ func TestDescribedTrackForRejects(t *testing.T) {
 		{
 			name:  "id past the end",
 			state: stateDescribed,
-			trk:   Track{ID: 7, Control: audioControl},
+			trk:   Track{ID: 7, Control: testAudioControl},
 			want:  ErrUnknownTrack,
 		},
 		{
 			name:  "negative id",
 			state: stateDescribed,
-			trk:   Track{ID: -1, Control: audioControl},
+			trk:   Track{ID: -1, Control: testAudioControl},
 			want:  ErrUnknownTrack,
 		},
 		{
@@ -118,7 +121,7 @@ func TestDescribedTrackForRejects(t *testing.T) {
 			// another: track 0's ID paired with track 1's control URL.
 			name:  "id and control from different tracks",
 			state: stateDescribed,
-			trk:   Track{ID: 0, Control: videoControl},
+			trk:   Track{ID: 0, Control: testVideoControl},
 			want:  ErrUnknownTrack,
 		},
 		{
@@ -131,7 +134,7 @@ func TestDescribedTrackForRejects(t *testing.T) {
 			name:  "already set up",
 			state: stateSetup,
 			pairs: []ChannelPair{{TrackID: 0, RTP: 0, RTCP: 1}},
-			trk:   Track{ID: 0, Control: audioControl},
+			trk:   Track{ID: 0, Control: testAudioControl},
 			want:  ErrTrackAlreadySetUp,
 		},
 	}
@@ -149,7 +152,7 @@ func TestDescribedTrackForRejects(t *testing.T) {
 func TestDescribedTrackForStateGate(t *testing.T) {
 	t.Parallel()
 	c := &Client{state: stateIdle, described: describedFixture()}
-	_, err := c.describedTrackFor(Track{ID: 0, Control: audioControl})
+	_, err := c.describedTrackFor(Track{ID: 0, Control: testAudioControl})
 	var se *StateError
 	if !errors.As(err, &se) {
 		t.Fatalf("describedTrackFor in idle = %v, want *StateError", err)
@@ -217,17 +220,23 @@ func TestNextChannelPairCeiling(t *testing.T) {
 	}
 
 	c = &Client{channelPairs: []ChannelPair{{TrackID: 0, RTP: 254, RTCP: 255}}}
-	if _, _, err := c.nextChannelPair(); !errors.Is(err, ErrTooManyTracks) {
-		t.Errorf("nextChannelPair past the ceiling = %v, want ErrTooManyTracks", err)
+	if _, _, err := c.nextChannelPair(); !errors.Is(err, ErrNoChannelsLeft) {
+		t.Errorf("nextChannelPair past the ceiling = %v, want ErrNoChannelsLeft", err)
 	}
 }
 
-func TestRecordSessionRefusesAfterShutdown(t *testing.T) {
+// recordSession must still record during shutdown: the terminal sequence reads
+// sessionID to decide whether a TEARDOWN is warranted, and initiateShutdown
+// sets termErr before the reader reaches that decision.
+func TestRecordSessionDuringShutdown(t *testing.T) {
 	t.Parallel()
 	c := &Client{termErr: errors.New("terminal")}
-	c.recordSession(0, SessionHeader{ID: "sess-1", Timeout: 60})
-	if c.sessionID != "" {
-		t.Errorf("sessionID = %q, want empty", c.sessionID)
+	c.recordSession(0, SessionHeader{ID: testInternalSessionID, Timeout: 60})
+	if c.sessionID != testInternalSessionID {
+		t.Errorf("sessionID = %q, want it recorded so the TEARDOWN can be authorized", c.sessionID)
+	}
+	if !c.sessionEstablished() {
+		t.Error("sessionEstablished = false; the terminal sequence would skip the TEARDOWN")
 	}
 }
 
