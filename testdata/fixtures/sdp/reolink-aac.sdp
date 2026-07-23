@@ -1,0 +1,17 @@
+v=0
+o=- 1109162014219182 1 IN IP4 0.0.0.0
+s=Media Presentation
+e=NONE
+b=AS:5100
+t=0 0
+a=control:rtsp://192.0.2.10:554/h264Preview_01_main/
+m=video 0 RTP/AVP 96
+b=AS:5000
+a=control:trackID=0
+a=rtpmap:96 H264/90000
+a=fmtp:96 packetization-mode=1;profile-level-id=640033
+m=audio 0 RTP/AVP 97
+b=AS:32
+a=control:trackID=1
+a=rtpmap:97 MPEG4-GENERIC/16000/1
+a=fmtp:97 streamtype=5;profile-level-id=1;mode=AAC-hbr;sizelength=13;indexlength=3;indexdeltalength=3;config=1408
