@@ -228,3 +228,77 @@ func buildWideHeader(t *testing.T, headerBits, size, index int, data []byte) []b
 	out = append(out, data...)
 	return out
 }
+
+func TestFragmentContinuationSizeMismatch(t *testing.T) {
+	t.Parallel()
+	d := newDepacketizer(t)
+	// Every fragment declares the size of the complete access unit, so a
+	// continuation declaring a different total is not part of this unit.
+	// Concatenating it would splice unrelated audio into the AU.
+	p1 := buildHBR([][]byte{auHeader16(9, 0)}, [][]byte{{0x11, 0x22, 0x33, 0x44}})
+	p2 := buildHBR([][]byte{auHeader16(7, 0)}, [][]byte{{0x55, 0x66}})
+
+	if _, err := d.Depacketize(p1, false, 0); err != nil {
+		t.Fatalf("frag 1: %v", err)
+	}
+	if _, err := d.Depacketize(p2, false, 0); !errors.Is(err, aac.ErrAUSizeOverflow) {
+		t.Fatalf("mismatched continuation: err = %v, want ErrAUSizeOverflow", err)
+	}
+	// The reset must leave the depacketizer usable for the next unit.
+	pkt := buildHBR([][]byte{auHeader16(2, 0)}, [][]byte{{0xAA, 0xBB}})
+	if aus, err := d.Depacketize(pkt, true, 0); err != nil || len(aus) != 1 {
+		t.Fatalf("after reset: aus=%v err=%v, want 1 AU and no error", aus, err)
+	}
+}
+
+func TestFragmentOversizedContinuationRejected(t *testing.T) {
+	t.Parallel()
+	d := newDepacketizer(t)
+	// A continuation carrying more bytes than the declared unit still has
+	// room for is rejected, and is rejected before those bytes are copied
+	// into the reassembly buffer.
+	p1 := buildHBR([][]byte{auHeader16(6, 0)}, [][]byte{{0x11, 0x22, 0x33, 0x44}})
+	p2 := buildHBR([][]byte{auHeader16(6, 0)}, [][]byte{{0x55, 0x66, 0x77, 0x88}})
+
+	if _, err := d.Depacketize(p1, false, 0); err != nil {
+		t.Fatalf("frag 1: %v", err)
+	}
+	if _, err := d.Depacketize(p2, true, 0); !errors.Is(err, aac.ErrFragmentOverflow) {
+		t.Fatalf("oversized continuation: err = %v, want ErrFragmentOverflow", err)
+	}
+	pkt := buildHBR([][]byte{auHeader16(2, 0)}, [][]byte{{0xAA, 0xBB}})
+	if aus, err := d.Depacketize(pkt, true, 0); err != nil || len(aus) != 1 {
+		t.Fatalf("after reset: aus=%v err=%v, want 1 AU and no error", aus, err)
+	}
+}
+
+func TestFirstHeaderAUIndexRejected(t *testing.T) {
+	t.Parallel()
+	d := newDepacketizer(t)
+	// AU-Index in the first header carries the same interleaving signal
+	// that AU-Index-delta carries in the ones after it, so a non-zero
+	// value must be refused rather than delivered as if sequential.
+	pkt := buildHBR([][]byte{auHeader16(4, 1)}, [][]byte{{0xDE, 0xAD, 0xBE, 0xEF}})
+	if _, err := d.Depacketize(pkt, true, 0); !errors.Is(err, aac.ErrInterleavingUnsupported) {
+		t.Fatalf("non-zero AU-Index: err = %v, want ErrInterleavingUnsupported", err)
+	}
+}
+
+func TestCompleteAUWithoutMarkerIsDelivered(t *testing.T) {
+	t.Parallel()
+	d := newDepacketizer(t)
+	// The marker bit distinguishes the final fragment of a split access
+	// unit; on a packet that already carries every declared byte it adds
+	// nothing the size checks have not proved. Senders that leave it
+	// clear on complete packets are common, so this must not be an error.
+	data := []byte{0x01, 0x02, 0x03, 0x04}
+	pkt := buildHBR([][]byte{auHeader16(len(data), 0)}, [][]byte{data})
+
+	aus, err := d.Depacketize(pkt, false, 0)
+	if err != nil {
+		t.Fatalf("complete packet with marker clear: %v", err)
+	}
+	if len(aus) != 1 || !bytes.Equal(aus[0].Data, data) {
+		t.Fatalf("aus = %v, want the single complete AU % x", aus, data)
+	}
+}

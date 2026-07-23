@@ -75,7 +75,12 @@ func (d *Depacketizer) parseAUHeaders(payload []byte) (headers []auHeader, dataS
 		size := readBits(consumed, d.cfg.SizeLength)
 		index := readBits(consumed+d.cfg.SizeLength, idxBits)
 		consumed += headerBits
-		if len(d.headers) > 0 && index != 0 {
+		// A non-zero index signals interleaving in either position: the
+		// first header carries AU-Index, the rest AU-Index-delta, and a
+		// non-interleaved stream leaves both at zero. Rejecting the
+		// first one too means an interleaved stream is refused rather
+		// than silently delivered in the wrong order.
+		if index != 0 {
 			return nil, 0, ErrInterleavingUnsupported
 		}
 		d.headers = append(d.headers, auHeader{size: size, index: index})
@@ -118,11 +123,23 @@ func (d *Depacketizer) Depacketize(payload []byte, marker bool, rtpTime uint32) 
 			d.Reset()
 			return nil, ErrTruncatedHeader
 		}
-		d.frag = append(d.frag, payload[dataStart:]...)
-		if len(d.frag) > d.fragTotalSize || len(d.frag) > MaxFragmentSize {
+		// Every fragment's AU-header declares the size of the complete
+		// access unit, not of the piece it carries, so a continuation
+		// declaring anything else belongs to a different unit and must
+		// not be concatenated onto this one.
+		if headers[0].size != d.fragTotalSize {
+			d.Reset()
+			return nil, ErrAUSizeOverflow
+		}
+		// Check the incoming length before appending: a continuation far
+		// larger than the declared unit would otherwise be copied into
+		// the buffer just to be rejected on the next line.
+		if len(d.frag)+(len(payload)-dataStart) > d.fragTotalSize ||
+			len(d.frag)+(len(payload)-dataStart) > MaxFragmentSize {
 			d.Reset()
 			return nil, ErrFragmentOverflow
 		}
+		d.frag = append(d.frag, payload[dataStart:]...)
 		switch {
 		case marker && len(d.frag) < d.fragTotalSize:
 			// Sender flagged the last fragment but the accumulated bytes
