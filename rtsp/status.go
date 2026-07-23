@@ -1,6 +1,7 @@
 package rtsp
 
 import (
+	"errors"
 	"strconv"
 
 	audiostream "github.com/tphakala/go-audio-stream"
@@ -56,6 +57,11 @@ const (
 	StatusOptionNotSupported        = 551
 )
 
+// ErrNilResponse is returned by ClassifyStatus when it is handed a nil
+// response. The parsers here never return one, so this reports a caller
+// mistake without breaking the package's no-panic contract.
+var ErrNilResponse = errors.New("rtsp: nil response")
+
 // ResponseError reports a non-success RTSP status the client did not
 // otherwise special-case (not a 2xx, not a 3xx redirect, not a 401).
 type ResponseError struct {
@@ -94,8 +100,14 @@ func (e *UnauthorizedError) Error() string {
 //   - 401: *UnauthorizedError carrying the raw WWW-Authenticate values.
 //   - any other code: *ResponseError.
 //
-// It reads only resp.StatusCode and resp.Header and never panics.
+// It reads resp.StatusCode, resp.Header and, for an unclassified code,
+// resp.Reason. A nil resp yields ErrNilResponse rather than a panic: the
+// parsers in this package never produce one, so a nil here is a caller
+// mistake that should surface as an error like any other.
 func ClassifyStatus(resp *Response) error {
+	if resp == nil {
+		return ErrNilResponse
+	}
 	code := resp.StatusCode
 	switch {
 	case code >= 100 && code < 300:

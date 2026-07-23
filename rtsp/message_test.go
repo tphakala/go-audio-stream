@@ -424,3 +424,73 @@ func TestMarshalInterleaved(t *testing.T) {
 		t.Errorf("oversize payload err = %v, want ErrInterleavedTooLarge", err)
 	}
 }
+
+func TestMarshalRequestRejectsCRLFInjection(t *testing.T) {
+	t.Parallel()
+	// A CR or LF in the start line or a header field would end the line
+	// early on the wire, letting whatever follows be read as more headers.
+	// Not every one of these strings is locally authored: a control URL
+	// comes from the session description, which is remote input.
+	const (
+		method = "SETUP"
+		url    = "rtsp://h/s"
+	)
+	cases := map[string]rtsp.Request{
+		"lf in url":            {Method: method, URL: url + "\nX-Evil: 1"},
+		"cr in url":            {Method: method, URL: url + "\rX-Evil: 1"},
+		"crlf in url":          {Method: method, URL: url + "\r\nX-Evil: 1"},
+		"crlf in method":       {Method: method + "\r\nX-Evil: 1", URL: url},
+		"crlf in header name":  {Method: method, URL: url, Header: rtsp.Header{"X\r\nEvil": {"1"}}},
+		"crlf in header value": {Method: method, URL: url, Header: rtsp.Header{"Session": {"12345\r\nX-Evil: 1"}}},
+	}
+	for name, req := range cases {
+		if _, err := rtsp.MarshalRequest(&req); !errors.Is(err, rtsp.ErrInvalidRequest) {
+			t.Errorf("%s: err = %v, want ErrInvalidRequest", name, err)
+		}
+	}
+	if _, err := rtsp.MarshalRequest(nil); !errors.Is(err, rtsp.ErrInvalidRequest) {
+		t.Errorf("nil request: err = %v, want ErrInvalidRequest", err)
+	}
+}
+
+func TestMarshalResponseValidates(t *testing.T) {
+	t.Parallel()
+	cases := map[string]*rtsp.Response{
+		"nil":                  nil,
+		"code too low":         {StatusCode: 99, Reason: "OK"},
+		"code too high":        {StatusCode: 1000, Reason: "OK"},
+		"crlf in reason":       {StatusCode: 200, Reason: "OK\r\nX-Evil: 1"},
+		"crlf in header value": {StatusCode: 200, Reason: "OK", Header: rtsp.Header{"Session": {"a\r\nX-Evil: 1"}}},
+		"reason too long":      {StatusCode: 200, Reason: strings.Repeat("x", rtsp.MaxReasonLen+1)},
+		"body too large":       {StatusCode: 200, Reason: "OK", Body: make([]byte, rtsp.MaxBodySize+1)},
+	}
+	for name, resp := range cases {
+		if _, err := rtsp.MarshalResponse(resp); !errors.Is(err, rtsp.ErrInvalidResponse) {
+			t.Errorf("%s: err = %v, want ErrInvalidResponse", name, err)
+		}
+	}
+	// The ordinary case the client actually sends must still marshal.
+	if _, err := rtsp.MarshalResponse(&rtsp.Response{StatusCode: 200, Reason: "OK", CSeq: 4}); err != nil {
+		t.Errorf("valid response: err = %v, want nil", err)
+	}
+}
+
+func TestParseResponseDuplicateContentLength(t *testing.T) {
+	t.Parallel()
+	// Two Content-Length fields that disagree leave the body boundary
+	// ambiguous, which is how smuggling gets in when two parsers resolve it
+	// differently. Repeats that agree are harmless and stay accepted.
+	conflicting := []byte("RTSP/1.0 200 OK\r\nCSeq: 1\r\nContent-Length: 4\r\nContent-Length: 8\r\n\r\nabcdefgh")
+	if _, _, err := rtsp.ParseResponse(conflicting); !errors.Is(err, rtsp.ErrBadContentLength) {
+		t.Errorf("conflicting Content-Length: err = %v, want ErrBadContentLength", err)
+	}
+
+	agreeing := []byte("RTSP/1.0 200 OK\r\nCSeq: 1\r\nContent-Length: 4\r\nContent-Length: 4\r\n\r\nabcd")
+	resp, _, err := rtsp.ParseResponse(agreeing)
+	if err != nil {
+		t.Fatalf("agreeing duplicate Content-Length: err = %v, want nil", err)
+	}
+	if string(resp.Body) != "abcd" {
+		t.Errorf("Body = %q, want %q", resp.Body, "abcd")
+	}
+}

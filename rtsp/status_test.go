@@ -116,3 +116,12 @@ func TestStatusConstants(t *testing.T) {
 		}
 	}
 }
+
+func TestClassifyStatusNilResponse(t *testing.T) {
+	t.Parallel()
+	// The package promises never to panic. A nil response is a caller
+	// mistake, so it has to surface as an error rather than a crash.
+	if err := rtsp.ClassifyStatus(nil); !errors.Is(err, rtsp.ErrNilResponse) {
+		t.Errorf("ClassifyStatus(nil) = %v, want ErrNilResponse", err)
+	}
+}

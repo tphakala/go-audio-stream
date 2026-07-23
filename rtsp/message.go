@@ -81,6 +81,10 @@ var (
 	// ErrInvalidRequest means a Request could not be serialized (empty or
 	// oversize Method/URL, or oversize Body).
 	ErrInvalidRequest = errors.New("rtsp: invalid request")
+	// ErrInvalidResponse is returned by MarshalResponse when the status
+	// code is out of range, a field carries a CR or LF, or the body
+	// exceeds MaxBodySize.
+	ErrInvalidResponse = errors.New("rtsp: invalid response")
 )
 
 // canonicalHeaderOverrides maps a lower-cased field name to the canonical
@@ -198,6 +202,9 @@ type Response struct {
 // URL is empty or exceeds MaxMethodLen/MaxRequestURILen, or when Body
 // exceeds MaxBodySize. It never panics.
 func MarshalRequest(req *Request) ([]byte, error) {
+	if req == nil {
+		return nil, ErrInvalidRequest
+	}
 	if req.Method == "" || req.URL == "" {
 		return nil, ErrInvalidRequest
 	}
@@ -205,6 +212,14 @@ func MarshalRequest(req *Request) ([]byte, error) {
 		return nil, ErrInvalidRequest
 	}
 	if len(req.Body) > MaxBodySize {
+		return nil, ErrInvalidRequest
+	}
+	// A CR or LF anywhere in the start line or the header fields would end
+	// the line early on the wire and let everything after it be read as
+	// further headers. These strings are not all locally authored: a
+	// control URL comes from the session description, which is remote
+	// input, so refuse them here rather than trusting every caller.
+	if hasCRLF(req.Method) || hasCRLF(req.URL) || headerHasCRLF(req.Header) {
 		return nil, ErrInvalidRequest
 	}
 
@@ -226,8 +241,23 @@ func MarshalRequest(req *Request) ([]byte, error) {
 // MarshalResponse serializes resp: the status line "RTSP/1.0 <code>
 // <reason>", a CSeq header from resp.CSeq, a Content-Length header when Body
 // is non-empty, then resp.Header fields, the blank line, and the body. Used
-// to answer server-initiated requests. It never panics.
+// to answer server-initiated requests. It returns ErrInvalidResponse when
+// the status code is outside 100 to 999, when the reason or a header field
+// carries a CR or LF, or when Body exceeds MaxBodySize. It never panics.
 func MarshalResponse(resp *Response) ([]byte, error) {
+	if resp == nil {
+		return nil, ErrInvalidResponse
+	}
+	if resp.StatusCode < 100 || resp.StatusCode > 999 {
+		return nil, ErrInvalidResponse
+	}
+	if len(resp.Reason) > MaxReasonLen || len(resp.Body) > MaxBodySize {
+		return nil, ErrInvalidResponse
+	}
+	if hasCRLF(resp.Reason) || headerHasCRLF(resp.Header) {
+		return nil, ErrInvalidResponse
+	}
+
 	var b strings.Builder
 	b.WriteString("RTSP/1.0 ")
 	b.WriteString(strconv.Itoa(resp.StatusCode))
@@ -242,6 +272,28 @@ func MarshalResponse(resp *Response) ([]byte, error) {
 	out = append(out, b.String()...)
 	out = append(out, resp.Body...)
 	return out, nil
+}
+
+// hasCRLF reports whether s contains a carriage return or line feed, either
+// of which would terminate a line early in the serialized message.
+func hasCRLF(s string) bool {
+	return strings.ContainsAny(s, "\r\n")
+}
+
+// headerHasCRLF reports whether any field name or value in h contains a
+// carriage return or line feed.
+func headerHasCRLF(h Header) bool {
+	for name, vals := range h {
+		if hasCRLF(name) {
+			return true
+		}
+		for _, v := range vals {
+			if hasCRLF(v) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // writeControlHeaders writes the computed CSeq line and, when bodyLen is
@@ -484,9 +536,19 @@ func parseCSeq(h Header) int {
 // MaxBodySize is ErrBodyTooLarge; a buffer shorter than head+length is
 // ErrIncomplete. The returned body is copied, not aliased to buf.
 func extractBody(buf []byte, h Header, bodyStart int) (body []byte, n int, err error) {
-	clStr := h.Get("Content-Length")
-	if clStr == "" {
+	cls := h.Values("Content-Length")
+	if len(cls) == 0 {
 		return nil, bodyStart, nil
+	}
+	// Two Content-Length fields that disagree leave the body length
+	// ambiguous, and resolving it by picking one is how request smuggling
+	// gets in: this parser and the next hop can choose differently. Repeats
+	// that agree are harmless and tolerated, since some devices emit them.
+	clStr := cls[0]
+	for _, other := range cls[1:] {
+		if strings.TrimSpace(other) != strings.TrimSpace(clStr) {
+			return nil, 0, ErrBadContentLength
+		}
 	}
 	cl, convErr := strconv.Atoi(strings.TrimSpace(clStr))
 	if convErr != nil || cl < 0 {
