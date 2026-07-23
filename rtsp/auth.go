@@ -281,7 +281,7 @@ func SelectChallenge(challenges []Challenge) (Challenge, bool) {
 				basic = c
 			}
 		default:
-			// AuthUnknown: not usable, skip.
+			// AuthNone and AuthUnknown: not usable, skip.
 		}
 	}
 	if digest != nil {
