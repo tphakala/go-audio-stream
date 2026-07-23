@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"os"
 	"time"
 
 	audiostream "github.com/tphakala/go-audio-stream"
@@ -57,6 +58,7 @@ type runner struct {
 	termErr   error
 	audio     rtsp.Track
 	discarded int
+	frames    []CapturedFrame
 }
 
 // run drives the pre-capture steps in order, stopping at the first that fails,
@@ -70,6 +72,7 @@ func (r *runner) run() (Result, error) {
 	}
 	r.capture()
 	r.finish()
+	r.listen()
 	r.render()
 	return r.res, r.termErr
 }
@@ -173,6 +176,7 @@ func (r *runner) capture() {
 	cr, _ := r.prober.Collect(r.ctx, audio, r.opts.Duration)
 	stats := computeStats(cr.Frames, cr.Stats, audio.ClockRate, cr.Elapsed)
 
+	r.frames = cr.Frames
 	r.report.Capture = stats
 	r.report.CaptureShown = true
 	r.report.Reason = cr.Reason
@@ -204,11 +208,40 @@ func (r *runner) finish() {
 	}
 }
 
-// render writes the walkthrough (and, under --report, the Markdown report from
-// Task 4) to the configured writers.
+// listen runs the WAV listen check when opts.WAVPath is set, populating
+// report.Listen. It never affects the run's exit code: mapExit's
+// precedence is already fully determined by Phase, AudioTrackFound,
+// CodecSupported, and FramesCaptured, so any listen failure (an
+// unsupported codec, a quirky stream the decoder refuses, or a write
+// failure on the output file) degrades to a Skipped report entry rather
+// than surfacing as a terminal error.
+func (r *runner) listen() {
+	if r.opts.WAVPath == "" {
+		return
+	}
+
+	f, err := os.Create(r.opts.WAVPath)
+	if err != nil {
+		// The raw OS error typically embeds the file path; the report never
+		// shows the --wav path (privacy), so a generic reason is used here
+		// instead of err.Error().
+		r.report.Listen = ListenResult{Skipped: true, SkipReason: "could not open the WAV output file"}
+		return
+	}
+	defer func() { _ = f.Close() }()
+
+	res, err := writeWAV(f, r.audio, r.frames)
+	if err != nil {
+		res = ListenResult{Skipped: true, SkipReason: err.Error()}
+	}
+	r.report.Listen = res
+}
+
+// render writes the walkthrough (and, under --report, the Markdown report)
+// to the configured writers.
 func (r *runner) render() {
 	if r.opts.Report {
-		renderReport(r.out, r.report, r.env)
+		_, _ = io.WriteString(r.out, renderReport(r.report, r.env))
 		renderWalkthrough(r.errOut, r.report, r.env)
 		return
 	}
@@ -235,12 +268,4 @@ func timed(now func() time.Time, fn func() error) (time.Duration, error) {
 	t0 := now()
 	err := fn()
 	return now().Sub(t0), err
-}
-
-// renderReport writes the Markdown diagnostic report for r to w. Task 4
-// implements the body; until then it writes nothing.
-//
-//nolint:gocritic // hugeParam: Report/Env match renderWalkthrough; the body arrives in Task 4.
-func renderReport(w io.Writer, r Report, env Env) {
-	// Task 4 renders the Markdown report here.
 }

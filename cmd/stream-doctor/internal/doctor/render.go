@@ -22,19 +22,28 @@ const (
 // unknownLabel is the codec/reason fallback label.
 const unknownLabel = "unknown"
 
+// End-reason labels shared verbatim between the walkthrough's short String
+// and the report's longer endReasonPhrase: these three reasons need no
+// longer prose form, so both renderers use the same word.
+const (
+	endReasonCompletedLabel  = "completed"
+	endReasonDisconnectLabel = "disconnect"
+	endReasonCancelledLabel  = "cancelled"
+)
+
 // String returns a short lowercase name for the end reason.
 func (r EndReason) String() string {
 	switch r {
 	case EndCompleted:
-		return "completed"
+		return endReasonCompletedLabel
 	case EndWatchdog:
 		return "watchdog"
 	case EndTeardown:
 		return "teardown"
 	case EndDisconnect:
-		return "disconnect"
+		return endReasonDisconnectLabel
 	case EndCancelled:
-		return "cancelled"
+		return endReasonCancelledLabel
 	case EndTruncated:
 		return "truncated"
 	default:

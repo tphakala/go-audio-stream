@@ -19,6 +19,9 @@ func testEnv() Env {
 const testTargetURL = "rtsp://user:pass@cam.example:554/stream"
 
 const testH264 = "H264/90000"
+const testDigestAuth = "Digest"
+const testGetParameter = "GET_PARAMETER"
+const testL16RTPMap = "L16/8000"
 
 func aacTrack() rtsp.Track {
 	return rtsp.Track{ID: 0, Media: audiostream.MediaAudio, Codec: audiostream.CodecAAC{}, ClockRate: 16000, Channels: 1}
@@ -31,8 +34,8 @@ func videoTrack() rtsp.Track {
 func happySession() rtsp.SessionInfo {
 	return rtsp.SessionInfo{
 		SessionTimeout:  60 * time.Second,
-		AuthScheme:      "Digest",
-		KeepaliveMethod: "GET_PARAMETER",
+		AuthScheme:      testDigestAuth,
+		KeepaliveMethod: testGetParameter,
 		Channels:        []rtsp.ChannelPair{{TrackID: 0, RTP: 0, RTCP: 1}},
 	}
 }
@@ -273,7 +276,7 @@ func TestRunCaptureSilent(t *testing.T) {
 
 func TestRunUnsupportedCodec(t *testing.T) {
 	t.Parallel()
-	unknownAudio := rtsp.Track{ID: 0, Media: audiostream.MediaAudio, Codec: audiostream.CodecUnknown{RTPMap: "L16/8000"}, ClockRate: 8000, Channels: 1}
+	unknownAudio := rtsp.Track{ID: 0, Media: audiostream.MediaAudio, Codec: audiostream.CodecUnknown{RTPMap: testL16RTPMap}, ClockRate: 8000, Channels: 1}
 	f := &fakeProber{
 		tracks:  []rtsp.Track{unknownAudio},
 		session: happySession(),
@@ -336,8 +339,8 @@ func TestRunSetupFullStream(t *testing.T) {
 		tracks: []rtsp.Track{aacTrack(), videoTrack()},
 		session: rtsp.SessionInfo{
 			SessionTimeout:  60 * time.Second,
-			AuthScheme:      "Digest",
-			KeepaliveMethod: "GET_PARAMETER",
+			AuthScheme:      testDigestAuth,
+			KeepaliveMethod: testGetParameter,
 			Channels:        []rtsp.ChannelPair{{TrackID: 0, RTP: 0, RTCP: 1}, {TrackID: 1, RTP: 2, RTCP: 3}},
 		},
 		result: CaptureResult{

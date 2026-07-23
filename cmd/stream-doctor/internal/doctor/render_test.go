@@ -42,7 +42,7 @@ func TestDecodable(t *testing.T) {
 		{"aac audio", rtsp.Track{Media: audiostream.MediaAudio, Codec: audiostream.CodecAAC{}}, true},
 		{"opus audio", rtsp.Track{Media: audiostream.MediaAudio, Codec: audiostream.CodecOpus{}}, true},
 		{"g711 audio", rtsp.Track{Media: audiostream.MediaAudio, Codec: audiostream.CodecG711{}}, true},
-		{"unknown audio", rtsp.Track{Media: audiostream.MediaAudio, Codec: audiostream.CodecUnknown{RTPMap: "L16/8000"}}, false},
+		{"unknown audio", rtsp.Track{Media: audiostream.MediaAudio, Codec: audiostream.CodecUnknown{RTPMap: testL16RTPMap}}, false},
 		{"video track", rtsp.Track{Media: audiostream.MediaVideo, Codec: audiostream.CodecUnknown{RTPMap: testH264}}, false},
 	}
 	for _, tc := range cases {
