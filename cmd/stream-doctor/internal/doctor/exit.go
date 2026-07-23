@@ -1,9 +1,12 @@
 package doctor
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
+	"runtime"
+	"time"
 
 	"github.com/tphakala/go-audio-stream/rtsp"
 )
@@ -45,21 +48,18 @@ type Result struct {
 	FramesCaptured  int
 }
 
-// Run executes one full stream-doctor diagnostic pass for opts and returns
-// the run Result and terminal error for mapExit. The body is a stub for now:
-// a later change replaces it with the real dial/describe/setup/play/capture
-// walkthrough.
-//
-//nolint:gocritic // Options is the documented public Run signature; hugeParam does not apply to a per-run entry point.
-func Run(opts Options) (Result, error) {
-	return Result{}, nil
-}
-
 // Execute is the process entry point: it parses args, prints the version or
 // a usage error to stdout/stderr and returns the matching exit code, or runs
-// the diagnostic engine and returns mapExit's result. main calls Execute and
-// never changes as the engine grows in later tasks.
+// the diagnostic engine and returns mapExit's result. It runs with a
+// background context; main uses ExecuteContext to wire SIGINT.
 func Execute(args []string, stdout, stderr io.Writer) int {
+	return ExecuteContext(context.Background(), args, stdout, stderr)
+}
+
+// ExecuteContext is Execute with a caller-supplied context so main can cancel
+// a run on SIGINT. It parses args, prints the version or a usage error, or
+// drives Run against a live RTSP prober and returns mapExit's code.
+func ExecuteContext(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	opts, err := parseArgs(args)
 	switch {
 	case errors.Is(err, errVersionRequested):
@@ -71,7 +71,11 @@ func Execute(args []string, stdout, stderr io.Writer) int {
 		return ExitUsage
 	}
 
-	res, runErr := Run(opts)
+	env := Env{OS: runtime.GOOS, Arch: runtime.GOARCH, Version: Version}
+	prober := newRTSPProber(opts)
+	defer func() { _ = prober.Close() }()
+
+	res, runErr := Run(ctx, opts, prober, stdout, stderr, env, time.Now)
 	return mapExit(runErr, res)
 }
 
