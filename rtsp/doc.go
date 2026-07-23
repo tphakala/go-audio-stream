@@ -16,6 +16,12 @@
 // Client therefore holds a socket and a goroutine, and must be released with
 // Close; Wait reports the terminal cause. Close, Wait, Stats and SessionInfo
 // are safe from any goroutine. Describe and Setup discover the tracks and
-// negotiate their interleaved channels; PLAY and frame delivery arrive in
-// subsequent changes, so a set-up session does not yet produce frames.
+// negotiate their interleaved channels, and Play starts delivery: from then on
+// the reader routes each interleaved frame to its track, depacketizes it, and
+// calls Config.OnFrame on the reader goroutine, while a timer goroutine sends
+// RTSP keepalives and RTCP Receiver Reports. A 401 on any of those verbs is
+// answered and retried automatically.
+//
+// One thing is still missing from a complete session: the UDP transport. This
+// client speaks only the TCP-interleaved profile.
 package rtsp

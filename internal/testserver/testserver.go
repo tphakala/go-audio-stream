@@ -3,11 +3,14 @@ package testserver
 import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
+	"crypto/md5" //nolint:gosec // reproduces the client's RFC 7616 Digest math in a test double, not a security primitive.
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/pem"
 	"errors"
 	"fmt"
@@ -419,6 +422,15 @@ func (sc *ServerConn) InjectFrame(channel int, payload []byte) error {
 // SendServerRequest writes a server-initiated request (for example a
 // mid-session OPTIONS or a TEARDOWN) with a fresh server CSeq and returns
 // that CSeq so the test can await the client's 200 OK.
+// WriteRaw writes bytes straight to the connection, bypassing every framing
+// helper, so a test can inject a byte run that desynchronizes the client's
+// framing loop ahead of a real unit. It is the escape hatch for reader-framing
+// tests; use InjectFrame, Respond, or SendServerRequest for everything else.
+func (sc *ServerConn) WriteRaw(b []byte) error {
+	_, err := sc.conn.Write(b)
+	return err
+}
+
 func (sc *ServerConn) SendServerRequest(method, url string, headers rtsp.Header) (cseq int, err error) {
 	sc.cseq++
 	raw, err := rtsp.MarshalRequest(&rtsp.Request{
@@ -636,11 +648,69 @@ func (sc *ServerConn) validateAuthorization(req *rtsp.Request, spec *AuthSpec) {
 	case strings.EqualFold(spec.Scheme, "Digest"):
 		if !strings.HasPrefix(got, "Digest ") {
 			sc.t.Errorf("testserver: expected Digest authorization")
-		} else if spec.Nonce != "" && !strings.Contains(got, spec.Nonce) {
-			sc.t.Errorf("testserver: Digest authorization missing challenge nonce")
+			return
 		}
+		sc.verifyDigest(req, spec)
 	default:
 		sc.t.Errorf("testserver: unsupported auth scheme %q", spec.Scheme)
+	}
+}
+
+// verifyDigest independently recomputes the RFC 7616 (or RFC 2069 legacy)
+// Digest response from the client's Authorization header and spec's
+// credentials, failing the test on any mismatch. This is what makes the auth
+// integration tests validate the client's digest math end to end rather than
+// only checking that some header was sent.
+func (sc *ServerConn) verifyDigest(req *rtsp.Request, spec *AuthSpec) {
+	sc.t.Helper()
+	params := parseDigestParams(req.Header.Get("Authorization"))
+	if params["nonce"] != spec.Nonce {
+		sc.t.Errorf("testserver: Digest nonce = %q, want %q", params["nonce"], spec.Nonce)
+		return
+	}
+	h := digestHasher(spec.Algorithm)
+	ha1 := h(spec.Username + ":" + spec.Realm + ":" + spec.Password)
+	ha2 := h(req.Method + ":" + params["uri"])
+	var want string
+	if qop := params["qop"]; qop != "" {
+		want = h(strings.Join([]string{ha1, spec.Nonce, params["nc"], params["cnonce"], qop, ha2}, ":"))
+	} else {
+		want = h(strings.Join([]string{ha1, spec.Nonce, ha2}, ":"))
+	}
+	if params["response"] != want {
+		sc.t.Errorf("testserver: Digest response mismatch: got %q, want %q", params["response"], want)
+	}
+}
+
+// parseDigestParams splits a Digest Authorization value into its auth-params,
+// lowercasing names and stripping surrounding quotes. It is sufficient for the
+// test payloads, whose values carry no embedded commas.
+func parseDigestParams(header string) map[string]string {
+	params := map[string]string{}
+	for _, part := range strings.Split(strings.TrimPrefix(header, "Digest "), ",") {
+		k, v, ok := strings.Cut(strings.TrimSpace(part), "=")
+		if !ok {
+			continue
+		}
+		params[strings.ToLower(strings.TrimSpace(k))] = strings.Trim(strings.TrimSpace(v), `"`)
+	}
+	return params
+}
+
+// digestHasher returns a hex-hashing function for the challenge algorithm:
+// SHA-256 when named, otherwise MD5 (the RFC default). MD5 is what the RFC
+// specifies for Digest and what every camera in the quirk matrix offers; it is
+// used here only to reproduce the client's arithmetic, never as a security
+// primitive.
+func digestHasher(algorithm string) func(string) string {
+	newHash := md5.New
+	if strings.EqualFold(algorithm, "SHA-256") {
+		newHash = sha256.New
+	}
+	return func(s string) string {
+		hh := newHash()
+		_, _ = hh.Write([]byte(s))
+		return hex.EncodeToString(hh.Sum(nil))
 	}
 }
 

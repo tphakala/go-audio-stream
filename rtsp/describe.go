@@ -22,12 +22,23 @@ const sdpContentType = "application/sdp"
 // the SDP, indexed by track ID, so Setup can build the pipeline without
 // re-parsing. It carries the AAC fmtp parameters the public Track omits.
 type describedTrack struct {
-	control   string
-	codec     audiostream.Codec
-	clockRate int
-	media     audiostream.MediaKind
-	aac       *sdp.AACParams
+	control string
+	codec   audiostream.Codec
+	// payloadType is the RTP payload type the codec was resolved from, or
+	// payloadTypeUnknown when the m= line named no format. The pipeline keeps
+	// it so the reader can reject a packet carrying a different PT on this
+	// track's channel; an m= line listing several formats resolves to the
+	// first one the SDP layer recognized, and the others are not this track.
+	payloadType int
+	clockRate   int
+	media       audiostream.MediaKind
+	aac         *sdp.AACParams
 }
+
+// payloadTypeUnknown is describedTrack.payloadType when the SDP named no
+// usable format, matching the sentinel sdp.Track uses. The reader skips the
+// payload-type check for such a track rather than dropping every packet.
+const payloadTypeUnknown = -1
 
 // Describe issues a DESCRIBE, parses the SDP body, resolves the session base
 // and per-track control URLs, and returns the discovered tracks. It is legal
@@ -39,8 +50,8 @@ type describedTrack struct {
 // succeeded, a second call returns a *StateError.
 //
 // Errors it can return: *audiostream.RedirectError for a 3xx, which is never
-// followed; *UnauthorizedError for a 401, which the caller must currently
-// answer itself because no authentication retry is wired into this verb yet;
+// followed; ErrAuthFailed when a 401 survived the authentication retries (the
+// retry is automatic, so a *UnauthorizedError does not reach the caller);
 // *ResponseError for any other non-2xx; ErrNotSDP when the response body is
 // not application/sdp. All of them leave the session open so the caller may
 // Close or retry.
@@ -52,10 +63,9 @@ func (c *Client) Describe(ctx context.Context) ([]Track, error) {
 	defer c.lifecycleMu.Unlock()
 
 	c.mu.Lock()
-	if c.state != stateIdle {
-		st := c.state.String()
+	if serr := c.requireState(methodDescribe); serr != nil {
 		c.mu.Unlock()
-		return nil, &StateError{Method: methodDescribe, State: st}
+		return nil, serr
 	}
 	describeURL := c.baseURL
 	c.mu.Unlock()
@@ -83,22 +93,9 @@ func (c *Client) Describe(ctx context.Context) ([]Track, error) {
 	}
 	c.baseURL = base
 	c.described = described
-	c.state = stateDescribed
+	c.commitState(methodDescribe)
 	c.mu.Unlock()
 	return tracks, nil
-}
-
-// do performs one request round-trip and classifies the response status into
-// the error the caller acts on: nil on 2xx, *audiostream.RedirectError on a
-// 3xx, *UnauthorizedError on a 401, or *ResponseError otherwise. A transport
-// failure (already funneled into shutdown by roundTrip) is returned with a nil
-// response. The 401 auth-retry wrapper is layered over this in a later task.
-func (c *Client) do(ctx context.Context, req *Request) (*Response, error) {
-	resp, err := c.roundTrip(ctx, req)
-	if err != nil {
-		return nil, err
-	}
-	return resp, ClassifyStatus(resp)
 }
 
 // checkSDPContentType validates a DESCRIBE Content-Type: the base media type
@@ -161,11 +158,12 @@ func resolveTracks(describeURL string, resp *Response) ([]Track, string, []descr
 			Control:   control,
 		})
 		described = append(described, describedTrack{
-			control:   control,
-			codec:     dt.Codec,
-			clockRate: dt.ClockRate,
-			media:     dt.Media,
-			aac:       dt.AAC,
+			control:     control,
+			codec:       dt.Codec,
+			payloadType: dt.PayloadType,
+			clockRate:   dt.ClockRate,
+			media:       dt.Media,
+			aac:         dt.AAC,
 		})
 	}
 	return tracks, base, described, nil

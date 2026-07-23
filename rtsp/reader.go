@@ -8,6 +8,7 @@ import (
 	"time"
 
 	audiostream "github.com/tphakala/go-audio-stream"
+	"github.com/tphakala/go-audio-stream/rtsp/rtp"
 )
 
 // readChunk is the per-read scratch size for the reader accumulation buffer.
@@ -97,31 +98,32 @@ const (
 func (c *Client) consume(step stepFunc, validated bool) bool {
 	resyncing := c.resync > 0
 
-	// While resynchronizing, only a structurally validated unit may be
-	// accepted. ParseInterleaved takes any '$' plus three bytes as a frame of
-	// up to 65535 bytes without checking the channel or the length, and 0x24
-	// recurs roughly every 256 bytes of RTP payload, so honouring it here
-	// would discard up to 64 KiB of stream (swallowing any genuine response
-	// inside it) and then clear the resync budget. maxResyncBytes could then
-	// only fire on a 4096-byte run containing no '$' and no two-byte method
-	// prefix, leaving the budget inert on exactly the binary streams it exists
-	// to bound.
+	// While resynchronizing, an unvalidated unit is trusted only when the
+	// routing table vouches for it. ParseInterleaved takes any '$' plus three
+	// bytes as a frame of up to 65535 bytes without checking the channel or the
+	// length, and 0x24 recurs roughly every 256 bytes of RTP payload, so
+	// honouring it unconditionally would discard up to 64 KiB of stream
+	// (swallowing any genuine response inside it) and then clear the resync
+	// budget. maxResyncBytes could then only fire on a 4096-byte run containing
+	// no '$' and no two-byte method prefix, leaving the budget inert on exactly
+	// the binary streams it exists to bound.
 	//
-	// Known consequence: once a session is playing, the stream is almost
-	// entirely interleaved frames, so a desync there cannot re-lock on a frame
-	// and will exhaust the budget unless a real message arrives within
-	// maxResyncBytes.
-	//
-	// Setup now publishes the channel routing table this needs, so the
-	// remaining work is to make the discriminator semantic: accept a frame
-	// mid-resync when c.channels binds the channel byte at c.rbuf[c.start+1],
-	// and fill rather than discard when that byte has not arrived yet, so a
-	// header split across two reads is not mistaken for garbage. That is
-	// deliberately left until the reader consults c.channels for routing as
-	// well, so the table gains its two readers in one change rather than being
-	// read for resync while frames are still dropped on the floor.
+	// Refusing every frame instead is no better once PLAY starts, because the
+	// stream is then almost entirely interleaved frames: a desync could never
+	// re-lock on one and would exhaust the budget unless a real message arrived
+	// within maxResyncBytes. So the discriminator is the channel byte, which
+	// carries meaning this client assigned: a frame whose channel c.channels
+	// binds is one this session negotiated, and only a handful of the 256
+	// channel values are ever bound.
 	if resyncing && !validated {
-		return c.resyncOne()
+		switch c.gateResyncFrame() {
+		case resyncAccept:
+			// Fall through to the step: a bound channel re-locks the stream.
+		case resyncFill:
+			return c.fillMore()
+		case resyncDiscard:
+			return c.resyncOne()
+		}
 	}
 
 	n, err := step(c.rbuf[c.start:])
@@ -144,6 +146,48 @@ func (c *Client) consume(step stepFunc, validated bool) bool {
 		c.resync = 0
 		return true
 	}
+}
+
+// resyncVerdict is what the resync gate decides about an interleaved frame
+// header found while resynchronizing.
+type resyncVerdict uint8
+
+const (
+	// resyncAccept means the channel byte is bound, so the frame is real
+	// enough to re-lock on.
+	resyncAccept resyncVerdict = iota
+	// resyncFill means the channel byte has not been read yet.
+	resyncFill
+	// resyncDiscard means the channel byte is bound to nothing.
+	resyncDiscard
+)
+
+// gateResyncFrame classifies the interleaved frame header at c.start while the
+// reader is resynchronizing, by looking up the channel byte in the routing
+// table.
+//
+// Filling on a one-byte buffer is what stops a genuine frame header split
+// across two reads from being mistaken for garbage: the '$' arrives in one read
+// and its channel byte in the next, and discarding on the strength of the first
+// byte alone would drop the header and desync the very stream it is trying to
+// recover. fillMore cannot loop here, because it either appends bytes, returns
+// false on a read error, or trips the buffer ceiling.
+//
+// The residual false positive is a 0x24 inside an RTP payload followed by a
+// byte that happens to equal a bound channel, which re-locks on garbage and
+// consumes whatever length follows. Nothing in a byte stream can rule that out;
+// what the gate buys is that the odds are now the odds of hitting one of the
+// two-to-four bound channels rather than any of 256, and the resync budget
+// still bounds the run that follows.
+func (c *Client) gateResyncFrame() resyncVerdict {
+	buf := c.rbuf[c.start:]
+	if len(buf) < 2 {
+		return resyncFill
+	}
+	if _, bound := c.channels.Load().lookup(int(buf[1])); bound {
+		return resyncAccept
+	}
+	return resyncDiscard
 }
 
 // stepInterleaved parses and dispatches one interleaved frame. The frame
@@ -191,19 +235,92 @@ func (c *Client) resyncOne() bool {
 	return true
 }
 
-// handleInterleaved handles one interleaved frame. Setup now publishes a
-// channel-to-track routing table, but this function does not consult it yet, so
-// every frame is still skipped. Routing, per-track depacketization and OnFrame
-// delivery are added in a later task, which is also when the resync gate above
-// gains its semantic discriminator.
+// handleInterleaved routes one interleaved frame through its track's pipeline
+// and delivers the resulting audiostream.Frame via OnFrame. It runs entirely on
+// the reader goroutine before the next read, because f.Payload aliases the
+// accumulation buffer. Unknown channels are dropped; a discard track's bytes
+// are counted and dropped without per-packet parsing; RTCP is dispatched to
+// handleRTCP; a malformed RTP packet is counted and skipped without ending the
+// session.
+//
+// The watchdog clock is stamped for EVERY interleaved frame, before routing and
+// whatever this function then decides to do with it. audiostream.ErrReadTimeout
+// means the peer went quiet, so any frame is evidence it did not: a camera
+// streaming on a channel this client never bound, or emitting a payload type
+// this track does not carry, is alive and misbehaving, not dead. A caller that
+// needs "no audio for N seconds" has OnFrame to measure it with.
 func (c *Client) handleInterleaved(f InterleavedFrame) {
-	// Stamped here even though nothing is routed yet. armReadDeadline derives
-	// the watchdog deadline from this value, so if Play set playing before the
-	// first frame stamped it, the deadline would be 1970+ReadIdle, already
-	// expired, and a healthy stream would die with ErrReadTimeout on its first
-	// read. Advancing it from the moment frames arrive removes that ordering
-	// hazard from the task that adds routing.
-	c.lastFrameAt.Store(time.Now().UnixNano())
+	now := time.Now()
+	c.lastFrameAt.Store(now.UnixNano())
+
+	bind, ok := c.channels.Load().lookup(f.Channel)
+	if !ok {
+		return // unknown or not-yet-published channel.
+	}
+	tr := bind.track
+	if tr.discard {
+		tr.packets.Add(1)
+		tr.bytes.Add(uint64(len(f.Payload)))
+		return
+	}
+	if bind.isRTCP {
+		c.handleRTCP(tr, f.Payload, now)
+		return
+	}
+
+	pkt, err := rtp.ParsePacket(f.Payload)
+	if err != nil {
+		tr.malformed.Add(1)
+		return
+	}
+	if !tr.acceptsPayloadType(pkt.Header.PayloadType) {
+		// A second format multiplexed onto this track's RTP channel (a
+		// telephone-event alongside speech, or the second entry of an m= line
+		// listing several formats). Counted and dropped before rtp.Stream sees
+		// it: folding a foreign PT's sequence numbers into this track's stream
+		// would report the interleaving itself as continuous packet loss.
+		tr.malformed.Add(1)
+		return
+	}
+
+	up := tr.stream.Observe(pkt.Header)
+	if up.SSRCReset {
+		tr.ssrcResets.Add(1)
+		tr.baseSet = false
+		tr.resetDepacketizer()
+		tr.senderSSRC.Store(pkt.Header.SSRC)
+	}
+	if !tr.baseSet {
+		tr.baseTS = c.seededOrigin(tr, up.Timestamp)
+		tr.baseSet = true
+		tr.baselineFixed = true // the seed applies only to this first baseline.
+	}
+	if up.Gap > 0 {
+		tr.seqGaps.Add(uint64(up.Gap))
+		tr.resetDepacketizer()
+	}
+
+	tr.deliver(pkt, up, now, c.cfg.OnFrame)
+	tr.packets.Add(1)
+	tr.bytes.Add(uint64(len(pkt.Payload)))
+	tr.publishRRSnapshot()
+}
+
+// handleRTCP parses an RTCP compound packet and stores the most recent Sender
+// Report's fields into the track's atomic snapshot for the keepalive timer's
+// Receiver Report builder: the sender SSRC, the middle 32 bits of the SR NTP
+// timestamp (LSR), and the local receive time. Malformed RTCP is ignored: RTCP
+// is advisory, and a compound packet this parser cannot read must not end a
+// session whose media is arriving fine.
+func (c *Client) handleRTCP(tr *track, payload []byte, now time.Time) {
+	reports, err := rtp.ParseCompound(payload)
+	if err != nil || len(reports) == 0 {
+		return
+	}
+	sr := reports[len(reports)-1]
+	tr.senderSSRC.Store(sr.SSRC)
+	tr.lastSR.Store(uint32(sr.NTPTimestamp >> 16))
+	tr.lastSRUnixNano.Store(now.UnixNano())
 }
 
 // dispatchResponse routes a response to the caller waiting on its CSeq. An
@@ -348,6 +465,11 @@ func (c *Client) sendTeardownBestEffort() {
 	if sess != "" {
 		req.Header.Set("Session", sess)
 	}
+	// Credentials matter most here. This request does not go through roundTrip,
+	// so nothing else attaches them, and a TEARDOWN answered 401 leaves the
+	// server holding the session until its own timeout: on a camera that allows
+	// one session at a time, that refuses the next Dial.
+	c.attachAuthorization(req)
 	raw, err := MarshalRequest(req)
 	if err != nil {
 		return

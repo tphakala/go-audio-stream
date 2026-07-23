@@ -14,11 +14,12 @@ import (
 	"github.com/tphakala/go-audio-stream/rtsp"
 )
 
-// Method tokens the external tests use for SETUP and PLAY. OPTIONS and
-// DESCRIBE are already declared by other rtsp_test files.
+// Method tokens the external tests use for SETUP, PLAY and TEARDOWN. OPTIONS
+// and DESCRIBE are already declared by other rtsp_test files.
 const (
-	methodSetup = "SETUP"
-	methodPlay  = "PLAY"
+	methodSetup    = "SETUP"
+	methodPlay     = "PLAY"
+	methodTeardown = "TEARDOWN"
 )
 
 // Shared SDP fixtures for the Describe and Setup tests.

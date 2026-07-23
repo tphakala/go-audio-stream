@@ -66,9 +66,11 @@ type Config struct {
 	// and SessionInfo are the callback-safe ones). Frame.Data is valid only
 	// for the duration of the call.
 	//
-	// Frame delivery arrives in a later change; today no frames are
-	// delivered. Once it lands, nil will be allowed and frames will then be
-	// counted in Stats without being delivered.
+	// Nil is allowed: packets are still parsed and counted in Stats, they are
+	// simply not delivered. That is the shape a caller wants for a track it
+	// only wants statistics from; SetupOptions.Discard is the cheaper one for a
+	// track it wants nothing from at all, since a discard track is never
+	// parsed.
 	OnFrame func(audiostream.Frame)
 	// Logger receives diagnostics for conditions this package handles rather
 	// than fails on: a track degraded to raw delivery by an unsupported codec
