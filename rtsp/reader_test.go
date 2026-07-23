@@ -321,7 +321,9 @@ func TestMidStreamServerOptions(t *testing.T) {
 	if a.gotCSeq != a.wantCSeq {
 		t.Errorf("client answer CSeq = %d, want %d (echoed)", a.gotCSeq, a.wantCSeq)
 	}
-	if err := c.Wait(ctx); !errors.Is(err, rtsp.ErrServerTeardown) {
+	waitCtx, cancel := context.WithTimeout(ctx, testTimeout)
+	defer cancel()
+	if err := c.Wait(waitCtx); !errors.Is(err, rtsp.ErrServerTeardown) {
 		t.Errorf("Wait = %v, want ErrServerTeardown (session should survive the mid-stream OPTIONS)", err)
 	}
 }
@@ -349,7 +351,9 @@ func TestUnknownCSeqResponseDropped(t *testing.T) {
 	}
 	// Reaching the TEARDOWN proves the stray response neither terminated the
 	// session nor desynchronized the framing loop.
-	if err := c.Wait(ctx); !errors.Is(err, rtsp.ErrServerTeardown) {
+	waitCtx, cancel := context.WithTimeout(ctx, testTimeout)
+	defer cancel()
+	if err := c.Wait(waitCtx); !errors.Is(err, rtsp.ErrServerTeardown) {
 		t.Errorf("Wait = %v, want ErrServerTeardown (stray response must be dropped)", err)
 	}
 }
