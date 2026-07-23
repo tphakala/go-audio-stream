@@ -1,0 +1,15 @@
+#!/bin/sh
+# Block accidental commits of private planning docs and em/en dashes.
+# The dash pattern is built with printf octal escapes so this file never
+# contains the banned characters itself, and plain grep -E stays portable
+# (no PCRE, works with BSD grep).
+set -e
+if git diff --cached --name-only | grep -E '^docs/' >/dev/null; then
+  echo "pre-commit: docs/ is private and must never be committed" >&2
+  exit 1
+fi
+dashes=$(printf '\342\200\224|\342\200\223')
+if git diff --cached -U0 | grep -E "^\+.*(${dashes})" >/dev/null; then
+  echo "pre-commit: em or en dash found in staged changes" >&2
+  exit 1
+fi

@@ -1,0 +1,104 @@
+# https://taskfile.dev
+version: '3'
+
+tasks:
+  default:
+    desc: Show available tasks
+    cmds:
+      - task --list
+
+  build:
+    desc: Build all packages
+    cmds:
+      - go build ./...
+
+  test:
+    desc: Run all tests
+    cmds:
+      - go test ./...
+
+  test:race:
+    desc: Run tests with the race detector
+    cmds:
+      - go test -race ./...
+
+  vet:
+    desc: Run go vet for amd64 and arm64
+    cmds:
+      - GOARCH=amd64 go vet ./...
+      - GOARCH=arm64 go vet ./...
+
+  lint:
+    desc: Run golangci-lint
+    cmds:
+      - golangci-lint run ./...
+
+  fuzz:
+    desc: Run parser and depacketizer fuzz targets (2m each; 10m soak deferred to M5)
+    cmds:
+      - go test -run '^$' -fuzz '^FuzzParse$' -fuzztime=2m ./rtsp/sdp
+      - go test -run '^$' -fuzz '^FuzzParsePacket$' -fuzztime=2m ./rtsp/rtp
+      - go test -run '^$' -fuzz '^FuzzParseCompound$' -fuzztime=2m ./rtsp/rtp
+      - go test -run '^$' -fuzz '^FuzzParseAUHeaders$' -fuzztime=2m ./depacket/aac
+      - go test -run '^$' -fuzz '^FuzzDepacketize$' -fuzztime=2m ./depacket/aac
+      - go test -run '^$' -fuzz '^FuzzParseResponse$' -fuzztime=2m ./rtsp
+      - go test -run '^$' -fuzz '^FuzzParseRequest$' -fuzztime=2m ./rtsp
+      - go test -run '^$' -fuzz '^FuzzParseInterleaved$' -fuzztime=2m ./rtsp
+      - go test -run '^$' -fuzz '^FuzzParseChallenges$' -fuzztime=2m ./rtsp
+      - go test -run '^$' -fuzz '^FuzzResolveControlURL$' -fuzztime=2m ./rtsp
+      - go test -run '^$' -fuzz '^FuzzParseTransport$' -fuzztime=2m ./rtsp
+      - go test -run '^$' -fuzz '^FuzzParseSession$' -fuzztime=2m ./rtsp
+      - go test -run '^$' -fuzz '^FuzzReaderLoop$' -fuzztime=2m ./rtsp
+
+  tidy:
+    desc: Tidy and verify go.mod
+    cmds:
+      - go mod tidy
+      - go mod verify
+
+  check:
+    desc: Full local gate (build, vet, lint, race tests)
+    cmds:
+      - task: build
+      - task: vet
+      - task: lint
+      - task: test:race
+
+  doctor:build:
+    desc: Build the stream-doctor module
+    dir: cmd/stream-doctor
+    cmds:
+      - go build ./...
+
+  doctor:vet:
+    desc: Vet the stream-doctor module (amd64 and arm64)
+    dir: cmd/stream-doctor
+    cmds:
+      - GOARCH=amd64 go vet ./...
+      - GOARCH=arm64 go vet ./...
+
+  doctor:lint:
+    desc: Lint the stream-doctor module
+    dir: cmd/stream-doctor
+    cmds:
+      - golangci-lint run ./...
+
+  doctor:test:
+    desc: Test the stream-doctor module with the race detector
+    dir: cmd/stream-doctor
+    cmds:
+      - go test -race ./...
+
+  doctor:check:
+    desc: Full gate for the stream-doctor module
+    cmds:
+      - task: doctor:build
+      - task: doctor:vet
+      - task: doctor:lint
+      - task: doctor:test
+
+  check:all:
+    desc: Gate both the library and the stream-doctor module
+    cmds:
+      - task: check
+      - task: doctor:check

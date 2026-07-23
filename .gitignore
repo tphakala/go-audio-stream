@@ -1,0 +1,30 @@
+# Build artifacts
+/bin/
+*.exe
+*.test
+*.out
+
+# Coverage and profiling
+coverage.out
+coverage.txt
+*.cov
+*.prof
+*.pprof
+
+# Planning and design docs are private (tracked outside this repo); they
+# must never reach the public GitHub repository.
+/docs/
+
+# Raw protocol captures are private (may contain LAN details and
+# credentials) and never committed. Scrubbed fixtures derived from them
+# are committed under testdata/fixtures/ instead.
+/testdata/captures/
+
+# Editor and OS noise
+.DS_Store
+*.swp
+.idea/
+.vscode/
+
+# Orchestration scratch (session-local, never committed)
+/.superpowers/

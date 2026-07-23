@@ -1,0 +1,9 @@
+#!/bin/sh
+# Refuse to push if tracked files include private doc paths. Anchored to
+# the docs/ tree plus doc-shaped markdown names, so source files whose
+# paths merely contain words like "spec" (rtsp/spec_test.go) never match.
+set -e
+if git ls-files | grep -E '^docs/|(^|/)[^/]*-(design|plan|spec)\.md$|(^|/)(SPEC|PLAN|TODO|NOTES)\.md$' >/dev/null; then
+  echo "pre-push: private planning artifacts are tracked; aborting" >&2
+  exit 1
+fi
