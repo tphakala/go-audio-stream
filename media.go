@@ -15,7 +15,12 @@ const (
 	MediaOther
 )
 
-// String returns a lowercase name for the media kind.
+// unknownName labels a value that falls outside the defined set of an
+// enum, so an out-of-range value is never reported as a real one.
+const unknownName = "unknown"
+
+// String returns a lowercase name for the media kind. MediaUnknown and
+// any value outside the defined kinds report "unknown".
 func (k MediaKind) String() string {
 	switch k {
 	case MediaAudio:
@@ -24,10 +29,8 @@ func (k MediaKind) String() string {
 		return "video"
 	case MediaOther:
 		return "other"
-	case MediaUnknown:
-		return "unknown"
 	default:
-		return "unknown"
+		return unknownName
 	}
 }
 
@@ -41,10 +44,17 @@ const (
 	ALaw
 )
 
-// String returns a lowercase name for the companding law.
+// String returns a lowercase name for the companding law. A value
+// outside the defined laws reports "unknown" rather than defaulting to
+// a real law, so a malformed value is never mislabeled as audio data
+// the caller can trust.
 func (l Law) String() string {
-	if l == ALaw {
+	switch l {
+	case MuLaw:
+		return "mu-law"
+	case ALaw:
 		return "a-law"
+	default:
+		return unknownName
 	}
-	return "mu-law"
 }

@@ -16,14 +16,18 @@ var (
 	_ audiostream.Codec = audiostream.CodecUnknown{}
 )
 
+// unknownLabel is what both enums report for a value outside their
+// defined set.
+const unknownLabel = "unknown"
+
 func TestMediaKindString(t *testing.T) {
 	t.Parallel()
 	cases := map[audiostream.MediaKind]string{
-		audiostream.MediaUnknown:  "unknown",
+		audiostream.MediaUnknown:  unknownLabel,
 		audiostream.MediaAudio:    "audio",
 		audiostream.MediaVideo:    "video",
 		audiostream.MediaOther:    "other",
-		audiostream.MediaKind(99): "unknown",
+		audiostream.MediaKind(99): unknownLabel,
 	}
 	for kind, want := range cases {
 		if got := kind.String(); got != want {
@@ -34,11 +38,16 @@ func TestMediaKindString(t *testing.T) {
 
 func TestLawString(t *testing.T) {
 	t.Parallel()
-	if got := audiostream.MuLaw.String(); got != "mu-law" {
-		t.Errorf("MuLaw.String() = %q, want %q", got, "mu-law")
+	cases := map[audiostream.Law]string{
+		audiostream.MuLaw:    "mu-law",
+		audiostream.ALaw:     "a-law",
+		audiostream.Law(99):  unknownLabel,
+		audiostream.Law(255): unknownLabel,
 	}
-	if got := audiostream.ALaw.String(); got != "a-law" {
-		t.Errorf("ALaw.String() = %q, want %q", got, "a-law")
+	for law, want := range cases {
+		if got := law.String(); got != want {
+			t.Errorf("Law(%d).String() = %q, want %q", law, got, want)
+		}
 	}
 }
 
