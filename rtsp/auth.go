@@ -38,9 +38,8 @@ func (s AuthScheme) String() string {
 		return "Basic"
 	case AuthDigest:
 		return "Digest"
-	case AuthUnknown:
-		return unknownAuthName
 	default:
+		// AuthUnknown and any out-of-range value.
 		return unknownAuthName
 	}
 }

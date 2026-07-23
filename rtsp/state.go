@@ -77,10 +77,10 @@ func (e *StateError) Is(target error) bool {
 
 // legalIn reports whether the named lifecycle method may run in state s.
 // Describe runs only from idle; Setup from described or setup; Play only from
-// setup. The closed state is terminal, enforced by the leading guard rather
-// than left to emerge from the individual arms. OPTIONS and TEARDOWN are
-// absent deliberately: they are not lifecycle transitions and never go through
-// advance.
+// setup. The closed state is terminal; the leading guard states that outright
+// rather than leaving it to emerge from the individual arms, which each happen
+// to exclude it today. OPTIONS and TEARDOWN are absent deliberately: they are
+// not lifecycle transitions and never go through advance.
 func legalIn(method string, s state) bool {
 	if s == stateClosed {
 		return false

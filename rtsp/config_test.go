@@ -1,6 +1,7 @@
 package rtsp
 
 import (
+	"crypto/tls"
 	"errors"
 	"strings"
 	"testing"
@@ -193,5 +194,39 @@ func TestApplyDefaultsNegative(t *testing.T) {
 	}
 	if cfg.ReadIdle != 0 {
 		t.Errorf("ReadIdle = %v, want 0", cfg.ReadIdle)
+	}
+}
+
+// A password-only userinfo is a real credential some cameras accept. The
+// empty-userinfo guard must not swallow it.
+func TestParseTargetPasswordOnlyUserinfo(t *testing.T) {
+	t.Parallel()
+	tgt, err := parseTarget(&Config{URL: "rtsp://:secret@host/cam", Username: "u", Password: "p"})
+	if err != nil {
+		t.Fatalf("parseTarget: %v", err)
+	}
+	if tgt.username != "" || tgt.password != "secret" {
+		t.Errorf("credentials = %q/%q, want empty/secret", tgt.username, tgt.password)
+	}
+}
+
+// tlsConfigFor normalizes a caller-supplied config in two ways, and the
+// MinVersion floor is the security-relevant one. A socket test cannot see it,
+// because the test server negotiates 1.2 anyway.
+func TestTLSConfigForNormalizesCallerConfig(t *testing.T) {
+	t.Parallel()
+	tgt := target{serverName: "cam.example"}
+	got := tlsConfigFor(&Config{TLSConfig: &tls.Config{}}, &tgt) //nolint:gosec // asserting the floor this function applies
+	if got.ServerName != "cam.example" {
+		t.Errorf("ServerName = %q, want it filled in from the URL host", got.ServerName)
+	}
+	if got.MinVersion != tls.VersionTLS12 {
+		t.Errorf("MinVersion = %#x, want TLS 1.2", got.MinVersion)
+	}
+
+	// An explicit choice is preserved rather than overwritten.
+	pinned := tlsConfigFor(&Config{TLSConfig: &tls.Config{MinVersion: tls.VersionTLS13, ServerName: "pinned"}}, &tgt)
+	if pinned.MinVersion != tls.VersionTLS13 || pinned.ServerName != "pinned" {
+		t.Errorf("caller values overwritten: %#x %q", pinned.MinVersion, pinned.ServerName)
 	}
 }

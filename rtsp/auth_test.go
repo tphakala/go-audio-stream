@@ -557,6 +557,7 @@ func TestAuthorizeErrors(t *testing.T) {
 // 1. Nothing may depend on the old numeric values, and String must cover every
 // constant plus an out-of-range one.
 func TestAuthSchemeString(t *testing.T) {
+	t.Parallel()
 	// Declared separately from auth.go's unknownAuthName on purpose: asserting
 	// against the constant String itself returns would make this tautological,
 	// which is the trap the state tests fell into.
@@ -579,6 +580,7 @@ func TestAuthSchemeString(t *testing.T) {
 // A zero Challenge reports AuthNone, and neither AuthNone nor AuthUnknown is
 // ever selected or answerable.
 func TestAuthSchemeZeroValueIsNone(t *testing.T) {
+	t.Parallel()
 	var c Challenge
 	if c.Scheme != AuthNone {
 		t.Errorf("zero Challenge scheme = %v, want AuthNone", c.Scheme)

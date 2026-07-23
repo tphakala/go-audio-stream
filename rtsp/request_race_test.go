@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"net"
+	"os"
 	"sync"
 	"testing"
 	"time"
@@ -14,12 +15,26 @@ import (
 // to completion before it returns, which is what makes the roundTrip
 // delivered-response race reproducible instead of a 1-in-10000 flake.
 type scriptedConn struct {
-	mu       sync.Mutex
-	cond     *sync.Cond
-	inbound  []byte
-	closed   bool
-	onWrite  func(sc *scriptedConn, p []byte)
-	writeErr error
+	mu      sync.Mutex
+	cond    *sync.Cond
+	inbound []byte
+	closed  bool
+	onWrite func(sc *scriptedConn, p []byte)
+
+	// readDeadline is honoured rather than ignored. A no-op SetReadDeadline
+	// makes Client.Close unable to wake a reader parked in Read (Close relies
+	// on the deadline interrupt; the socket is closed later by the reader
+	// itself), so every test using this conn would leak its reader goroutine
+	// forever and any later goroutine-leak assertion would fail with a
+	// confusing stack.
+	readDeadline time.Time
+	deadlineTmr  *time.Timer
+
+	// writeDeadline is honoured too. A no-op SetWriteDeadline hides the whole
+	// class of bug where a caller arms an already-expired write deadline: a
+	// real poller refuses the write outright, a permissive fake writes anyway,
+	// and the test reports success for bytes that would never reach a socket.
+	writeDeadline time.Time
 }
 
 func newScriptedConn(onWrite func(sc *scriptedConn, p []byte)) *scriptedConn {
@@ -47,23 +62,31 @@ func (sc *scriptedConn) eof() {
 func (sc *scriptedConn) Read(p []byte) (int, error) {
 	sc.mu.Lock()
 	defer sc.mu.Unlock()
-	for len(sc.inbound) == 0 && !sc.closed {
+	for {
+		if len(sc.inbound) > 0 {
+			n := copy(p, sc.inbound)
+			sc.inbound = sc.inbound[n:]
+			return n, nil
+		}
+		if sc.closed {
+			return 0, io.EOF
+		}
+		if !sc.readDeadline.IsZero() && !time.Now().Before(sc.readDeadline) {
+			return 0, os.ErrDeadlineExceeded
+		}
 		sc.cond.Wait()
 	}
-	if len(sc.inbound) == 0 {
-		return 0, io.EOF
-	}
-	n := copy(p, sc.inbound)
-	sc.inbound = sc.inbound[n:]
-	return n, nil
 }
 
 func (sc *scriptedConn) Write(p []byte) (int, error) {
+	sc.mu.Lock()
+	expired := !sc.writeDeadline.IsZero() && !time.Now().Before(sc.writeDeadline)
+	sc.mu.Unlock()
+	if expired {
+		return 0, os.ErrDeadlineExceeded
+	}
 	if sc.onWrite != nil {
 		sc.onWrite(sc, p)
-	}
-	if sc.writeErr != nil {
-		return 0, sc.writeErr
 	}
 	return len(p), nil
 }
@@ -72,11 +95,37 @@ func (sc *scriptedConn) Close() error {
 	sc.eof()
 	return nil
 }
-func (sc *scriptedConn) LocalAddr() net.Addr                { return dummyAddr{} }
-func (sc *scriptedConn) RemoteAddr() net.Addr               { return dummyAddr{} }
-func (sc *scriptedConn) SetDeadline(_ time.Time) error      { return nil }
-func (sc *scriptedConn) SetReadDeadline(_ time.Time) error  { return nil }
-func (sc *scriptedConn) SetWriteDeadline(_ time.Time) error { return nil }
+func (sc *scriptedConn) LocalAddr() net.Addr  { return dummyAddr{} }
+func (sc *scriptedConn) RemoteAddr() net.Addr { return dummyAddr{} }
+func (sc *scriptedConn) SetDeadline(t time.Time) error {
+	_ = sc.SetWriteDeadline(t)
+	return sc.SetReadDeadline(t)
+}
+
+// SetReadDeadline wakes a parked Read when the deadline is already past, and
+// schedules a wake for a future one, so the shutdown interrupt behaves the way
+// a real socket's does.
+func (sc *scriptedConn) SetReadDeadline(t time.Time) error {
+	sc.mu.Lock()
+	sc.readDeadline = t
+	if sc.deadlineTmr != nil {
+		sc.deadlineTmr.Stop()
+		sc.deadlineTmr = nil
+	}
+	if d := time.Until(t); !t.IsZero() && d > 0 {
+		sc.deadlineTmr = time.AfterFunc(d, func() { sc.cond.Broadcast() })
+	}
+	sc.mu.Unlock()
+	sc.cond.Broadcast()
+	return nil
+}
+
+func (sc *scriptedConn) SetWriteDeadline(t time.Time) error {
+	sc.mu.Lock()
+	sc.writeDeadline = t
+	sc.mu.Unlock()
+	return nil
+}
 
 // scriptedURL is the target every scripted-conn test dials. The conn is a fake,
 // so the value only has to be a well-formed rtsp URL.
@@ -108,10 +157,12 @@ func TestRoundTripPrefersDeliveredResponseOverShutdown(t *testing.T) {
 		conn.onWrite = func(sc *scriptedConn, p []byte) {
 			req, _, err := ParseRequest(p)
 			if err != nil {
+				t.Errorf("iteration %d: ParseRequest in hook: %v", i, err)
 				return
 			}
 			raw, err := MarshalResponse(&Response{StatusCode: StatusOK, Reason: "OK", CSeq: req.CSeq})
 			if err != nil {
+				t.Errorf("iteration %d: MarshalResponse in hook: %v", i, err)
 				return
 			}
 			sc.deliver(raw)
@@ -138,35 +189,62 @@ func TestRoundTripPrefersDeliveredResponseOverShutdown(t *testing.T) {
 // The same preference applies when the request times out: a response that
 // landed before the timer fired is the answer, not a timeout.
 func TestRoundTripPrefersDeliveredResponseOverTimeout(t *testing.T) {
-	cfg := Config{URL: scriptedURL, Timeout: 50 * time.Millisecond}
-	cfg.applyDefaults()
+	// Looped for the same reason the shutdown variant is: with both the
+	// response and the timer ready, select picks uniformly, so a single run
+	// catches a reverted drain only half the time. A regression test that
+	// misses its regression on every other run is worse than none, because a
+	// green run reads as proof.
+	const iterations = 30
+	for i := range iterations {
+		cfg := Config{URL: scriptedURL, Timeout: 20 * time.Millisecond}
+		cfg.applyDefaults()
 
-	conn := newScriptedConn(nil)
-	c := newClient(&cfg, conn, &target{requestURL: scriptedURL})
-	conn.onWrite = func(sc *scriptedConn, p []byte) {
-		req, _, err := ParseRequest(p)
-		if err != nil {
-			return
+		conn := newScriptedConn(nil)
+		c := newClient(&cfg, conn, &target{requestURL: scriptedURL})
+		delivered := make(chan struct{})
+		conn.onWrite = func(sc *scriptedConn, p []byte) {
+			req, _, err := ParseRequest(p)
+			if err != nil {
+				t.Errorf("iteration %d: ParseRequest in hook: %v", i, err)
+				return
+			}
+			raw, err := MarshalResponse(&Response{StatusCode: StatusOK, Reason: "OK", CSeq: req.CSeq})
+			if err != nil {
+				t.Errorf("iteration %d: MarshalResponse in hook: %v", i, err)
+				return
+			}
+			sc.deliver(raw)
+			// Wait for the reader to actually dispatch it, then outlast the
+			// request timer so both cases are ready at the select. Waiting on
+			// the signal rather than sleeping keeps the loop fast.
+			<-delivered
+			time.Sleep(30 * time.Millisecond)
 		}
-		raw, err := MarshalResponse(&Response{StatusCode: StatusOK, Reason: "OK", CSeq: req.CSeq})
-		if err != nil {
-			return
-		}
-		sc.deliver(raw)
-		// Let the reader dispatch it, then outlast the request timer so both
-		// the response and the timer are ready at the select.
-		time.Sleep(120 * time.Millisecond)
-	}
-	go c.reader()
+		go func() {
+			// The reader dispatches into the pending table; give it the
+			// go-ahead once it has consumed the delivered bytes.
+			for {
+				conn.mu.Lock()
+				empty := len(conn.inbound) == 0
+				conn.mu.Unlock()
+				if empty {
+					close(delivered)
+					return
+				}
+				time.Sleep(time.Millisecond)
+			}
+		}()
+		go c.reader()
 
-	resp, err := c.roundTrip(context.Background(), &Request{Method: methodOptions, URL: scriptedURL})
-	if err != nil {
-		t.Fatalf("roundTrip = %v, want the delivered response", err)
+		resp, err := c.roundTrip(context.Background(), &Request{Method: methodOptions, URL: scriptedURL})
+		if err != nil {
+			t.Fatalf("iteration %d: roundTrip = %v, want the delivered response", i, err)
+		}
+		if resp.StatusCode != StatusOK {
+			t.Fatalf("iteration %d: status = %d, want %d", i, resp.StatusCode, StatusOK)
+		}
+		_ = c.Close()
 	}
-	if resp.StatusCode != StatusOK {
-		t.Fatalf("status = %d, want %d", resp.StatusCode, StatusOK)
-	}
-	_ = c.Close()
 }
 
 // A genuine timeout with no response delivered still reports ErrRequestTimeout,
@@ -184,4 +262,47 @@ func TestRoundTripTimeoutIsMatchable(t *testing.T) {
 		t.Fatalf("roundTrip = %v, want ErrRequestTimeout", err)
 	}
 	_ = c.Close()
+}
+
+// The best-effort TEARDOWN must actually reach the wire.
+//
+// sendTeardownBestEffort runs only from the terminal sequence, which runs only
+// after initiateShutdown, so shuttingDown is always set by then. Routing its
+// write through the ordinary guarded helper therefore armed an
+// already-expired deadline and the poller refused the write outright: the
+// TEARDOWN was silently never sent, and the discarded write error hid it.
+func TestTeardownIsActuallyWritten(t *testing.T) {
+	cfg := Config{URL: scriptedURL, Timeout: time.Second}
+	cfg.applyDefaults()
+
+	var mu sync.Mutex
+	var written [][]byte
+	conn := newScriptedConn(nil)
+	conn.onWrite = func(_ *scriptedConn, p []byte) {
+		mu.Lock()
+		written = append(written, append([]byte(nil), p...))
+		mu.Unlock()
+	}
+
+	c := newClient(&cfg, conn, &target{requestURL: scriptedURL})
+	// A session id is what gates the teardown; Setup will set this for real.
+	c.mu.Lock()
+	c.sessionID = "sess-1"
+	c.mu.Unlock()
+
+	go c.reader()
+	_ = c.Close()
+	<-c.done
+
+	mu.Lock()
+	defer mu.Unlock()
+	var sawTeardown bool
+	for _, w := range written {
+		if req, _, err := ParseRequest(w); err == nil && req.Method == methodTeardown {
+			sawTeardown = true
+		}
+	}
+	if !sawTeardown {
+		t.Fatalf("no TEARDOWN reached the connection; writes = %d", len(written))
+	}
 }

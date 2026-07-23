@@ -64,11 +64,11 @@ type Config struct {
 	// OnFrame receives every delivered frame on the reader goroutine. It must
 	// not block and must not call Describe, Setup, Play, or Wait (Close, Stats
 	// and SessionInfo are the callback-safe ones). Frame.Data is valid only
-	// for the duration of the call. Nil is allowed: frames are then counted in
-	// Stats but not delivered.
+	// for the duration of the call.
 	//
 	// Frame delivery arrives with track setup in a later change; today no
-	// frames are delivered and none are counted.
+	// frames are delivered. Once it lands, nil will be allowed and frames will
+	// then be counted in Stats without being delivered.
 	OnFrame func(audiostream.Frame)
 	// Logger is reserved for diagnostics and is not read yet; the package
 	// currently emits no log output. When it is wired, URLs will be passed
@@ -134,8 +134,8 @@ type target struct {
 
 // parseTarget resolves cfg.URL into a target. It validates the scheme (rtsp or
 // rtsps) and the port range, supplies the default port when absent, extracts
-// credentials (a non-empty URL userinfo overrides Config) and rejects control
-// characters in them, and strips the userinfo and fragment from the request
+// credentials (a non-empty URL userinfo overrides Config) and rejects CR, LF
+// and NUL in them, and strips the userinfo and fragment from the request
 // URL. It returns ErrInvalidURL (wrapped) on any malformed input.
 func parseTarget(cfg *Config) (target, error) {
 	raw := strings.TrimSpace(cfg.URL)
@@ -176,15 +176,22 @@ func parseTarget(cfg *Config) (target, error) {
 	}
 
 	username, password := cfg.Username, cfg.Password
-	// A userinfo carrying no username ("rtsp://@host" or "rtsp://:@host", what
-	// a URL template produces when its substitution variables are unset) is
-	// treated as absent rather than as an override, so it cannot silently
-	// discard the credentials the caller supplied in Config. Note url.User is
-	// non-nil for both of those, and User.String() is ":" for the second, so
-	// neither a nil check nor an empty-string check catches them.
-	if u.User != nil && u.User.Username() != "" {
-		username = u.User.Username()
-		password, _ = u.User.Password()
+	// A wholly empty userinfo ("rtsp://@host" or "rtsp://:@host", what a URL
+	// template produces when its substitution variables are unset) is treated
+	// as absent rather than as an override, so it cannot silently discard the
+	// credentials the caller supplied in Config. Note url.User is non-nil for
+	// both of those and User.String() is ":" for the second, so neither a nil
+	// check nor an empty-string check catches them.
+	//
+	// Gating on the username alone would be too broad: "rtsp://:secret@host"
+	// carries a real password-only credential, which some cameras accept, and
+	// dropping it would surface as an unexplainable 401.
+	if u.User != nil {
+		urlUser := u.User.Username()
+		urlPass, _ := u.User.Password()
+		if urlUser != "" || urlPass != "" {
+			username, password = urlUser, urlPass
+		}
 	}
 	// Userinfo is percent-decoded, so url.Parse's rejection of raw control
 	// characters does not cover "%0D%0A". These values flow into an
@@ -192,7 +199,7 @@ func parseTarget(cfg *Config) (target, error) {
 	// the boundary that extracts them from an untrusted URL is where they
 	// should be rejected.
 	if strings.ContainsAny(username, "\r\n\x00") || strings.ContainsAny(password, "\r\n\x00") {
-		return target{}, fmt.Errorf("%w: control character in credentials", ErrInvalidURL)
+		return target{}, fmt.Errorf("%w: CR, LF or NUL in credentials", ErrInvalidURL)
 	}
 
 	reqURL := *u

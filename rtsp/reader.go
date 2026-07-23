@@ -106,6 +106,13 @@ func (c *Client) consume(step stepFunc, validated bool) bool {
 	// only fire on a 4096-byte run containing no '$' and no two-byte method
 	// prefix, leaving the budget inert on exactly the binary streams it exists
 	// to bound.
+	//
+	// Known consequence, to be removed with the channel routing table: once a
+	// session is playing, the stream is almost entirely interleaved frames, so
+	// a desync there cannot re-lock on a frame and will exhaust the budget
+	// unless a real message arrives within maxResyncBytes. The discriminator
+	// should become semantic (accept a frame mid-resync when its channel is in
+	// the negotiated set) as soon as Setup populates channelPairs.
 	if resyncing && !validated {
 		return c.resyncOne()
 	}
@@ -244,10 +251,13 @@ func (c *Client) fill() error {
 		c.rbuf = c.rbuf[:copy(c.rbuf, c.rbuf[c.start:])]
 		c.start = 0
 	}
-	// Checked against the post-read length, not the pre-read one: testing
-	// len(rbuf) alone lets a readChunk-sized append overshoot the stated
-	// ceiling by up to readChunk-1 bytes.
-	if len(c.rbuf)+readChunk > maxReadBuffer {
+	// Tested before the read, so the buffer can transiently reach
+	// maxReadBuffer+readChunk-1. That slack is deliberate: testing the
+	// post-read length instead would refuse to read once len(rbuf) passed
+	// maxReadBuffer-readChunk and would reject a well-formed message in the
+	// top readChunk bytes of the documented range. maxReadBuffer bounds the
+	// largest unit the parsers accept, not the scratch append that carries it.
+	if len(c.rbuf) >= maxReadBuffer {
 		return errBufferFull
 	}
 	c.armReadDeadline()
@@ -343,11 +353,16 @@ func (c *Client) sendTeardownBestEffort() {
 	// while the interrupt is still in flight, and an unguarded set would
 	// either be clobbered by it (aborting the TEARDOWN) or would itself undo
 	// the immediate deadline the interrupt just installed.
-	_ = c.armWriteDeadline(teardownDeadline)
-	_, _ = c.conn.Write(raw)
+	c.armTeardownDeadlines()
+	if _, werr := c.conn.Write(raw); werr != nil {
+		// Nothing to do about it during shutdown, but returning here skips a
+		// discard read that cannot receive an answer to a request that was
+		// never sent.
+		c.writeMu.Unlock()
+		return
+	}
 	c.writeMu.Unlock()
 
-	_ = c.armTeardownReadDeadline()
 	var scratch [readChunk]byte
 	_, _ = c.conn.Read(scratch[:])
 }

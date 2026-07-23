@@ -23,9 +23,12 @@ import (
 	"github.com/tphakala/go-audio-stream/rtsp"
 )
 
-// readTimeout bounds a single server-side read. Generous enough never to fire
-// on a healthy scripted exchange, short enough that a stalled client fails the
-// test rather than hanging the package.
+// readTimeout bounds a single server-side read, re-armed per read. Long enough
+// not to fire on a scripted exchange, short enough that a stalled client fails
+// the test rather than hanging the package. A test that deliberately holds a
+// session idle longer than this (a keepalive-interval test, say) must raise it,
+// or the server will close mid-test and the client will report a connection
+// error instead of the behaviour under test.
 const readTimeout = 10 * time.Second
 
 // readChunk is the per-read buffer size for the connection accumulation
@@ -220,8 +223,7 @@ type ServerConn struct {
 	// cseq is the monotonic CSeq allocator for server-initiated requests.
 	cseq int
 	// skipped records interleaved frames ReadRequest and ReadResponse stepped
-	// over, so a
-	// test can assert on client-sent data that preceded a request.
+	// over, so a test can assert on client-sent data that preceded a request.
 	skipped []rtsp.InterleavedFrame
 }
 
@@ -318,7 +320,7 @@ func (sc *ServerConn) ReadRequest() (*rtsp.Request, error) {
 		case err != nil:
 			return nil, err
 		case frame != nil:
-			sc.skipped = append(sc.skipped, *frame)
+			sc.recordSkipped(*frame)
 		case resp != nil:
 			return nil, fmt.Errorf("testserver: expected request, got response %d", resp.StatusCode)
 		default:
@@ -353,7 +355,7 @@ func (sc *ServerConn) ReadResponse() (*rtsp.Response, error) {
 		case err != nil:
 			return nil, err
 		case frame != nil:
-			sc.skipped = append(sc.skipped, *frame)
+			sc.recordSkipped(*frame)
 		case req != nil:
 			return nil, fmt.Errorf("testserver: expected response, got request %s", req.Method)
 		default:
@@ -363,10 +365,19 @@ func (sc *ServerConn) ReadResponse() (*rtsp.Response, error) {
 }
 
 // SkippedFrames returns a copy of the interleaved frames ReadRequest and
-// ReadResponse stepped over so
-// far, in arrival order, for tests that assert on client-sent data.
+// ReadResponse stepped over so far, in arrival order, for tests that assert on client-sent data.
 func (sc *ServerConn) SkippedFrames() []rtsp.InterleavedFrame {
 	return slices.Clone(sc.skipped)
+}
+
+// recordSkipped stores f with its payload copied out of the read buffer.
+// ParseInterleaved returns a Payload aliasing that buffer and fill compacts it
+// in place, so keeping the alias would let every later read silently overwrite
+// a frame recorded earlier. Cloning the outer slice in SkippedFrames does not
+// help: it copies the headers, not the bytes they point at.
+func (sc *ServerConn) recordSkipped(f rtsp.InterleavedFrame) {
+	f.Payload = slices.Clone(f.Payload)
+	sc.skipped = append(sc.skipped, f)
 }
 
 // Respond writes a response to req, echoing req.CSeq, with the given

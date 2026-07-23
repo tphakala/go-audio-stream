@@ -29,6 +29,10 @@ func (rc *rawConn) fill() error {
 		rc.off = 0
 	}
 	tmp := make([]byte, 4096)
+	// Bounded for the same reason ServerConn.fill is: without it a client that
+	// stops writing parks the handler forever and the failure surfaces as a
+	// package timeout instead of an assertion.
+	_ = rc.conn.SetReadDeadline(time.Now().Add(5 * time.Second))
 	n, err := rc.conn.Read(tmp)
 	if n > 0 {
 		rc.buf = append(rc.buf, tmp[:n]...)
@@ -158,7 +162,15 @@ func startRawServer(t *testing.T, handle func(rc *rawConn, url string)) string {
 	// the test and leaked a goroutine and a socket into every later test.
 	t.Cleanup(func() {
 		_ = ln.Close()
-		<-done
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			// Unbounded here would convert any test failure that skips its
+			// client Close (a t.Fatalf before the defer is registered, say)
+			// into a 10-minute package timeout whose stack points at cleanup
+			// rather than at the assertion that failed.
+			t.Error("raw server handler did not exit")
+		}
 	})
 	return url
 }

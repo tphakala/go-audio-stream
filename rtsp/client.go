@@ -109,9 +109,11 @@ type Client struct {
 
 	// lastFrameAt is the watchdog clock (UnixNano), written by the reader on
 	// every frame and read when arming the read deadline, so it is atomic.
-	// Play must stamp it before setting playing: armReadDeadline derives the
-	// deadline from it, so a zero value would produce a 1970 deadline that has
-	// already expired and would kill a healthy stream on its first read.
+	//
+	// TODO(play): whichever code sets playing must stamp this first.
+	// armReadDeadline derives the deadline from it, so flipping playing while
+	// this is still zero yields a 1970 deadline that has already expired and
+	// kills a healthy stream on its first read.
 	lastFrameAt atomic.Int64
 	// playing gates the read-idle watchdog; false until Play.
 	playing atomic.Bool
@@ -138,6 +140,11 @@ type Client struct {
 // ready for Describe, or an error (with the connection torn down) on failure.
 // A non-2xx OPTIONS response is tolerated (the Public header is simply
 // unknown); a connection-level failure is fatal.
+//
+// A server may answer the probe and end the session in the same segment. The
+// response is real, so Dial succeeds, but the returned Client is already
+// closed and Describe will return a *StateError. Check Wait or SessionInfo
+// before proceeding if that case matters to the caller.
 //
 //nolint:gocritic // Config is the documented public Dial signature; hugeParam does not apply to a per-session entry point.
 func Dial(ctx context.Context, cfg Config) (*Client, error) {
@@ -303,8 +310,8 @@ func (c *Client) Wait(ctx context.Context) error {
 }
 
 // Stats returns a snapshot of per-track receive counters in a freshly
-// allocated map that never aliases internal state. Tracks holds one entry per
-// track set up with Setup, so it is empty until the first Setup returns.
+// allocated map that never aliases internal state. No track can be set up yet,
+// so the map is always empty; per-track counting arrives with Setup.
 func (c *Client) Stats() audiostream.Stats {
 	return audiostream.Stats{Tracks: make(map[int]audiostream.TrackStats)}
 }
@@ -366,12 +373,12 @@ func (c *Client) writeMessage(raw []byte) error {
 // so it can never race past a shutdown. When shutdown has begun it sets an
 // immediate deadline instead.
 //
-// The read side has always done this (armReadDeadline); the write side did not,
-// which made initiateShutdown's documented "interrupts a blocked read or write
-// on both directions" false for one of the two. A write reaching the deadline
-// call after the interrupt re-armed it to now+Timeout, so Close could leave the
-// reader parked in Write for the full 10s default while sendTeardownBestEffort
-// queued behind it on writeMu and Wait blocked for the same window.
+// initiateShutdown's SetDeadline(now) does interrupt a write already blocked in
+// the syscall. What it could not stop was a write that reached its own deadline
+// call just AFTER the interrupt and re-armed the write side forward to
+// now+Timeout, undoing it. Close could then leave the reader parked in Write for
+// the full 10s default while sendTeardownBestEffort queued behind it on writeMu
+// and Wait blocked for the same window.
 func (c *Client) armWriteDeadline(d time.Duration) error {
 	c.deadlineMu.Lock()
 	defer c.deadlineMu.Unlock()
@@ -382,13 +389,22 @@ func (c *Client) armWriteDeadline(d time.Duration) error {
 	return c.conn.SetWriteDeadline(deadline)
 }
 
-// armTeardownReadDeadline bounds the discard read that follows a best-effort
-// TEARDOWN. It goes through deadlineMu for the same reason armWriteDeadline
-// does; unlike armReadDeadline it does not collapse to an immediate deadline
-// during shutdown, because shutdown is the only time it runs and the point is
-// to give the server a bounded chance to answer.
-func (c *Client) armTeardownReadDeadline() error {
+// armTeardownDeadlines bounds the best-effort TEARDOWN write and the discard
+// read that follows it. Both go through deadlineMu for the same reason
+// armWriteDeadline does, but unlike armWriteDeadline neither collapses to an
+// immediate deadline during shutdown.
+//
+// That exemption is the whole point. sendTeardownBestEffort runs only from the
+// terminal sequence, which runs only after initiateShutdown, so shuttingDown is
+// ALWAYS set by then. Routing its write through armWriteDeadline therefore
+// armed an already-expired deadline and the poller refused the write outright,
+// so the TEARDOWN was never transmitted and the discarded error hid it. The
+// server would keep the session allocated until its own timeout, and on a
+// camera with a one-session limit the next Dial is refused.
+func (c *Client) armTeardownDeadlines() {
 	c.deadlineMu.Lock()
 	defer c.deadlineMu.Unlock()
-	return c.conn.SetReadDeadline(time.Now().Add(teardownDeadline))
+	deadline := time.Now().Add(teardownDeadline)
+	_ = c.conn.SetWriteDeadline(deadline)
+	_ = c.conn.SetReadDeadline(deadline)
 }
