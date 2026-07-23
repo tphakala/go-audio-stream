@@ -107,6 +107,21 @@ type Client struct {
 	channelPairs    []ChannelPair
 	termErr         error
 
+	// described retains Describe's per-track descriptors, indexed by track ID,
+	// so Setup can build the pipeline without re-parsing the SDP. Written by
+	// Describe under mu, read by Setup under mu.
+	described []describedTrack
+	// tracks holds the constructed per-track pipelines in Setup order. Appended
+	// by Setup under mu; read by Stats.
+	tracks []*track
+
+	// channels is the immutable channel-to-track routing table the reader loads
+	// lock-free on every interleaved frame. Setup publishes a new table by
+	// copy-on-write and an atomic store; the reader only ever loads it. It is
+	// outside mu deliberately: the reader must never block on the lock the
+	// lifecycle calls hold.
+	channels atomic.Pointer[channelTable]
+
 	// lastFrameAt is the watchdog clock (UnixNano), written by the reader on
 	// every frame and read when arming the read deadline, so it is atomic.
 	//
