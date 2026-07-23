@@ -241,9 +241,15 @@ func (c *Client) stepRequest(buf []byte) (n int, usable bool, err error) {
 	return n, true, nil
 }
 
-// resyncOne discards one unrecognized leading byte, bounded by maxResyncBytes
-// CONSECUTIVE bytes: consume resets the counter on every successfully parsed
-// unit, so the budget bounds one run of garbage, not the session total.
+// resyncOne discards one unrecognized leading byte, bounded by maxResyncBytes.
+//
+// The budget bounds one episode of garbage rather than the session total:
+// consume clears it on every unit that proves the stream has re-locked, which
+// is any validated message and any interleaved frame that reached a track and
+// parsed. A frame the resync gate admitted on its channel byte alone does NOT
+// clear it, so two runs of garbage separated by a plausible-looking but
+// unusable frame are correctly treated as one episode and still terminate the
+// session.
 func (c *Client) resyncOne() bool {
 	c.resync++
 	if c.resync > maxResyncBytes {
@@ -279,12 +285,18 @@ func (c *Client) handleInterleaved(f InterleavedFrame) bool {
 	}
 	tr := bind.track
 	if tr.discard {
-		// A discard track is deliberately never parsed, so there is nothing to
-		// validate and the frame counts as usable on the strength of its
-		// channel alone.
+		// Counted and dropped without delivering or depacketizing, but still
+		// parsed. The parse is not for the payload, which is thrown away; it is
+		// the framing evidence consume needs. Trusting the channel byte alone
+		// here would let a run of garbage that happens to name a discarded
+		// track's channel clear the resync budget indefinitely, which is the
+		// bound the usable verdict exists to preserve. Parsing a header costs
+		// no allocation, and Bytes still counts the whole interleaved payload
+		// (RTP header included) as it is documented to.
 		tr.packets.Add(1)
 		tr.bytes.Add(uint64(len(f.Payload)))
-		return true
+		_, err := rtp.ParsePacket(f.Payload)
+		return err == nil
 	}
 	if bind.isRTCP {
 		return c.handleRTCP(tr, f.Payload, now)
@@ -342,7 +354,10 @@ func (c *Client) handleInterleaved(f InterleavedFrame) bool {
 // handleRTCP parses an RTCP compound packet and stores one Sender Report's
 // fields into the track's atomic snapshot for the keepalive timer's Receiver
 // Report builder: the sender SSRC, the middle 32 bits of the SR NTP timestamp
-// (LSR), and the local receive time. It reports whether a report was stored.
+// (LSR), and the local receive time. It reports whether the compound parsed,
+// which is the framing evidence consume wants; a compound carrying no Sender
+// Report at all is still a perfectly real unit, and cameras send RR+SDES
+// compounds routinely.
 //
 // A compound packet may carry a Sender Report per contributing source when the
 // peer is a mixer or translator, so the one this track wants is the one whose
@@ -354,17 +369,30 @@ func (c *Client) handleInterleaved(f InterleavedFrame) bool {
 // parser cannot read must not end a session whose media is arriving fine.
 func (c *Client) handleRTCP(tr *track, payload []byte, now time.Time) bool {
 	reports, err := rtp.ParseCompound(payload)
-	if err != nil || len(reports) == 0 {
+	if err != nil {
 		return false
 	}
-	sr := reports[0]
+	if len(reports) == 0 {
+		return true // a valid compound, just not one carrying a Sender Report.
+	}
+
+	sr, ok := reports[0], true
+	// Prefer the report describing the media this track is receiving. When none
+	// does, record nothing: a mixer or translator emits a Sender Report per
+	// contributing source, and storing one of those would replace the media
+	// SSRC with a source the server is not sending us, so every later Receiver
+	// Report would name the wrong thing for the rest of the session.
 	if want := tr.senderSSRC.Load(); want != 0 {
+		sr, ok = rtp.SenderReport{}, false
 		for i := range reports {
 			if reports[i].SSRC == want {
-				sr = reports[i]
+				sr, ok = reports[i], true
 				break
 			}
 		}
+	}
+	if !ok {
+		return true
 	}
 	tr.senderSSRC.Store(sr.SSRC)
 	tr.lastSR.Store(uint32(sr.NTPTimestamp >> 16))

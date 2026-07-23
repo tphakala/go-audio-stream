@@ -102,8 +102,7 @@ func (c *Client) seededOrigin(tr *track, firstTS uint64) uint64 {
 // for each matched track. Only the origin is seeded, never the sequence: a
 // server's advertised sequence number is not needed to interpret the stream,
 // and trusting it would desynchronize loss accounting for no gain. An absent or
-// unparseable header is ignored, leaving the
-// first-packet baseline. The seed is published atomically because the reader
+// unparseable header is ignored, leaving the first-packet baseline. The seed is published atomically because the reader
 // may already be delivering early frames on the caller's goroutine.
 func (c *Client) seedFromRTPInfo(header string) {
 	if header == "" {

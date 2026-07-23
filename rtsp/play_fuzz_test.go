@@ -45,12 +45,17 @@ func FuzzParseRTPInfoEntry(f *testing.F) {
 		// that returned ok unconditionally would pass every check above.
 		gotSeq, gotTime := false, false
 		var wantSeq, wantTime uint64
+		var wantURL string
 		for part := range strings.SplitSeq(entry, ";") {
 			name, val, has := strings.Cut(strings.TrimSpace(part), "=")
 			if !has {
 				continue
 			}
-			n, err := strconv.ParseUint(strings.TrimSpace(val), 10, 32)
+			val = strings.TrimSpace(val)
+			if strings.EqualFold(strings.TrimSpace(name), "url") {
+				wantURL = val
+			}
+			n, err := strconv.ParseUint(val, 10, 32)
 			if err != nil {
 				continue
 			}
@@ -67,6 +72,15 @@ func FuzzParseRTPInfoEntry(f *testing.F) {
 		}
 		if !gotSeq || !gotTime {
 			t.Fatalf("reported ok for %q, which carries seq=%v rtptime=%v", entry, gotSeq, gotTime)
+		}
+		// The re-derivation runs the other way too: an entry whose url= value
+		// carries a control character must have been refused outright, not
+		// sanitized into an accepted one.
+		if strings.ContainsAny(wantURL, "\r\n\x00") {
+			t.Fatalf("accepted %q, whose url= value carries a control character", entry)
+		}
+		if url != wantURL {
+			t.Fatalf("url = %q, want the last url= value %q in %q", url, wantURL, entry)
 		}
 		if seq != wantSeq {
 			t.Fatalf("seq = %d, want the last seq= value %d in %q", seq, wantSeq, entry)

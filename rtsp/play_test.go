@@ -178,16 +178,16 @@ func playAndInject(t *testing.T, hcfg *testserver.HandshakeConfig, discard func(
 // that received a frame has not necessarily observed the counters for it yet:
 // asserting them directly is a measured flake (5% under -race), not a
 // theoretical one.
-func waitForStats(t *testing.T, c *rtsp.Client, want func(audiostream.TrackStats) bool) audiostream.TrackStats {
+func waitForStats(t *testing.T, c *rtsp.Client, trackID int, want func(audiostream.TrackStats) bool) audiostream.TrackStats {
 	t.Helper()
 	deadline := time.Now().Add(testTimeout)
 	for {
-		st := c.Stats().Tracks[0]
+		st := c.Stats().Tracks[trackID]
 		if want(st) {
 			return st
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("timed out waiting for track stats; last seen %+v", st)
+			t.Fatalf("timed out waiting for track %d stats; last seen %+v", trackID, st)
 			return st
 		}
 		time.Sleep(time.Millisecond)
@@ -465,7 +465,7 @@ func TestForeignPayloadTypeRejected(t *testing.T) {
 	if f := recvFrame(t, frames); !bytes.Equal(f.Data, second) {
 		t.Errorf("second delivered frame = % x, want % x (the foreign PT must not reach OnFrame)", f.Data, second)
 	}
-	st := waitForStats(t, c, func(ts audiostream.TrackStats) bool { return ts.Packets == 2 })
+	st := waitForStats(t, c, 0, func(ts audiostream.TrackStats) bool { return ts.Packets == 2 })
 	if st.Malformed != 1 {
 		t.Errorf("Malformed = %d, want 1", st.Malformed)
 	}
@@ -482,28 +482,35 @@ func TestForeignPayloadTypeRejected(t *testing.T) {
 	}
 }
 
-// A camera whose stream carries a payload type its own SDP did not declare
-// keeps working: the wire is authoritative. Enforcing the SDP's value instead
-// would reject every packet, deliver nothing, and never trip the read-idle
-// watchdog, because frames would still be arriving.
+// A camera whose stream consistently carries a payload type its own SDP did not
+// declare keeps working. Enforcing the SDP's value would reject every packet,
+// deliver nothing, and never trip the read-idle watchdog, because frames would
+// still be arriving: a silent stall rather than a diagnosable failure.
 func TestPayloadTypeDisagreeingWithSDPStillDelivers(t *testing.T) {
 	payload := []byte{0x78, 0x11}
+	const sent = 8 // enough to cross the adopt threshold and then some
 	c, frames := playAndInject(t, &testserver.HandshakeConfig{SDP: opusSDP}, nil,
 		func(sc *testserver.ServerConn, pairs []testserver.ChannelPair) {
 			// opusSDP declares PT 96; this camera sends PT 98 throughout.
-			_ = sc.InjectFrame(pairs[0].RTP, buildRTPPacket(98, 1, 960, 0x01, false, payload))
-			_ = sc.InjectFrame(pairs[0].RTP, buildRTPPacket(98, 2, 1920, 0x01, false, payload))
+			for i := range sent {
+				_ = sc.InjectFrame(pairs[0].RTP, buildRTPPacket(98, uint16(1+i), uint32(960*(1+i)), 0x01, false, payload))
+			}
 		})
 	defer closeAndWait(t, c)
 
-	for i := range 2 {
-		if f := recvFrame(t, frames); !bytes.Equal(f.Data, payload) {
-			t.Errorf("frame %d = % x, want % x", i, f.Data, payload)
-		}
+	// The prologue before the stream's type is adopted is dropped; everything
+	// after it is delivered.
+	if f := recvFrame(t, frames); !bytes.Equal(f.Data, payload) {
+		t.Errorf("first delivered frame = % x, want % x", f.Data, payload)
 	}
-	st := waitForStats(t, c, func(ts audiostream.TrackStats) bool { return ts.Packets == 2 })
-	if st.Malformed != 0 {
-		t.Errorf("Malformed = %d, want 0; a consistent stream must not be rejected for disagreeing with its SDP", st.Malformed)
+	st := waitForStats(t, c, 0, func(ts audiostream.TrackStats) bool {
+		return ts.Packets+ts.Malformed == sent
+	})
+	if st.Packets == 0 {
+		t.Error("no packet was ever delivered; the stream's payload type was never adopted")
+	}
+	if st.Malformed >= sent {
+		t.Errorf("Malformed = %d of %d, want only the prologue before adoption", st.Malformed, sent)
 	}
 }
 
@@ -591,7 +598,7 @@ func TestSSRCChangeResets(t *testing.T) {
 	for range 3 {
 		recvFrame(t, frames)
 	}
-	st := waitForStats(t, c, func(ts audiostream.TrackStats) bool { return ts.Packets == 3 })
+	st := waitForStats(t, c, 0, func(ts audiostream.TrackStats) bool { return ts.Packets == 3 })
 	if st.SSRCResets != 1 {
 		t.Errorf("SSRCResets = %d, want 1", st.SSRCResets)
 	}
@@ -622,7 +629,7 @@ func TestSSRCChangeResetsWithSeededOrigin(t *testing.T) {
 	if f1.PTS != 0 {
 		t.Errorf("post-SSRC-change PTS = %v, want 0 (new baseline from the first post-change packet, not the stale seed)", f1.PTS)
 	}
-	st := waitForStats(t, c, func(ts audiostream.TrackStats) bool { return ts.SSRCResets == 1 })
+	st := waitForStats(t, c, 0, func(ts audiostream.TrackStats) bool { return ts.SSRCResets == 1 })
 	if st.SSRCResets != 1 {
 		t.Errorf("SSRCResets = %d, want 1", st.SSRCResets)
 	}
@@ -674,16 +681,82 @@ func TestDiscardTrackNotDelivered(t *testing.T) {
 	if !bytes.Equal(f0.Data, au0) || !bytes.Equal(f1.Data, au1) {
 		t.Errorf("audio AUs = % x / % x, want % x / % x", f0.Data, f1.Data, au0, au1)
 	}
-	// The discarded video track counts packets but delivers nothing. Its
-	// counters are bumped before the audio track's last frame is delivered, so
-	// no polling is needed here, but the deadline keeps a regression from
-	// hanging the test.
-	deadline := time.Now().Add(testTimeout)
-	for c.Stats().Tracks[1].Packets != 2 && time.Now().Before(deadline) {
-		time.Sleep(time.Millisecond)
+	// The discarded video track counts packets but delivers nothing.
+	if st := waitForStats(t, c, 1, func(ts audiostream.TrackStats) bool { return ts.Packets == 2 }); st.Packets != 2 {
+		t.Errorf("discarded track Packets = %d, want 2", st.Packets)
 	}
-	if got := c.Stats().Tracks[1].Packets; got != 2 {
-		t.Errorf("discarded track Packets = %d, want 2", got)
+}
+
+// The same bound must hold when the gate-admitted channel belongs to a
+// DISCARDED track. A discard track is never delivered from, so treating its
+// frames as proof of a re-lock on the strength of the channel byte alone would
+// reopen the hole for any session that discards a video track, which is the
+// configuration SetupOptions.Discard exists for.
+func TestResyncBudgetStillBoundedWithADiscardedTrack(t *testing.T) {
+	// audioVideoSDP gives track 0 channels 0-1 and track 1 channels 2-3; only
+	// track 1 is discarded. Channel 2 is therefore bound to a discard track.
+	fake := []byte{'$', 0x02, 0x00, 0x02, 0xAB, 0xCD}
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	closeRelease := func() { releaseOnce.Do(func() { close(release) }) }
+	t.Cleanup(closeRelease)
+
+	s := testserver.New(t, testserver.Options{Handle: func(sc *testserver.ServerConn) {
+		if _, err := sc.Handshake(testserver.HandshakeConfig{
+			SDP:            audioVideoSDP,
+			SessionID:      testSessionID,
+			SessionTimeout: testTimeoutS,
+		}); err != nil {
+			return
+		}
+		<-release
+		junk := make([]byte, 0, 16*1024)
+		for range 8 {
+			junk = append(junk, unclassifiableBytes(2000)...)
+			junk = append(junk, fake...)
+		}
+		_ = sc.WriteRaw(junk)
+		drainRequests(sc)
+	}})
+
+	c := dialIdle(t, s.URL("/stream"))
+	defer func() { _ = c.Close() }()
+	describeSetupPlay(t, c, func(i int) bool { return i == 1 })
+	closeRelease()
+
+	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
+	defer cancel()
+	err := c.Wait(ctx)
+	if err == nil || !strings.Contains(err.Error(), "resync exceeded") {
+		t.Errorf("Wait = %v, want a resync budget framing error; a discarded track's "+
+			"channel must not vouch for a frame the gate admitted", err)
+	}
+}
+
+// A camera whose SDP declares one payload type but whose stream opens with a
+// different one (a session joined mid-DTMF) must still deliver the declared
+// format once it arrives, rather than latching onto the interloper and dropping
+// every real packet for the rest of the session.
+func TestInterloperFirstDoesNotCaptureTheTrack(t *testing.T) {
+	dtmf, speech := []byte{0x00, 0x0a, 0x00, 0x50}, []byte{0x78, 0x42}
+	c, frames := playAndInject(t, &testserver.HandshakeConfig{SDP: opusSDP}, nil,
+		func(sc *testserver.ServerConn, pairs []testserver.ChannelPair) {
+			// opusSDP declares PT 96; 101 is a telephone-event arriving first.
+			_ = sc.InjectFrame(pairs[0].RTP, buildRTPPacket(101, 1, 960, 0x01, false, dtmf))
+			for i := range 3 {
+				_ = sc.InjectFrame(pairs[0].RTP, buildRTPPacket(ptOpus, uint16(2+i), uint32(1920+960*i), 0x01, false, speech))
+			}
+		})
+	defer closeAndWait(t, c)
+
+	for i := range 3 {
+		if f := recvFrame(t, frames); !bytes.Equal(f.Data, speech) {
+			t.Fatalf("frame %d = % x, want the speech payload % x", i, f.Data, speech)
+		}
+	}
+	st := waitForStats(t, c, 0, func(ts audiostream.TrackStats) bool { return ts.Packets == 3 })
+	if st.Malformed != 1 {
+		t.Errorf("Malformed = %d, want 1 (only the telephone-event)", st.Malformed)
 	}
 }
 
@@ -718,6 +791,15 @@ func TestResyncBudgetStillBoundedWithABoundChannel(t *testing.T) {
 	// A header that passes the gate (channel 0 is bound) but whose payload is
 	// far too short to be an RTP packet, so it can never prove usable.
 	fake := []byte{'$', 0x00, 0x00, 0x02, 0xAB, 0xCD}
+	// Held until Play has returned. Writing the junk straight after the
+	// handshake let it share a TCP segment with the PLAY 200, so the reader
+	// could exhaust the budget and record the terminal error before Play
+	// re-checked it, failing Play itself rather than the session.
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	closeRelease := func() { releaseOnce.Do(func() { close(release) }) }
+	t.Cleanup(closeRelease)
+
 	s := testserver.New(t, testserver.Options{Handle: func(sc *testserver.ServerConn) {
 		if _, err := sc.Handshake(testserver.HandshakeConfig{
 			SDP:            opusSDP,
@@ -726,6 +808,7 @@ func TestResyncBudgetStillBoundedWithABoundChannel(t *testing.T) {
 		}); err != nil {
 			return
 		}
+		<-release
 		junk := make([]byte, 0, 8*1024)
 		for range 4 {
 			junk = append(junk, unclassifiableBytes(2000)...)
@@ -738,6 +821,7 @@ func TestResyncBudgetStillBoundedWithABoundChannel(t *testing.T) {
 	c := dialIdle(t, s.URL("/stream"))
 	defer func() { _ = c.Close() }()
 	describeSetupPlay(t, c, nil)
+	closeRelease()
 
 	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
 	defer cancel()

@@ -85,9 +85,9 @@ type Config struct {
 // their defaults, and normalizes a negative ReadIdle to zero (disabled).
 func (c *Config) applyDefaults() {
 	if c.ReadIdle < 0 {
-		// Normalized to the documented "disabled" value so a negative can never
-		// reach a deadline computation, where it would put the read deadline in
-		// the past and kill the session on its first read.
+		// Normalized to the documented "disabled" value so that every later
+		// reader can test it with a single > 0, rather than each having to
+		// decide for itself what a negative window means.
 		c.ReadIdle = 0
 	}
 	if c.Timeout <= 0 {

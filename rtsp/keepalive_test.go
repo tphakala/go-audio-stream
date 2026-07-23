@@ -371,3 +371,60 @@ func TestSenderReportFeedsTheNextReceiverReport(t *testing.T) {
 		t.Fatal("no receiver report emitted within two RR intervals")
 	}
 }
+
+// A compound carrying Sender Reports for several sources (what a mixer or
+// translator emits) must be reduced to the one describing this track's media.
+// Storing any other would replace the media SSRC with a source the server is
+// not sending, so every later Receiver Report would name the wrong thing.
+func TestSenderReportForAnotherSourceIsIgnored(t *testing.T) {
+	const mediaSSRC = 0x0BADF00D
+	const otherSSRC = 0xDEADBEEF
+	const mediaNTP = uint64(0x11223344)<<32 | 0x55667788
+	const wantLSR = uint32(0x33445566)
+
+	type result struct {
+		rr  rtp.ReceiverReport
+		err error
+	}
+	res := make(chan result, 1)
+	s := testserver.New(t, testserver.Options{Handle: func(sc *testserver.ServerConn) {
+		pairs, err := sc.Handshake(testserver.HandshakeConfig{
+			SDP:            opusSDP,
+			SessionID:      testSessionID,
+			SessionTimeout: testTimeoutS,
+		})
+		if err != nil {
+			return
+		}
+		_ = sc.InjectFrame(pairs[0].RTP, buildRTPPacket(ptOpus, 7, 960, mediaSSRC, false, []byte{0x78, 0x01}))
+		// The foreign source's report comes LAST, so taking the last report of
+		// the compound rather than the matching one is detectable.
+		compound := append(buildSenderReport(mediaSSRC, mediaNTP, 960),
+			buildSenderReport(otherSSRC, 0xAAAAAAAABBBBBBBB, 111)...)
+		_ = sc.InjectFrame(pairs[0].RTCP, compound)
+		rr, rerr := readReceiverReport(sc, pairs[0].RTCP)
+		res <- result{rr: rr, err: rerr}
+		drainRequests(sc)
+	}})
+	c := dialIdle(t, s.URL("/stream"))
+	defer closeAndWait(t, c)
+	describeSetupPlay(t, c, nil)
+
+	select {
+	case r := <-res:
+		if r.err != nil {
+			t.Fatalf("reading receiver report: %v", r.err)
+		}
+		if len(r.rr.Blocks) != 1 {
+			t.Fatalf("RR blocks = %d, want 1", len(r.rr.Blocks))
+		}
+		if got := r.rr.Blocks[0].SSRC; got != mediaSSRC {
+			t.Errorf("Blocks[0].SSRC = %#x, want the media SSRC %#x", got, uint32(mediaSSRC))
+		}
+		if got := r.rr.Blocks[0].LastSR; got != wantLSR {
+			t.Errorf("LastSR = %#x, want the media source's %#x", got, wantLSR)
+		}
+	case <-time.After(2 * rrCadence):
+		t.Fatal("no receiver report emitted within two RR intervals")
+	}
+}

@@ -212,10 +212,10 @@ func (c *Client) authenticate(ctx context.Context, req *Request, ue *Unauthorize
 }
 
 // authFailed builds the error every give-up path returns: it matches
-// ErrAuthFailed under errors.Is, says which of the four ways the exchange ended,
-// and wraps the challenge so a caller can still read the realm and prompt for
+// ErrAuthFailed under errors.Is, says which way the exchange ended, and wraps
+// the challenge so a caller can still read the realm and prompt for
 // credentials. The bare sentinel told a caller only that authentication had
-// failed, and two of the four paths return before anything was ever sent, so
+// failed, and some of these paths return before anything was ever sent, so
 // "rejected" would have been wrong for them.
 func authFailed(ue *UnauthorizedError, why string) error {
 	return fmt.Errorf("%w: %s: %w", ErrAuthFailed, why, ue)
@@ -231,9 +231,9 @@ func authFailed(ue *UnauthorizedError, why string) error {
 // seen; deleting it sends the request unauthenticated instead, which is what
 // re-enters the auth path.
 //
-// Callers outside roundTrip (the keepalive timer, the best-effort TEARDOWN)
-// call it directly, so nc is allocated on whichever goroutine is sending. The
-// count is allocated under mu but the write happens after mu is released, so
+// marshalBareRequest calls it too, on behalf of the keepalive timer and the
+// best-effort TEARDOWN, so nc is allocated on whichever goroutine is sending.
+// The count is allocated under mu but the write happens after mu is released, so
 // two goroutines sending at once can put their nc values on the wire out of
 // order. A server that requires a strictly increasing nc would reject the later
 // one; that costs one keepalive against the alternative of sending none of them

@@ -74,12 +74,15 @@ type track struct {
 	// Reader-owned, non-atomic. Valid to touch only after publication.
 	stream rtp.Stream
 	aac    *aac.Depacketizer
-	// wirePayloadType is the payload type this track actually carries, latched
-	// from its first packet, and wirePTSet says whether that has happened. They
-	// are the enforced filter; the zero value accepts anything, so a track
-	// built by any path other than newTrack cannot silently filter to PT 0.
+	// wirePayloadType is the payload type this track has settled on and
+	// wirePTSet says whether it has settled, while ptUndeclared counts the
+	// consecutive undeclared packets seen before it does. See acceptPayloadType
+	// for how a track settles; the zero value accepts the first type it sees,
+	// so a track built by any path other than newTrack cannot silently filter
+	// to PT 0.
 	wirePayloadType uint8
 	wirePTSet       bool
+	ptUndeclared    int
 	baseTS          uint64
 	baseSet         bool
 	// baselineFixed is set true the first time a baseline is established and is
@@ -212,32 +215,60 @@ func modeOf(params *sdp.AACParams) string {
 	return params.Mode
 }
 
-// acceptPayloadType latches the track's payload type from its first packet and
-// thereafter reports whether pt matches it. Reader-goroutine only.
+// ptAdoptThreshold is how many consecutive packets carrying an undeclared
+// payload type a track tolerates before concluding the SDP was wrong and
+// adopting what the stream actually carries. Five packets is on the order of
+// 100 ms of audio, short enough that a camera which mis-declares its format
+// loses only a prologue, and long enough that a stray packet at the head of a
+// session cannot capture the track.
+const ptAdoptThreshold = 5
+
+// acceptPayloadType decides whether a packet's payload type belongs to this
+// track. Reader-goroutine only.
 //
-// The wire is authoritative, not the SDP. Enforcing the SDP's payload type
-// directly would hand a camera whose m= line disagrees with what it actually
-// sends a session in which every packet is rejected, no frame is ever
+// The type the SDP declared wins whenever it appears, and seeing it settles the
+// track for good. A track whose SDP declared nothing settles on the first type
+// it sees instead. Otherwise a run of ptAdoptThreshold consecutive undeclared
+// packets, with the declared type never appearing, is taken as the SDP being
+// wrong, and the observed type is adopted.
+//
+// Both halves are needed, because each fails alone in the other's case.
+// Enforcing the SDP's value alone hands a camera whose m= line disagrees with
+// what it sends a session in which every packet is rejected, nothing is
 // delivered, and the read-idle watchdog never fires because frames keep
 // arriving: a silent, permanent stall on exactly the quirky firmware this
-// package exists to tolerate. Latching from the wire keeps that camera working
-// while still rejecting a SECOND format multiplexed onto the same channel,
-// which is what the filter is for.
+// package exists to tolerate. Settling on the first packet alone has the
+// mirror-image failure: one stray packet ahead of the real stream (a session
+// joined mid-DTMF, say) captures the track, gets delivered as audio, and every
+// real packet after it is rejected for the rest of the session. Waiting for a
+// short run before adopting distinguishes a mis-declared stream, which is
+// consistently wrong, from a stray prologue, which is not.
 //
-// A disagreement is worth knowing about, so it is logged once, at the moment
-// the track latches. That is the SDP payload type's reader: it is the expected
-// value the observed one is checked against.
+// A rejected packet is counted and dropped by the caller, so a mis-declaring
+// camera loses at most ptAdoptThreshold packets before delivery starts.
 func (tr *track) acceptPayloadType(pt uint8, logger *slog.Logger) bool {
-	if !tr.wirePTSet {
-		if tr.sdpPayloadType != payloadTypeUnknown && int(pt) != tr.sdpPayloadType {
-			logWarn(logger, "stream payload type differs from the one the SDP declared; using the stream's",
-				"track", tr.id, "sdp", tr.sdpPayloadType, "stream", int(pt))
+	if tr.sdpPayloadType == payloadTypeUnknown {
+		if !tr.wirePTSet {
+			tr.wirePayloadType, tr.wirePTSet = pt, true
 		}
-		tr.wirePayloadType = pt
-		tr.wirePTSet = true
+		return pt == tr.wirePayloadType
+	}
+	if int(pt) == tr.sdpPayloadType {
+		tr.wirePayloadType, tr.wirePTSet = pt, true
+		tr.ptUndeclared = 0
 		return true
 	}
-	return pt == tr.wirePayloadType
+	if tr.wirePTSet {
+		return pt == tr.wirePayloadType
+	}
+	tr.ptUndeclared++
+	if tr.ptUndeclared < ptAdoptThreshold {
+		return false
+	}
+	logWarn(logger, "stream payload type differs from the one the SDP declared; using the stream's",
+		"track", tr.id, "sdp", tr.sdpPayloadType, "stream", int(pt))
+	tr.wirePayloadType, tr.wirePTSet = pt, true
+	return true
 }
 
 // deliver depacketizes one RTP packet for its track and hands each resulting
@@ -434,9 +465,9 @@ type channelBinding struct {
 
 // channelTable is an immutable channel-to-track routing table. Setup publishes
 // a new table by copy-on-write and an atomic store. It is immutable so that the
-// reader can load it lock-free, which it does twice per interleaved frame: once
-// to route the frame, and once for the resync gate's channel-byte test. The
-// reader never mutates it.
+// reader can load it lock-free on the per-frame path, and again for the resync
+// gate's channel-byte test on the rare frames that arrive while the reader is
+// resynchronizing. The reader never mutates it.
 type channelTable struct {
 	bindings map[int]channelBinding
 }

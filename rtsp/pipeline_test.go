@@ -613,41 +613,95 @@ func copyFrame(f *audiostream.Frame) audiostream.Frame {
 	return cp
 }
 
-// A track latches its payload type from the first packet it sees and rejects
-// every other one thereafter, whatever the SDP declared.
-func TestAcceptPayloadTypeLatchesFromTheWire(t *testing.T) {
+// The payload-type rule has two halves and both matter: the declared type
+// always wins and settles the track, and an undeclared type is adopted only
+// after a consistent run, so a stray packet cannot capture the track.
+func TestAcceptPayloadType(t *testing.T) {
 	t.Parallel()
-	// A camera whose stream disagrees with its own SDP keeps working: the
-	// first packet's PT wins, and only a THIRD format is rejected.
-	lying := &track{sdpPayloadType: 97}
-	if !lying.acceptPayloadType(96, nil) {
-		t.Error("first packet rejected; the wire must be authoritative over the SDP")
+
+	// Ordinary case: the stream matches its SDP, and a second format is
+	// rejected from the first packet onward.
+	normal := &track{sdpPayloadType: 96}
+	if !normal.acceptPayloadType(96, nil) {
+		t.Error("the declared payload type was rejected")
 	}
-	if !lying.acceptPayloadType(96, nil) {
-		t.Error("second packet of the latched type rejected")
-	}
-	if lying.acceptPayloadType(97, nil) {
-		t.Error("a second format was accepted after the track latched")
-	}
-	if got := lying.wirePayloadType; got != 96 {
-		t.Errorf("wirePayloadType = %d, want the latched 96", got)
+	if normal.acceptPayloadType(101, nil) {
+		t.Error("a second format was accepted alongside the declared one")
 	}
 
-	// A track with no declared payload type behaves identically: there is
-	// simply no mismatch to report.
+	// The interloper-first case: a session joined mid-DTMF sees a
+	// telephone-event before any speech. One stray packet must not capture the
+	// track, and the declared type must be delivered as soon as it appears.
+	midDTMF := &track{sdpPayloadType: 96}
+	if midDTMF.acceptPayloadType(101, nil) {
+		t.Error("a stray undeclared packet was accepted immediately")
+	}
+	if !midDTMF.acceptPayloadType(96, nil) {
+		t.Error("the declared payload type was rejected after a stray packet")
+	}
+	if midDTMF.acceptPayloadType(101, nil) {
+		t.Error("the interloper was accepted after the track settled")
+	}
+
+	// A camera whose stream consistently disagrees with its own SDP is adopted
+	// once the run is long enough to rule out a stray, and only then.
+	lying := &track{sdpPayloadType: 97}
+	for i := range ptAdoptThreshold - 1 {
+		if lying.acceptPayloadType(96, nil) {
+			t.Fatalf("undeclared packet %d accepted before the adopt threshold", i)
+		}
+	}
+	if !lying.acceptPayloadType(96, nil) {
+		t.Error("the stream's payload type was not adopted after a consistent run")
+	}
+	if !lying.acceptPayloadType(96, nil) {
+		t.Error("packet after adoption rejected")
+	}
+	if lying.acceptPayloadType(101, nil) {
+		t.Error("an undeclared third format was accepted after the track settled")
+	}
+	if got := lying.wirePayloadType; got != 96 {
+		t.Errorf("wirePayloadType = %d, want the adopted 96", got)
+	}
+	// The declared type still wins if it ever turns up.
+	if !lying.acceptPayloadType(97, nil) {
+		t.Error("the declared payload type was rejected after an adoption")
+	}
+
+	// A run broken by the declared type restarts: the declared type settles the
+	// track, so a later undeclared run is rejected outright rather than adopted.
+	interrupted := &track{sdpPayloadType: 96}
+	if interrupted.acceptPayloadType(101, nil) {
+		t.Error("undeclared packet accepted immediately")
+	}
+	if !interrupted.acceptPayloadType(96, nil) {
+		t.Error("declared packet rejected")
+	}
+	for i := range ptAdoptThreshold + 2 {
+		if interrupted.acceptPayloadType(101, nil) {
+			t.Fatalf("undeclared packet %d adopted after the track had settled", i)
+		}
+	}
+
+	// A track with no declared payload type has nothing to prefer, so the first
+	// type seen settles it immediately.
 	unknown := &track{sdpPayloadType: payloadTypeUnknown}
 	if !unknown.acceptPayloadType(0, nil) {
 		t.Error("first packet rejected for a track with no declared PT")
 	}
 	if unknown.acceptPayloadType(8, nil) {
-		t.Error("a second format was accepted after the track latched")
+		t.Error("a second format was accepted after the track settled")
 	}
 
-	// The zero value must not filter: a track built by any path that does not
-	// set sdpPayloadType would otherwise accept only PT 0.
+	// The zero value declares PT 0, which no path other than newTrack should
+	// produce. It is not silently permanent: the adopt threshold heals it after
+	// a short run rather than rejecting every packet for the session.
 	var zero track
+	for range ptAdoptThreshold - 1 {
+		_ = zero.acceptPayloadType(96, nil)
+	}
 	if !zero.acceptPayloadType(96, nil) {
-		t.Error("the zero-value track filtered to PT 0 instead of latching")
+		t.Error("a zero-value track never healed; it would filter to PT 0 forever")
 	}
 }
 
