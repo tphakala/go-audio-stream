@@ -105,13 +105,25 @@ func (r *runner) describe() bool {
 		r.failStep(stepDescribe, elapsed, PhaseDescribe, "describe failed", err)
 		return false
 	}
-	// Scrub the raw fmtp of every track once, at the boundary: it is
-	// camera-controlled text that both renderers display, so a hostile stream
-	// cannot leak PII or break the report's code fence through it.
-	for i := range tracks {
-		tracks[i].FMTP = r.scrubber.scrubString(tracks[i].FMTP)
+	// Copy before scrubbing: the prober owns the slice it returned (a fake or a
+	// future prober may share or reuse it), so mutate an owned copy, never the
+	// caller's backing array. The Track fields scrubbed below are value types
+	// (a string and an interface holding a value codec), so a shallow copy fully
+	// isolates the writes.
+	scrubbed := make([]rtsp.Track, len(tracks))
+	copy(scrubbed, tracks)
+	// Scrub every camera-controlled SDP string once, at the boundary: the raw
+	// fmtp and an unknown codec's rtpmap are both rendered by both renderers, so
+	// a hostile stream must not leak PII or break the report's code fence
+	// through either. Scrubbing here means the renderers can display them raw.
+	for i := range scrubbed {
+		scrubbed[i].FMTP = r.scrubber.scrubString(scrubbed[i].FMTP)
+		if cu, ok := scrubbed[i].Codec.(audiostream.CodecUnknown); ok {
+			cu.RTPMap = r.scrubber.scrubString(cu.RTPMap)
+			scrubbed[i].Codec = cu
+		}
 	}
-	r.report.Tracks = tracks
+	r.report.Tracks = scrubbed
 	r.okStep(stepDescribe, elapsed, describeDetail(tracks))
 	return true
 }

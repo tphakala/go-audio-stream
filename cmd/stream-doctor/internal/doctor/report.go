@@ -29,9 +29,9 @@ func renderReport(r Report, env Env) string {
 	reportHandshake(&b, &r)
 	reportSession(&b, &r)
 	writeTracksSection(&b, r.Tracks)
-	reportNoAudio(&b, &r)
+	writeNoAudioSection(&b, &r)
 	reportCapture(&b, &r)
-	reportListen(&b, &r)
+	writeListenSection(&b, &r)
 	fmt.Fprintln(&b, reportFence)
 	return b.String()
 }
@@ -86,16 +86,6 @@ func reportSession(b *strings.Builder, r *Report) {
 	}
 }
 
-// reportNoAudio writes the no-audio-track notice when Describe succeeded but no
-// audio track was present.
-func reportNoAudio(b *strings.Builder, r *Report) {
-	if r.HaveAudio || !hasStepOK(r.Steps, stepDescribe) {
-		return
-	}
-	fmt.Fprintln(b)
-	fmt.Fprintln(b, "no audio track found")
-}
-
 // reportCapture writes the capture statistics block, or nothing when capture
 // never ran. Malformed and ssrc-resets are library-health counters: a climbing
 // malformed count points at a codec or framing mismatch.
@@ -115,22 +105,6 @@ func reportCapture(b *strings.Builder, r *Report) {
 	fmt.Fprintf(b, "  max-gap: %d\n", c.MaxGap)
 	fmt.Fprintf(b, "  bitrate: %.1f kbit/s\n", c.Bitrate/1000)
 	fmt.Fprintf(b, "  jitter: %.2f ms\n", c.JitterMS)
-}
-
-// reportListen writes the listen line, or nothing when the check never ran
-// (Report.Listen's zero value). It never mentions the --wav output path:
-// ListenResult carries no path field.
-func reportListen(b *strings.Builder, r *Report) {
-	switch {
-	case r.Listen.Written:
-		seconds := listenSeconds(r.Listen)
-		fmt.Fprintln(b)
-		fmt.Fprintf(b, "listen: wrote %.1fs of %d Hz %s s16 PCM\n",
-			seconds, r.Listen.SampleRate, channelsLabel(r.Listen.Channels))
-	case r.Listen.Skipped:
-		fmt.Fprintln(b)
-		fmt.Fprintf(b, "listen: skipped: %s\n", r.Listen.SkipReason)
-	}
 }
 
 // endReasonPhrase maps an EndReason to the report's longer prose phrase. It is
@@ -154,8 +128,8 @@ func endReasonPhrase(r EndReason) string {
 	}
 }
 
-// channelsLabel renders a channel count as "mono", "stereo", or "Nch". Shared
-// by reportListen and renderListen.
+// channelsLabel renders a channel count as "mono", "stereo", or "Nch". Used by
+// writeListenSection.
 func channelsLabel(n int) string {
 	switch n {
 	case 1:

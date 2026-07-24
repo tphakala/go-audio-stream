@@ -318,9 +318,9 @@ func (c *Client) options(ctx context.Context, reqURL string) error {
 	server := resp.Header.Get("Server")
 	c.mu.Lock()
 	c.keepaliveMethod = km
-	// Record the Server header once, from the OPTIONS probe, and do not let a
-	// later response blank it: an empty header on a subsequent response must
-	// not erase what OPTIONS reported.
+	// Record the Server header when the camera sent one. options runs once,
+	// from Dial, so the non-empty guard is future-proofing: a later probe
+	// reporting no Server must not blank a value already recorded.
 	if server != "" {
 		c.serverHeader = server
 	}

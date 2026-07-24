@@ -105,7 +105,8 @@ func ascHex(c audiostream.Codec) string {
 // writeTracksSection writes the "tracks" block: one labeled line per track and,
 // under each audio track, the raw fmtp and the AAC ASC hex when present. Shared
 // by the walkthrough and the report so both stay table-free and identical; both
-// receive tracks whose FMTP was already scrubbed at the orchestration boundary.
+// receive tracks whose camera-controlled strings (the raw fmtp and a
+// CodecUnknown's rtpmap) were already scrubbed at the orchestration boundary.
 func writeTracksSection(b *strings.Builder, tracks []rtsp.Track) {
 	if len(tracks) == 0 {
 		return
@@ -114,6 +115,9 @@ func writeTracksSection(b *strings.Builder, tracks []rtsp.Track) {
 	fmt.Fprintln(b, "tracks")
 	for i := range tracks {
 		t := tracks[i]
+		// codecName can echo a CodecUnknown's raw rtpmap; like FMTP it is
+		// scrubbed and made fence-safe at the describe boundary (doctor.go), so
+		// it is rendered raw here.
 		fmt.Fprintf(b, "  track %d: %s, %s, clock %d, ch %s, depacketize %s\n",
 			t.ID, t.Media.String(), codecName(t.Codec), t.ClockRate,
 			channelsCell(t.Channels), depacketizeCell(decodable(t)))
@@ -140,9 +144,9 @@ func renderWalkthrough(w io.Writer, r Report, env Env) {
 	fmt.Fprintln(&b)
 	renderHandshake(&b, &r)
 	writeTracksSection(&b, r.Tracks)
-	renderNoAudio(&b, &r)
+	writeNoAudioSection(&b, &r)
 	renderCapture(&b, &r)
-	renderListen(&b, &r)
+	writeListenSection(&b, &r)
 	_, _ = io.WriteString(w, b.String())
 }
 
@@ -160,9 +164,9 @@ func renderHandshake(b *strings.Builder, r *Report) {
 	}
 }
 
-// renderNoAudio writes the no-audio-track notice when Describe succeeded but no
-// audio track was present.
-func renderNoAudio(b *strings.Builder, r *Report) {
+// writeNoAudioSection writes the no-audio-track notice when Describe succeeded
+// but no audio track was present. Shared by the report and the walkthrough.
+func writeNoAudioSection(b *strings.Builder, r *Report) {
 	if r.HaveAudio || !hasStepOK(r.Steps, stepDescribe) {
 		return
 	}
@@ -189,9 +193,8 @@ func renderCapture(b *strings.Builder, r *Report) {
 }
 
 // listenSeconds returns the decoded audio duration for l in seconds, or 0
-// when the sample rate is unknown. Shared by renderListen and reportListen
-// so the walkthrough and the markdown report always agree on a run's
-// playback duration.
+// when the sample rate is unknown. Used by writeListenSection so the
+// walkthrough and the report always agree on a run's playback duration.
 func listenSeconds(l ListenResult) float64 {
 	if l.SampleRate <= 0 {
 		return 0
@@ -199,10 +202,12 @@ func listenSeconds(l ListenResult) float64 {
 	return float64(l.Frames) / float64(l.SampleRate)
 }
 
-// renderListen writes the listen-check outcome line, or nothing when the check
-// never ran (Report.Listen's zero value), so a --wav run surfaces the written
-// or skipped result on the default walkthrough path, not only under --report.
-func renderListen(b *strings.Builder, r *Report) {
+// writeListenSection writes the listen-check outcome line, or nothing when the
+// check never ran (Report.Listen's zero value). Shared by the report and the
+// walkthrough. The skip reason can carry stream-derived decoder error text (a
+// go-aac/go-opus error over a camera-controlled ASC or channel count), so it is
+// made fence-safe here rather than trusted.
+func writeListenSection(b *strings.Builder, r *Report) {
 	switch {
 	case r.Listen.Written:
 		seconds := listenSeconds(r.Listen)
@@ -210,7 +215,7 @@ func renderListen(b *strings.Builder, r *Report) {
 		fmt.Fprintf(b, "listen: wrote %.1fs of %d Hz %s s16 PCM\n", seconds, r.Listen.SampleRate, channelsLabel(r.Listen.Channels))
 	case r.Listen.Skipped:
 		fmt.Fprintln(b)
-		fmt.Fprintf(b, "listen: skipped: %s\n", r.Listen.SkipReason)
+		fmt.Fprintf(b, "listen: skipped: %s\n", sanitizeLine(r.Listen.SkipReason))
 	}
 }
 

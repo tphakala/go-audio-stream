@@ -80,20 +80,26 @@ func (s piiScrubber) scrubError(err error) string {
 	if errors.Is(err, rtsp.ErrInvalidURL) {
 		return "invalid URL"
 	}
-	out := s.replacer.Replace(err.Error())
-	out = ipLiteralPattern.ReplaceAllString(out, redactedToken)
-	return sanitizeLine(out)
+	return s.scrub(err.Error())
 }
 
 // scrubString removes PII (the target host and any resolved IP) from an
 // arbitrary stream-derived display string and makes it safe for the single-line
 // fenced report. It is the non-error sibling of scrubError, used for the RTSP
-// Server header and the raw fmtp, values a camera controls. An empty input
-// stays empty so callers can omit the line.
+// Server header, the raw fmtp, and an unknown codec's rtpmap, values a camera
+// controls. An empty input stays empty so callers can omit the line.
 func (s piiScrubber) scrubString(in string) string {
 	if in == "" {
 		return ""
 	}
+	return s.scrub(in)
+}
+
+// scrub is the shared core of scrubError and scrubString: it replaces the target
+// host and any resolved IP literal with the redaction token, then makes the
+// result single-line and fence-safe. Redaction runs on the raw string first, so
+// the PII patterns always match before sanitizeLine's character swaps.
+func (s piiScrubber) scrub(in string) string {
 	out := s.replacer.Replace(in)
 	out = ipLiteralPattern.ReplaceAllString(out, redactedToken)
 	return sanitizeLine(out)

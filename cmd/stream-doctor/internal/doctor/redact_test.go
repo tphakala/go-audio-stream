@@ -83,9 +83,13 @@ func TestPIIScrubberScrubString(t *testing.T) {
 
 	// A camera-controlled field (the Server header, the raw fmtp) that echoes
 	// the target host or a resolved IP must be scrubbed, since a report is
-	// pasted publicly.
+	// pasted publicly. The non-PII remainder must survive: over-redaction that
+	// gutted the value would leave the diagnostic useless while still "leak
+	// safe", so assert the descriptive text is preserved.
 	if got := s.scrubString("cam.example RTSP server 1.0"); strings.Contains(got, "cam.example") {
 		t.Errorf("scrubString leaked the host: %q", got)
+	} else if !strings.Contains(got, "RTSP server 1.0") {
+		t.Errorf("scrubString over-redacted, dropped non-PII content: %q", got)
 	}
 	if got := s.scrubString("built for 192.168.1.50"); strings.Contains(got, "192.168.1.50") {
 		t.Errorf("scrubString leaked a resolved IPv4 address: %q", got)
