@@ -85,7 +85,7 @@ func TestRunListenSkipLeavesNoFile(t *testing.T) {
 		session: happySession(),
 		result:  CaptureResult{Frames: []CapturedFrame{{Data: []byte{1, 2}}}, Reason: EndCompleted},
 	}
-	wavPath := filepath.Join(t.TempDir(), "out.wav")
+	wavPath := filepath.Join(t.TempDir(), testWAVName)
 	opts := Options{URL: testTargetURL, Duration: time.Second, WAVPath: wavPath}
 
 	var out strings.Builder
@@ -107,7 +107,7 @@ func TestRunListenWritesWAV(t *testing.T) {
 		session: happySession(),
 		result:  CaptureResult{Frames: []CapturedFrame{{Data: make([]byte, 320)}}, Reason: EndCompleted},
 	}
-	wavPath := filepath.Join(t.TempDir(), "out.wav")
+	wavPath := filepath.Join(t.TempDir(), testWAVName)
 	opts := Options{URL: testTargetURL, Duration: time.Second, WAVPath: wavPath, Report: true}
 
 	var out, errOut strings.Builder
@@ -155,9 +155,11 @@ func TestRunListenRenameFailurePIIFree(t *testing.T) {
 func TestSanitizeWriteErr(t *testing.T) {
 	t.Parallel()
 	// A *os.PathError embeds the local --wav path; sanitize must strip it.
-	pathErr := &os.PathError{Op: "write", Path: "/home/user/secret/out.wav", Err: errors.New("no space left on device")}
+	// The crafted path is built from testWAVName so the leak assertion
+	// below always checks a fragment that is actually in the input.
+	pathErr := &os.PathError{Op: "write", Path: "/home/user/secret/" + testWAVName, Err: errors.New("no space left on device")}
 	got := sanitizeWriteErr(pathErr)
-	if strings.Contains(got, "/home/user") || strings.Contains(got, "out.wav") {
+	if strings.Contains(got, "/home/user") || strings.Contains(got, testWAVName) {
 		t.Errorf("sanitizeWriteErr leaked the path: %q", got)
 	}
 	if !strings.Contains(got, "no space left on device") {

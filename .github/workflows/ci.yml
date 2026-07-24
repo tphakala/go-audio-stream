@@ -16,6 +16,8 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
       - uses: actions/setup-go@v7
         with:
           go-version: '1.26.x'
@@ -30,10 +32,43 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
       - uses: actions/setup-go@v7
         with:
           go-version: '1.26.x'
+          cache-dependency-path: |
+            go.sum
+            cmd/stream-doctor/go.sum
       - name: golangci-lint
         uses: golangci/golangci-lint-action@v9
         with:
           version: latest
+      - name: golangci-lint (stream-doctor)
+        uses: golangci/golangci-lint-action@v9
+        with:
+          version: latest
+          working-directory: cmd/stream-doctor
+
+  doctor:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@v7
+        with:
+          go-version: '1.26.x'
+          cache-dependency-path: cmd/stream-doctor/go.sum
+      - name: Build stream-doctor
+        working-directory: cmd/stream-doctor
+        run: go build ./...
+      - name: Vet stream-doctor
+        working-directory: cmd/stream-doctor
+        run: go vet ./...
+      - name: Test stream-doctor (race)
+        working-directory: cmd/stream-doctor
+        run: go test -race ./...

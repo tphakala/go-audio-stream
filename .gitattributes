@@ -1,0 +1,4 @@
+# Normalize all text files to LF on checkout so byte-exact test fixtures
+# (cmd/stream-doctor/internal/doctor/testdata) survive Windows runners,
+# whose machine gitconfig sets core.autocrlf=true.
+* text=auto eol=lf

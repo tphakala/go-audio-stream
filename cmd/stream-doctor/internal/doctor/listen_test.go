@@ -6,7 +6,6 @@ import (
 	"testing"
 
 	aac "github.com/tphakala/go-aac"
-	aacpcm "github.com/tphakala/go-aac/pcm"
 	"github.com/tphakala/go-opus/opus"
 	wavpcm "github.com/tphakala/go-wav/pcm"
 
@@ -160,35 +159,7 @@ func TestWriteWAVAAC(t *testing.T) {
 	const channels = 1
 	const numFrames = 5
 
-	fw := &frameWriter{}
-	enc, err := aacpcm.NewEncoder(fw, aacpcm.Config{SampleRate: sampleRate, BitDepth: 16, Channels: channels})
-	if err != nil {
-		t.Fatalf("aacpcm.NewEncoder: %v", err)
-	}
-
-	pcm := make([]int16, aac.FrameSize*channels*numFrames)
-	fillSine(pcm, sampleRate, channels, 0)
-	if _, wErr := enc.Write(int16sToLE(pcm)); wErr != nil {
-		t.Fatalf("Write: %v", wErr)
-	}
-	if cErr := enc.Close(); cErr != nil {
-		t.Fatalf("Close: %v", cErr)
-	}
-	asc := enc.AudioSpecificConfig()
-	if len(asc) == 0 {
-		t.Fatal("AudioSpecificConfig is empty")
-	}
-
-	frames := make([]CapturedFrame, 0, len(fw.frames))
-	for _, adtsFrame := range fw.frames {
-		if len(adtsFrame) < 7 {
-			t.Fatalf("ADTS frame too short: %d bytes", len(adtsFrame))
-		}
-		frames = append(frames, CapturedFrame{Data: append([]byte(nil), adtsFrame[7:]...)})
-	}
-	if len(frames) == 0 {
-		t.Fatal("no access units captured from the encoder")
-	}
+	frames, asc := aacListenFrames(t, sampleRate, channels, numFrames)
 
 	track := rtsp.Track{
 		ID: 0, Media: audiostream.MediaAudio,

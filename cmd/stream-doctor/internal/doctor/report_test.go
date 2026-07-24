@@ -10,8 +10,8 @@ import (
 	"github.com/tphakala/go-audio-stream/rtsp"
 )
 
-// goldenReport builds the Report matching the M5 Task 4 brief's exact
-// golden markdown fixture (testdata/report_golden.md).
+// goldenReport builds the Report matching the golden markdown fixture
+// (testdata/report_golden.md) byte for byte.
 func goldenReport() Report {
 	return Report{
 		RedactedURL: "rtsp://[redacted]/Preview_01_main",
