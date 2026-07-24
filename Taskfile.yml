@@ -64,3 +64,42 @@ tasks:
       - task: vet
       - task: lint
       - task: test:race
+
+  doctor:build:
+    desc: Build the stream-doctor module
+    dir: cmd/stream-doctor
+    cmds:
+      - go build ./...
+
+  doctor:vet:
+    desc: Vet the stream-doctor module (amd64 and arm64)
+    dir: cmd/stream-doctor
+    cmds:
+      - GOARCH=amd64 go vet ./...
+      - GOARCH=arm64 go vet ./...
+
+  doctor:lint:
+    desc: Lint the stream-doctor module
+    dir: cmd/stream-doctor
+    cmds:
+      - golangci-lint run ./...
+
+  doctor:test:
+    desc: Test the stream-doctor module with the race detector
+    dir: cmd/stream-doctor
+    cmds:
+      - go test -race ./...
+
+  doctor:check:
+    desc: Full gate for the stream-doctor module
+    cmds:
+      - task: doctor:build
+      - task: doctor:vet
+      - task: doctor:lint
+      - task: doctor:test
+
+  check:all:
+    desc: Gate both the library and the stream-doctor module
+    cmds:
+      - task: check
+      - task: doctor:check
