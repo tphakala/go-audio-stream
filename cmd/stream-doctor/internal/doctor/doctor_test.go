@@ -23,6 +23,7 @@ const testDigestAuth = rtsp.AuthDigest
 const testGetParameter = "GET_PARAMETER"
 const testL16RTPMap = "L16/8000"
 const redactedStreamURL = "rtsp://[redacted]/stream"
+const testWAVName = "out.wav"
 
 func aacTrack() rtsp.Track {
 	return rtsp.Track{ID: 0, Media: audiostream.MediaAudio, Codec: audiostream.CodecAAC{}, ClockRate: 16000, Channels: 1}
