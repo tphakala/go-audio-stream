@@ -74,7 +74,7 @@ func TestRenderWalkthroughColumns(t *testing.T) {
 		var b strings.Builder
 		renderWalkthrough(&b, r, env)
 		got := b.String()
-		if !strings.Contains(got, "48000    -  yes") {
+		if !strings.Contains(got, "clock 48000, ch -, depacketize yes") {
 			t.Errorf("zero-channel row missing dash cell:\n%s", got)
 		}
 	})

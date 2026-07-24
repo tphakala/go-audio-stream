@@ -6,161 +6,135 @@ import (
 	"strings"
 )
 
-// renderReport returns the paste-ready markdown report for r. All values
-// come from r and env (injected), so the output is deterministic. The URL
-// is already redacted in r.RedactedURL; no credentials and no local file
-// paths appear (ListenResult carries no path field, so a written WAV can
-// never surface one here).
+// reportFence wraps the whole report in one code block. A fenced block survives
+// copy-paste verbatim (GitHub renders it as a single code block, preserving
+// alignment) and an LLM parses the key:value text unambiguously, which is the
+// point: reports are pasted into issues for a maintainer or an LLM to debug
+// from. Untrusted stream-derived fields are sanitized (see sanitizeLine) so a
+// hostile camera cannot break out of the fence.
+const reportFence = "```"
+
+// renderReport returns the paste-ready report for r: one fenced code block of
+// plain, sectioned key:value text, no markdown tables. Every PII-bearing field
+// (the target, the failure reason, the Server header, the raw fmtp) is already
+// redacted in r, and no local file path appears (ListenResult carries none).
 //
 //nolint:gocritic // hugeParam: Report/Env match renderWalkthrough; called once per run.
 func renderReport(r Report, env Env) string {
-	blocks := []string{reportHeader(&r, env)}
-	if b := reportHandshake(&r); b != "" {
-		blocks = append(blocks, b)
-	}
-	if b := reportSessionDetails(&r); b != "" {
-		blocks = append(blocks, b)
-	}
-	if b := reportTracks(&r); b != "" {
-		blocks = append(blocks, b)
-	}
-	if b := reportCapture(&r); b != "" {
-		blocks = append(blocks, b)
-	}
-	if b := reportListen(&r); b != "" {
-		blocks = append(blocks, b)
-	}
-	return strings.Join(blocks, "\n\n") + "\n"
-}
-
-// reportHeader renders the title and the Target/Result/Tool summary lines.
-func reportHeader(r *Report, env Env) string {
 	var b strings.Builder
-	fmt.Fprintln(&b, "### stream-doctor report")
-	fmt.Fprintln(&b)
-	fmt.Fprintf(&b, "**Target:** `%s`\n", r.RedactedURL)
-	fmt.Fprintf(&b, "**Result:** %s\n", r.Result)
-	fmt.Fprintf(&b, "**Tool:** go-audio-stream/stream-doctor %s (%s/%s)", env.Version, env.OS, env.Arch)
+	fmt.Fprintln(&b, reportFence)
+	fmt.Fprintf(&b, "stream-doctor %s (%s/%s)\n", env.Version, env.OS, env.Arch)
+	fmt.Fprintf(&b, "target: %s\n", r.RedactedURL)
+	fmt.Fprintf(&b, "result: %s\n", r.Result)
+	reportHandshake(&b, &r)
+	reportSession(&b, &r)
+	writeTracksSection(&b, r.Tracks)
+	reportNoAudio(&b, &r)
+	reportCapture(&b, &r)
+	reportListen(&b, &r)
+	fmt.Fprintln(&b, reportFence)
 	return b.String()
 }
 
-// reportHandshake renders the handshake step table, or "" when there is
-// nothing to show. A successful CAPTURE step is omitted, matching
-// renderWalkthrough: its detail is the dedicated Capture block.
-func reportHandshake(r *Report) string {
-	rows := make([]HandshakeStep, 0, len(r.Steps))
+// reportStepFmt aligns the handshake step lines: name, status, elapsed.
+const reportStepFmt = "  %-10s%-6s%s\n"
+
+// reportHandshake writes the handshake step list and, when a step failed, a
+// dedicated failure line naming the step and its (already scrubbed) reason. A
+// successful CAPTURE step is omitted; its detail is the capture block.
+func reportHandshake(b *strings.Builder, r *Report) {
+	fmt.Fprintln(b)
+	fmt.Fprintln(b, "handshake")
+	var failed *HandshakeStep
 	for i := range r.Steps {
 		s := r.Steps[i]
 		if s.Name == stepCapture && s.OK {
 			continue
 		}
-		rows = append(rows, s)
-	}
-	if len(rows) == 0 {
-		return ""
-	}
-
-	var b strings.Builder
-	fmt.Fprintln(&b, "**Handshake**")
-	fmt.Fprintln(&b)
-	fmt.Fprintln(&b, "| Step | Status | Time |")
-	fmt.Fprintln(&b, "| --- | --- | --- |")
-	for i, s := range rows {
-		if i == len(rows)-1 {
-			fmt.Fprintf(&b, "| %s | %s | %s |", s.Name, stepStatus(s.OK), formatElapsed(s.Elapsed))
-		} else {
-			fmt.Fprintf(&b, "| %s | %s | %s |\n", s.Name, stepStatus(s.OK), formatElapsed(s.Elapsed))
+		fmt.Fprintf(b, reportStepFmt, s.Name, stepStatus(s.OK), formatElapsed(s.Elapsed))
+		if !s.OK && failed == nil {
+			failed = &r.Steps[i]
 		}
 	}
-	return b.String()
+	if failed != nil {
+		// The reason is on its own line, not a table cell, so a long error
+		// string stays readable. Detail was scrubbed at failStep.
+		fmt.Fprintf(b, "failure: %s - %s\n", failed.Name, failed.Detail)
+	}
 }
 
-// reportSessionDetails renders the auth/session/keepalive/transport bullet
-// list, shown once DIAL has negotiated a session; "" before that. The
-// session timeout and transport channels are populated by SETUP (see
-// rtsp.SessionInfo), so those two lines are shown only once SETUP has
-// succeeded, never as misleading zero values on an earlier failure.
-func reportSessionDetails(r *Report) string {
+// reportSession writes the negotiated session block once DIAL has succeeded.
+// The session timeout and transport are populated by SETUP, so those two lines
+// appear only once SETUP has succeeded, never as misleading zero values.
+func reportSession(b *strings.Builder, r *Report) {
 	if !hasStepOK(r.Steps, stepDial) {
-		return ""
+		return
 	}
+	fmt.Fprintln(b)
+	fmt.Fprintln(b, "session")
+	if r.Session.Server != "" {
+		fmt.Fprintf(b, "  server: %s\n", r.Session.Server)
+	}
+	fmt.Fprintf(b, "  auth: %s\n", r.Session.AuthScheme)
 	setupOK := hasStepOK(r.Steps, stepSetup)
-	var b strings.Builder
-	fmt.Fprintf(&b, "- Auth: %s\n", r.Session.AuthScheme)
 	if setupOK {
-		fmt.Fprintf(&b, "- Session timeout: %ds\n", int(r.Session.SessionTimeout.Seconds()))
+		fmt.Fprintf(b, "  session-timeout: %ds\n", int(r.Session.SessionTimeout.Seconds()))
 	}
-	fmt.Fprintf(&b, "- Keepalive: %s", r.Session.KeepaliveMethod)
+	fmt.Fprintf(b, "  keepalive: %s\n", r.Session.KeepaliveMethod)
 	if setupOK {
-		fmt.Fprintf(&b, "\n- Transport: TCP interleaved, %s", channelStr(&r.Session, r.AudioTrack.ID))
+		fmt.Fprintf(b, "  transport: TCP interleaved, %s\n", channelStr(&r.Session, r.AudioTrack.ID))
 	}
-	return b.String()
 }
 
-// reportTracks renders the SDP track summary table, or "" when no tracks
-// were discovered.
-func reportTracks(r *Report) string {
-	if len(r.Tracks) == 0 {
-		return ""
+// reportNoAudio writes the no-audio-track notice when Describe succeeded but no
+// audio track was present.
+func reportNoAudio(b *strings.Builder, r *Report) {
+	if r.HaveAudio || !hasStepOK(r.Steps, stepDescribe) {
+		return
 	}
-	var b strings.Builder
-	fmt.Fprintln(&b, "**Tracks**")
-	fmt.Fprintln(&b)
-	fmt.Fprintln(&b, "| # | Kind | Codec | Clock | Ch | Depacketize |")
-	fmt.Fprintln(&b, "| --- | --- | --- | --- | --- | --- |")
-	for i := range r.Tracks {
-		t := r.Tracks[i]
-		row := fmt.Sprintf("| %s | %s | %s | %s | %s | %s |",
-			strconv.Itoa(t.ID), t.Media.String(), codecName(t.Codec), strconv.Itoa(t.ClockRate),
-			channelsCell(t.Channels), depacketizeCell(decodable(t)))
-		if i == len(r.Tracks)-1 {
-			fmt.Fprint(&b, row)
-		} else {
-			fmt.Fprintln(&b, row)
-		}
-	}
-	return b.String()
+	fmt.Fprintln(b)
+	fmt.Fprintln(b, "no audio track found")
 }
 
-// reportCapture renders the capture statistics block, or "" when capture
-// never ran.
-func reportCapture(r *Report) string {
+// reportCapture writes the capture statistics block, or nothing when capture
+// never ran. Malformed and ssrc-resets are library-health counters: a climbing
+// malformed count points at a codec or framing mismatch.
+func reportCapture(b *strings.Builder, r *Report) {
 	if !r.CaptureShown {
-		return ""
+		return
 	}
-	var b strings.Builder
-	fmt.Fprintf(&b, "**Capture (%s, track %d, ended: %s)**\n", r.Window, r.AudioTrack.ID, endReasonPhrase(r.Reason))
-	fmt.Fprintln(&b)
-	fmt.Fprintln(&b, "| Metric | Value |")
-	fmt.Fprintln(&b, "| --- | --- |")
-	fmt.Fprintf(&b, "| Packets | %d |\n", r.Capture.Packets)
-	fmt.Fprintf(&b, "| Bytes | %d |\n", r.Capture.Bytes)
-	fmt.Fprintf(&b, "| Lost | %d (%.2f%%) |\n", r.Capture.Lost, r.Capture.LossRatio*100)
-	fmt.Fprintf(&b, "| Max gap | %d |\n", r.Capture.MaxGap)
-	fmt.Fprintf(&b, "| Bitrate | %.1f kbit/s |\n", r.Capture.Bitrate/1000)
-	fmt.Fprintf(&b, "| Jitter | %.2f ms |", r.Capture.JitterMS)
-	return b.String()
+	c := r.Capture
+	fmt.Fprintln(b)
+	fmt.Fprintf(b, "capture: track %d, window %s, ended %s\n",
+		r.AudioTrack.ID, r.Window, endReasonPhrase(r.Reason))
+	fmt.Fprintf(b, "  packets: %d\n", c.Packets)
+	fmt.Fprintf(b, "  bytes: %d\n", c.Bytes)
+	fmt.Fprintf(b, "  lost: %d (%.2f%%)\n", c.Lost, c.LossRatio*100)
+	fmt.Fprintf(b, "  malformed: %d\n", c.Malformed)
+	fmt.Fprintf(b, "  ssrc-resets: %d\n", c.SSRCResets)
+	fmt.Fprintf(b, "  max-gap: %d\n", c.MaxGap)
+	fmt.Fprintf(b, "  bitrate: %.1f kbit/s\n", c.Bitrate/1000)
+	fmt.Fprintf(b, "  jitter: %.2f ms\n", c.JitterMS)
 }
 
-// reportListen renders the Listen line, or "" when the check never ran
+// reportListen writes the listen line, or nothing when the check never ran
 // (Report.Listen's zero value). It never mentions the --wav output path:
 // ListenResult carries no path field.
-func reportListen(r *Report) string {
+func reportListen(b *strings.Builder, r *Report) {
 	switch {
 	case r.Listen.Written:
 		seconds := listenSeconds(r.Listen)
-		return fmt.Sprintf("**Listen:** wrote %.1fs of %d Hz %s s16 PCM",
+		fmt.Fprintln(b)
+		fmt.Fprintf(b, "listen: wrote %.1fs of %d Hz %s s16 PCM\n",
 			seconds, r.Listen.SampleRate, channelsLabel(r.Listen.Channels))
 	case r.Listen.Skipped:
-		return fmt.Sprintf("**Listen:** skipped: %s", r.Listen.SkipReason)
-	default:
-		return ""
+		fmt.Fprintln(b)
+		fmt.Fprintf(b, "listen: skipped: %s\n", r.Listen.SkipReason)
 	}
 }
 
-// endReasonPhrase maps an EndReason to the report's longer prose phrase.
-// It is distinct from EndReason.String, which renders the walkthrough's
-// short label.
+// endReasonPhrase maps an EndReason to the report's longer prose phrase. It is
+// distinct from EndReason.String, which renders the walkthrough's short label.
 func endReasonPhrase(r EndReason) string {
 	switch r {
 	case EndCompleted:
@@ -180,7 +154,8 @@ func endReasonPhrase(r EndReason) string {
 	}
 }
 
-// channelsLabel renders a channel count as "mono", "stereo", or "Nch".
+// channelsLabel renders a channel count as "mono", "stereo", or "Nch". Shared
+// by reportListen and renderListen.
 func channelsLabel(n int) string {
 	switch n {
 	case 1:
@@ -188,6 +163,6 @@ func channelsLabel(n int) string {
 	case 2:
 		return "stereo"
 	default:
-		return fmt.Sprintf("%dch", n)
+		return strconv.Itoa(n) + "ch"
 	}
 }

@@ -120,7 +120,7 @@ func TestRunListenWritesWAV(t *testing.T) {
 	if info.Size() == 0 {
 		t.Error("--wav file is empty")
 	}
-	if !strings.Contains(out.String(), "Listen:") {
+	if !strings.Contains(out.String(), "listen:") {
 		t.Errorf("report (out) missing the Listen line:\n%s", out.String())
 	}
 }

@@ -17,6 +17,15 @@ type CaptureStats struct {
 	// Lost is the number of packets lost per sequence tracking (from the
 	// library Stats.SeqGaps).
 	Lost uint64
+	// Malformed is the number of packets the library discarded without
+	// delivering (from the library Stats.Malformed): an unparseable RTP
+	// header, a payload type the track does not carry, or a depacketizer
+	// rejecting the payload. A climbing count points at a codec or framing
+	// mismatch worth reporting.
+	Malformed uint64
+	// SSRCResets is the number of mid-stream SSRC changes the library
+	// tolerated (from the library Stats.SSRCResets).
+	SSRCResets uint64
 	// MaxGap is the largest single sequence-number gap observed across
 	// frames.
 	MaxGap int
@@ -35,9 +44,11 @@ type CaptureStats struct {
 // TrackStats counters, the track clock rate, and the elapsed capture time.
 func computeStats(frames []CapturedFrame, lib audiostream.TrackStats, clockRate int, elapsed time.Duration) CaptureStats {
 	stats := CaptureStats{
-		Packets: lib.Packets,
-		Bytes:   lib.Bytes,
-		Lost:    lib.SeqGaps,
+		Packets:    lib.Packets,
+		Bytes:      lib.Bytes,
+		Lost:       lib.SeqGaps,
+		Malformed:  lib.Malformed,
+		SSRCResets: lib.SSRCResets,
 	}
 
 	if denom := stats.Packets + stats.Lost; denom > 0 {

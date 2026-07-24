@@ -88,7 +88,7 @@ func (r *runner) dial() bool {
 		r.failStep(stepDial, elapsed, PhaseDial, "connection failed", err)
 		return false
 	}
-	r.report.Session = r.prober.SessionInfo()
+	r.refreshSession()
 	r.okStep(stepDial, elapsed, dialDetail(&r.report.Session))
 	return true
 }
@@ -104,6 +104,12 @@ func (r *runner) describe() bool {
 	if err != nil {
 		r.failStep(stepDescribe, elapsed, PhaseDescribe, "describe failed", err)
 		return false
+	}
+	// Scrub the raw fmtp of every track once, at the boundary: it is
+	// camera-controlled text that both renderers display, so a hostile stream
+	// cannot leak PII or break the report's code fence through it.
+	for i := range tracks {
+		tracks[i].FMTP = r.scrubber.scrubString(tracks[i].FMTP)
 	}
 	r.report.Tracks = tracks
 	r.okStep(stepDescribe, elapsed, describeDetail(tracks))
@@ -155,7 +161,7 @@ func (r *runner) setup() bool {
 		r.failStep(stepSetup, elapsed, PhaseSetup, "setup failed", err)
 		return false
 	}
-	r.report.Session = r.prober.SessionInfo()
+	r.refreshSession()
 	r.okStep(stepSetup, elapsed, setupDetail(&r.report.Session, audio, r.discarded))
 	return true
 }
@@ -167,7 +173,7 @@ func (r *runner) play() bool {
 		r.failStep(stepPlay, elapsed, PhasePlay, "play failed", err)
 		return false
 	}
-	r.report.Session = r.prober.SessionInfo()
+	r.refreshSession()
 	r.okStep(stepPlay, elapsed, playDetail(&r.report.Session))
 	return true
 }
@@ -295,6 +301,15 @@ func (r *runner) render() {
 		return
 	}
 	renderWalkthrough(r.out, r.report, r.env)
+}
+
+// refreshSession snapshots the negotiated session into the report and scrubs
+// the Server header once at the boundary: it is camera-controlled text that
+// both renderers display, so it must not leak PII or break the report's code
+// fence. Called after each step that can advance the negotiated details.
+func (r *runner) refreshSession() {
+	r.report.Session = r.prober.SessionInfo()
+	r.report.Session.Server = r.scrubber.scrubString(r.report.Session.Server)
 }
 
 // okStep appends a successful handshake step.

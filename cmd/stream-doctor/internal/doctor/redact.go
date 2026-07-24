@@ -81,5 +81,34 @@ func (s piiScrubber) scrubError(err error) string {
 		return "invalid URL"
 	}
 	out := s.replacer.Replace(err.Error())
-	return ipLiteralPattern.ReplaceAllString(out, redactedToken)
+	out = ipLiteralPattern.ReplaceAllString(out, redactedToken)
+	return sanitizeLine(out)
+}
+
+// scrubString removes PII (the target host and any resolved IP) from an
+// arbitrary stream-derived display string and makes it safe for the single-line
+// fenced report. It is the non-error sibling of scrubError, used for the RTSP
+// Server header and the raw fmtp, values a camera controls. An empty input
+// stays empty so callers can omit the line.
+func (s piiScrubber) scrubString(in string) string {
+	if in == "" {
+		return ""
+	}
+	out := s.replacer.Replace(in)
+	out = ipLiteralPattern.ReplaceAllString(out, redactedToken)
+	return sanitizeLine(out)
+}
+
+// lineSanitizer collapses the characters that would corrupt the single-line,
+// code-fenced report layout.
+var lineSanitizer = strings.NewReplacer("\r", " ", "\n", " ", "`", "'")
+
+// sanitizeLine makes s safe to place on one line inside the report's code
+// fence: CR and LF (which would inject extra lines or forge list items) become
+// spaces, and backticks (which could break out of the surrounding fence)
+// become single quotes. Every untrusted stream-derived string that reaches the
+// output passes through it, so a hostile camera cannot escape the fence or forge
+// report structure.
+func sanitizeLine(s string) string {
+	return lineSanitizer.Replace(s)
 }
