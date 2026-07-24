@@ -107,6 +107,14 @@ func parseArgs(args []string) (Options, error) {
 	if opts.Duration <= 0 {
 		return Options{}, fmt.Errorf("%w: -duration must be positive, got %s", ErrUsage, opts.Duration)
 	}
+	if opts.Timeout <= 0 {
+		return Options{}, fmt.Errorf("%w: -timeout must be positive, got %s", ErrUsage, opts.Timeout)
+	}
+	// A zero read-idle disables the watchdog, so only a negative value is a
+	// usage error here.
+	if opts.ReadIdle < 0 {
+		return Options{}, fmt.Errorf("%w: -read-idle must not be negative, got %s", ErrUsage, opts.ReadIdle)
+	}
 
 	return opts, nil
 }

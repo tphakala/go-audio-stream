@@ -191,3 +191,17 @@ func TestRTSPProberDropsTrackZeroBeforeSetup(t *testing.T) {
 		t.Errorf("len(frames) = %d, want 0 (track 0 must not be captured before Setup)", n)
 	}
 }
+
+// TestRTSPProberCloseAndSessionInfoBeforeDial asserts the two methods
+// documented as usable outside the Dial->...->Close sequence do not panic when
+// the client has not been created yet.
+func TestRTSPProberCloseAndSessionInfoBeforeDial(t *testing.T) {
+	t.Parallel()
+	p := newRTSPProber(Options{})
+	if err := p.Close(); err != nil {
+		t.Errorf("Close() before Dial = %v, want nil", err)
+	}
+	if got := p.SessionInfo(); got.SessionID != "" || got.KeepaliveMethod != "" || got.Channels != nil {
+		t.Errorf("SessionInfo() before Dial = %+v, want zero", got)
+	}
+}

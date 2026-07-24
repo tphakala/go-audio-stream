@@ -121,13 +121,21 @@ func (p *rtspProber) Play(ctx context.Context) error {
 	return p.client.Play(ctx)
 }
 
-// SessionInfo returns the negotiated session snapshot known so far.
+// SessionInfo returns the negotiated session snapshot known so far, or the zero
+// snapshot before Dial has created the client.
 func (p *rtspProber) SessionInfo() rtsp.SessionInfo {
+	if p.client == nil {
+		return rtsp.SessionInfo{}
+	}
 	return p.client.SessionInfo()
 }
 
-// Close ends the session; idempotent.
+// Close ends the session; idempotent, and safe before Dial has created the
+// client (so a deferred Close after construction does not panic).
 func (p *rtspProber) Close() error {
+	if p.client == nil {
+		return nil
+	}
 	return p.client.Close()
 }
 

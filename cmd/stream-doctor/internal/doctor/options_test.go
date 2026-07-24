@@ -8,7 +8,11 @@ import (
 
 const testStreamURL = "rtsp://cam/stream"
 
-const durationFlag = "--duration"
+const (
+	durationFlag = "--duration"
+	timeoutFlag  = "--timeout"
+	readIdleFlag = "--read-idle"
+)
 
 func TestParseArgsDefaults(t *testing.T) {
 	t.Parallel()
@@ -40,8 +44,8 @@ func TestParseArgsAllFlags(t *testing.T) {
 	t.Parallel()
 	args := []string{
 		durationFlag, "5s",
-		"--timeout", "3s",
-		"--read-idle", "7s",
+		timeoutFlag, "3s",
+		readIdleFlag, "7s",
 		"--wav", "out.wav",
 		"--report",
 		"--insecure-tls",
@@ -120,5 +124,26 @@ func TestParseArgsNonPositiveDuration(t *testing.T) {
 		if _, err := parseArgs([]string{durationFlag, arg, testStreamURL}); !errors.Is(err, ErrUsage) {
 			t.Errorf("parseArgs(%s %s) error = %v, want ErrUsage", durationFlag, arg, err)
 		}
+	}
+}
+
+func TestParseArgsNonPositiveTimeout(t *testing.T) {
+	t.Parallel()
+	for _, arg := range []string{"0s", "-5s"} {
+		if _, err := parseArgs([]string{timeoutFlag, arg, testStreamURL}); !errors.Is(err, ErrUsage) {
+			t.Errorf("parseArgs(%s %s) error = %v, want ErrUsage", timeoutFlag, arg, err)
+		}
+	}
+}
+
+func TestParseArgsReadIdle(t *testing.T) {
+	t.Parallel()
+	// A negative read-idle is a usage error.
+	if _, err := parseArgs([]string{readIdleFlag, "-1s", testStreamURL}); !errors.Is(err, ErrUsage) {
+		t.Errorf("parseArgs(%s -1s) error = %v, want ErrUsage", readIdleFlag, err)
+	}
+	// A zero read-idle is allowed: it disables the watchdog.
+	if _, err := parseArgs([]string{readIdleFlag, "0s", testStreamURL}); err != nil {
+		t.Errorf("parseArgs(%s 0s) error = %v, want nil (0 disables the watchdog)", readIdleFlag, err)
 	}
 }
