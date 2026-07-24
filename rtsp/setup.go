@@ -96,6 +96,9 @@ func (c *Client) Setup(ctx context.Context, trk Track, opts SetupOptions) error 
 // selects. The gate and the lookup share one critical section because both read
 // mu-guarded state that a concurrent shutdown may change between them.
 func (c *Client) describedTrackFor(trk *Track) (describedTrack, error) {
+	if trk == nil {
+		return describedTrack{}, fmt.Errorf("%w: nil track", ErrUnknownTrack)
+	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if serr := c.requireState(methodSetup); serr != nil {
