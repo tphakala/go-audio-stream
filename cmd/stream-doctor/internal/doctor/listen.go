@@ -179,10 +179,12 @@ func writeWAVAAC(w io.Writer, track rtsp.Track, frames []CapturedFrame) (ListenR
 		return ListenResult{}, err
 	}
 
-	bytesPerFrame := 2 * info.Channels
+	bytesPerFrame := int64(2 * info.Channels)
 	var frameCount int
 	if bytesPerFrame > 0 {
-		frameCount = int(written) / bytesPerFrame
+		// written is int64; divide before narrowing so a >2 GiB decode does
+		// not wrap on 32-bit builds. The quotient (a frame count) fits int.
+		frameCount = int(written / bytesPerFrame)
 	}
 
 	return ListenResult{

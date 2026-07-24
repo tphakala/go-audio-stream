@@ -14,7 +14,7 @@ import (
 // golden markdown fixture (testdata/report_golden.md).
 func goldenReport() Report {
 	return Report{
-		RedactedURL: "rtsp://REDACTED@cam.example:554/Preview_01_main",
+		RedactedURL: "rtsp://[redacted]/Preview_01_main",
 		Result:      "capture OK",
 		Steps: []HandshakeStep{
 			{Name: stepDial, OK: true, Elapsed: 12 * time.Millisecond},
@@ -57,18 +57,21 @@ func TestRenderReportGolden(t *testing.T) {
 func TestRenderReportRedaction(t *testing.T) {
 	t.Parallel()
 	r := goldenReport()
-	r.RedactedURL = rtsp.RedactURL("rtsp://admin:hunter2@cam:554/s")
+	r.RedactedURL = redactTarget("rtsp://admin:hunter2@cam:554/s")
 	r.Listen = ListenResult{Written: true, SampleRate: 16000, Channels: 1, Frames: 160000}
 
 	got := renderReport(r, testEnv())
-	if !strings.Contains(got, "REDACTED") {
-		t.Error("report does not contain REDACTED")
+	if !strings.Contains(got, redactedToken) {
+		t.Errorf("report does not contain the redaction token %q", redactedToken)
 	}
 	if strings.Contains(got, "hunter2") {
 		t.Error("report leaks the password")
 	}
 	if strings.Contains(got, "admin") {
 		t.Error("report leaks the username")
+	}
+	if strings.Contains(got, "cam") {
+		t.Error("report leaks the host")
 	}
 	// ListenResult carries no path field, so a written WAV can never surface
 	// a local file path in the report; this asserts the intended shape of
@@ -81,7 +84,7 @@ func TestRenderReportRedaction(t *testing.T) {
 func TestRenderReportUnsupported(t *testing.T) {
 	t.Parallel()
 	r := Report{
-		RedactedURL: "rtsp://REDACTED@cam.example:554/stream",
+		RedactedURL: redactedStreamURL,
 		Result:      "unsupported audio codec",
 		Steps: []HandshakeStep{
 			{Name: stepDial, OK: true, Elapsed: 5 * time.Millisecond},

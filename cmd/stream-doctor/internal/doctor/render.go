@@ -101,6 +101,7 @@ func renderWalkthrough(w io.Writer, r Report, env Env) {
 	renderTracks(&b, &r)
 	renderNoAudio(&b, &r)
 	renderCapture(&b, &r)
+	renderListen(&b, &r)
 	_, _ = io.WriteString(w, b.String())
 }
 
@@ -164,6 +165,24 @@ func renderCapture(b *strings.Builder, r *Report) {
 	fmt.Fprintf(b, captureInt, "max gap", r.Capture.MaxGap)
 	fmt.Fprintf(b, "  %-10s%.1f kbit/s\n", "bitrate", r.Capture.Bitrate/1000)
 	fmt.Fprintf(b, "  %-10s%.2f ms\n", "jitter", r.Capture.JitterMS)
+}
+
+// renderListen writes the listen-check outcome line, or nothing when the check
+// never ran (Report.Listen's zero value), so a --wav run surfaces the written
+// or skipped result on the default walkthrough path, not only under --report.
+func renderListen(b *strings.Builder, r *Report) {
+	switch {
+	case r.Listen.Written:
+		seconds := 0.0
+		if r.Listen.SampleRate > 0 {
+			seconds = float64(r.Listen.Frames) / float64(r.Listen.SampleRate)
+		}
+		fmt.Fprintln(b)
+		fmt.Fprintf(b, "listen: wrote %.1fs of %d Hz %s s16 PCM\n", seconds, r.Listen.SampleRate, channelsLabel(r.Listen.Channels))
+	case r.Listen.Skipped:
+		fmt.Fprintln(b)
+		fmt.Fprintf(b, "listen: skipped: %s\n", r.Listen.SkipReason)
+	}
 }
 
 // stepStatus renders the ok/FAIL column for a handshake step.
@@ -274,12 +293,4 @@ func pluralSuffix(n int) string {
 		return ""
 	}
 	return "s"
-}
-
-// failReason renders a step's failure detail from its terminal error.
-func failReason(err error) string {
-	if err == nil {
-		return ""
-	}
-	return err.Error()
 }

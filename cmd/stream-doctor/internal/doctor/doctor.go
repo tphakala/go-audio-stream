@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"time"
 
 	audiostream "github.com/tphakala/go-audio-stream"
@@ -37,8 +38,9 @@ func Run(ctx context.Context, opts Options, prober Prober, out io.Writer, errOut
 		out:    out,
 		errOut: errOut,
 		env:    env,
-		now:    now,
-		report: Report{RedactedURL: rtsp.RedactURL(opts.URL), Window: opts.Duration},
+		now:      now,
+		scrubber: newPIIScrubber(opts.URL),
+		report:   Report{RedactedURL: redactTarget(opts.URL), Window: opts.Duration},
 	}
 	return r.run()
 }
@@ -54,6 +56,7 @@ type runner struct {
 	env    Env
 	now    func() time.Time
 
+	scrubber  piiScrubber
 	report    Report
 	res       Result
 	termErr   error
@@ -161,7 +164,7 @@ func (r *runner) setup() bool {
 func (r *runner) play() bool {
 	elapsed, err := timed(r.now, func() error { return r.prober.Play(r.ctx) })
 	if err != nil {
-		r.failStep(stepPlay, elapsed, PhasePlay, "connection failed", err)
+		r.failStep(stepPlay, elapsed, PhasePlay, "play failed", err)
 		return false
 	}
 	r.report.Session = r.prober.SessionInfo()
@@ -196,14 +199,15 @@ func (r *runner) capture() {
 	r.report.Steps = append(r.report.Steps, HandshakeStep{Name: stepCapture, OK: ok, Elapsed: cr.Elapsed, Detail: detail})
 }
 
-// finish sets the Report result phrase from the capture outcome. The listen
-// check and its Report.Listen population arrive in Task 4.
+// finish sets the Report result phrase from the capture outcome. The ordering
+// matches mapExitClean's precedence (unsupported codec before zero frames) so
+// the human phrase and the exit code always agree.
 func (r *runner) finish() {
 	switch {
-	case r.res.FramesCaptured == 0:
-		r.report.Result = "no audio captured"
 	case !r.res.CodecSupported:
 		r.report.Result = "unsupported codec"
+	case r.res.FramesCaptured == 0:
+		r.report.Result = "no audio captured"
 	default:
 		r.report.Result = "capture OK"
 	}
@@ -221,21 +225,50 @@ func (r *runner) listen() {
 		return
 	}
 
-	f, err := os.Create(r.opts.WAVPath)
+	// Write to a temp file in the destination directory and rename it into
+	// place only on success, so a decode or write failure, or an interrupted
+	// run, never truncates the destination or leaves a partial WAV, and an
+	// unsupported codec (Skipped, nothing written) never clobbers an existing
+	// file at the --wav path.
+	dir := filepath.Dir(r.opts.WAVPath)
+	tmp, err := os.CreateTemp(dir, ".stream-doctor-*.wav")
 	if err != nil {
 		// The raw OS error typically embeds the file path; the report never
 		// shows the --wav path (privacy), so a generic reason is used here
 		// instead of err.Error().
-		r.report.Listen = ListenResult{Skipped: true, SkipReason: "could not open the WAV output file"}
+		r.report.Listen = ListenResult{Skipped: true, SkipReason: "could not create the WAV output file"}
 		return
 	}
-	defer func() { _ = f.Close() }()
+	tmpName := tmp.Name()
 
-	res, err := writeWAV(f, r.audio, r.frames)
-	if err != nil {
-		res = ListenResult{Skipped: true, SkipReason: sanitizeWriteErr(err)}
+	res, werr := writeWAV(tmp, r.audio, r.frames)
+	// A flush failure surfaces only at Close, so fold it into the write error
+	// rather than deferring and discarding it.
+	if closeErr := tmp.Close(); werr == nil {
+		werr = closeErr
 	}
-	r.report.Listen = res
+
+	switch {
+	case werr != nil:
+		_ = os.Remove(tmpName)
+		r.report.Listen = ListenResult{Skipped: true, SkipReason: sanitizeWriteErr(werr)}
+	case !res.Written:
+		// A Skipped result (unsupported codec, a quirky stream) wrote nothing;
+		// discard the empty temp and leave the destination untouched.
+		_ = os.Remove(tmpName)
+		r.report.Listen = res
+	default:
+		if renameErr := os.Rename(tmpName, r.opts.WAVPath); renameErr != nil {
+			// os.Rename returns an *os.LinkError carrying both the temp and the
+			// destination paths, which sanitizeWriteErr (a *os.PathError
+			// stripper) would not scrub; the report never shows a path, so use
+			// a generic reason as the CreateTemp branch above does.
+			_ = os.Remove(tmpName)
+			r.report.Listen = ListenResult{Skipped: true, SkipReason: "could not finalize the WAV output file"}
+			return
+		}
+		r.report.Listen = res
+	}
 }
 
 // sanitizeWriteErr redacts a writeWAV failure for the report's SkipReason.
@@ -272,7 +305,7 @@ func (r *runner) okStep(name string, elapsed time.Duration, detail string) {
 // failStep appends a failed handshake step and records the phase, result
 // phrase, and terminal error for mapExit.
 func (r *runner) failStep(name string, elapsed time.Duration, phase Phase, phrase string, err error) {
-	r.report.Steps = append(r.report.Steps, HandshakeStep{Name: name, Elapsed: elapsed, Detail: failReason(err)})
+	r.report.Steps = append(r.report.Steps, HandshakeStep{Name: name, Elapsed: elapsed, Detail: r.scrubber.scrubError(err)})
 	r.report.Result = phrase
 	r.res.Phase = phase
 	r.termErr = err

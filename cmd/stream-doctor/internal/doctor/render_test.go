@@ -65,7 +65,7 @@ func TestRenderWalkthroughColumns(t *testing.T) {
 	t.Run("zero channels render dash", func(t *testing.T) {
 		t.Parallel()
 		r := Report{
-			RedactedURL: "rtsp://REDACTED@cam/stream",
+			RedactedURL: redactedStreamURL,
 			HaveAudio:   true,
 			Tracks: []rtsp.Track{
 				{ID: 2, Media: audiostream.MediaAudio, Codec: audiostream.CodecOpus{}, ClockRate: 48000, Channels: 0},
@@ -82,7 +82,7 @@ func TestRenderWalkthroughColumns(t *testing.T) {
 	t.Run("failed step omits later steps", func(t *testing.T) {
 		t.Parallel()
 		r := Report{
-			RedactedURL: "rtsp://REDACTED@cam/stream",
+			RedactedURL: redactedStreamURL,
 			Steps: []HandshakeStep{
 				{Name: "DIAL", OK: false, Detail: "connection refused"},
 			},

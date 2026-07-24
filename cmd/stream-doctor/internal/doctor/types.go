@@ -80,8 +80,7 @@ type Env struct {
 	Version string // Version in production
 }
 
-// ListenResult describes a written WAV (Task 4). Zero value means no listen
-// check ran.
+// ListenResult describes a written WAV. Zero value means no listen check ran.
 type ListenResult struct {
 	Written    bool
 	SampleRate int

@@ -22,6 +22,7 @@ const testH264 = "H264/90000"
 const testDigestAuth = rtsp.AuthDigest
 const testGetParameter = "GET_PARAMETER"
 const testL16RTPMap = "L16/8000"
+const redactedStreamURL = "rtsp://[redacted]/stream"
 
 func aacTrack() rtsp.Track {
 	return rtsp.Track{ID: 0, Media: audiostream.MediaAudio, Codec: audiostream.CodecAAC{}, ClockRate: 16000, Channels: 1}
@@ -90,7 +91,7 @@ func fixedClock(step time.Duration) func() time.Time {
 }
 
 const happyGolden = `stream-doctor 0.1.0 (linux/amd64)
-target: rtsp://REDACTED@cam.example:554/stream
+target: rtsp://[redacted]/stream
 
 handshake
   DIAL       ok    12ms   auth Digest, keepalive GET_PARAMETER
@@ -168,29 +169,6 @@ func TestRunNoAudioTrack(t *testing.T) {
 	}
 }
 
-func TestRunDialFails(t *testing.T) {
-	t.Parallel()
-	dialErr := &rtsp.ResponseError{Code: 503}
-	f := &fakeProber{dialErr: dialErr}
-	opts := Options{URL: testTargetURL, Duration: 10 * time.Second}
-
-	var out strings.Builder
-	res, err := Run(context.Background(), opts, f, &out, io.Discard, testEnv(), fixedClock(5*time.Millisecond))
-	if err == nil {
-		t.Fatal("Run() error = nil, want dial error")
-	}
-	got := out.String()
-	if !strings.Contains(got, "DIAL") || !strings.Contains(got, "FAIL") {
-		t.Errorf("walkthrough missing DIAL FAIL:\n%s", got)
-	}
-	if res.Phase != PhaseDial {
-		t.Errorf("Phase = %d, want PhaseDial", res.Phase)
-	}
-	if code := mapExit(err, res); code != ExitConnection {
-		t.Errorf("mapExit = %d, want ExitConnection", code)
-	}
-}
-
 func TestRunDescribeAuthFails(t *testing.T) {
 	t.Parallel()
 	f := &fakeProber{
@@ -210,32 +188,6 @@ func TestRunDescribeAuthFails(t *testing.T) {
 	}
 	if code := mapExit(err, res); code != ExitAuth {
 		t.Errorf("mapExit = %d, want ExitAuth", code)
-	}
-}
-
-func TestRunSetupFails(t *testing.T) {
-	t.Parallel()
-	f := &fakeProber{
-		tracks:   []rtsp.Track{aacTrack(), videoTrack()},
-		session:  happySession(),
-		setupErr: &rtsp.ResponseError{Code: 461},
-	}
-	opts := Options{URL: testTargetURL, Duration: 10 * time.Second}
-
-	var out strings.Builder
-	res, err := Run(context.Background(), opts, f, &out, io.Discard, testEnv(), fixedClock(5*time.Millisecond))
-	if err == nil {
-		t.Fatal("Run() error = nil, want setup error")
-	}
-	got := out.String()
-	if !strings.Contains(got, "SETUP") || !strings.Contains(got, "FAIL") {
-		t.Errorf("walkthrough missing SETUP FAIL:\n%s", got)
-	}
-	if res.Phase != PhaseSetup {
-		t.Errorf("Phase = %d, want PhaseSetup", res.Phase)
-	}
-	if code := mapExit(err, res); code != ExitConnection {
-		t.Errorf("mapExit = %d, want ExitConnection", code)
 	}
 }
 

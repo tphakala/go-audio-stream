@@ -1,6 +1,6 @@
 ### stream-doctor report
 
-**Target:** `rtsp://REDACTED@cam.example:554/Preview_01_main`
+**Target:** `rtsp://[redacted]/Preview_01_main`
 **Result:** capture OK
 **Tool:** go-audio-stream/stream-doctor 0.1.0 (linux/amd64)
 
