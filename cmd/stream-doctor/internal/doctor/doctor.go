@@ -303,8 +303,14 @@ func (r *runner) okStep(name string, elapsed time.Duration, detail string) {
 }
 
 // failStep appends a failed handshake step and records the phase, result
-// phrase, and terminal error for mapExit.
+// phrase, and terminal error for mapExit. An authentication failure
+// overrides the caller's per-step phrase so the report's Result always
+// agrees with mapExit's classification (ExitAuth), whichever step the 401
+// surfaced on.
 func (r *runner) failStep(name string, elapsed time.Duration, phase Phase, phrase string, err error) {
+	if isAuthErr(err) {
+		phrase = "authentication failed"
+	}
 	r.report.Steps = append(r.report.Steps, HandshakeStep{Name: name, Elapsed: elapsed, Detail: r.scrubber.scrubError(err)})
 	r.report.Result = phrase
 	r.res.Phase = phase

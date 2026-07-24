@@ -98,17 +98,25 @@ func mapExitErr(err error, res Result) int {
 	if errors.Is(err, ErrUsage) {
 		return ExitUsage
 	}
-	if errors.Is(err, rtsp.ErrAuthFailed) {
-		return ExitAuth
-	}
-	var unauthorized *rtsp.UnauthorizedError
-	if errors.As(err, &unauthorized) {
+	if isAuthErr(err) {
 		return ExitAuth
 	}
 	if res.Phase == PhaseCapture {
 		return ExitCapture
 	}
 	return ExitConnection
+}
+
+// isAuthErr reports whether err is an authentication failure: the client's
+// give-up sentinel, or a 401 challenge that could not be answered. Shared
+// by mapExitErr and failStep so the exit code and the report's result
+// phrase classify the same errors as auth failures.
+func isAuthErr(err error) bool {
+	if errors.Is(err, rtsp.ErrAuthFailed) {
+		return true
+	}
+	var unauthorized *rtsp.UnauthorizedError
+	return errors.As(err, &unauthorized)
 }
 
 // mapExitClean classifies a clean (nil-error) run by how far it got.

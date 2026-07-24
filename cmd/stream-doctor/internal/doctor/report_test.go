@@ -110,6 +110,31 @@ func TestRenderReportUnsupported(t *testing.T) {
 	}
 }
 
+func TestRenderReportSessionDetailsPreSetup(t *testing.T) {
+	t.Parallel()
+	// A run that fails before SETUP has negotiated no session timeout and
+	// no interleaved channels; the report must show only the DIAL-scoped
+	// lines (auth, keepalive), never a misleading "Session timeout: 0s" or
+	// "channels n/a".
+	r := Report{
+		RedactedURL: redactedStreamURL,
+		Result:      "authentication failed",
+		Steps: []HandshakeStep{
+			{Name: stepDial, OK: true, Elapsed: 5 * time.Millisecond},
+			{Name: stepDescribe, Elapsed: 5 * time.Millisecond, Detail: "auth failed"},
+		},
+		Session: rtsp.SessionInfo{AuthScheme: testDigestAuth, KeepaliveMethod: testGetParameter},
+	}
+
+	got := renderReport(r, testEnv())
+	if !strings.Contains(got, "- Auth: ") || !strings.Contains(got, "- Keepalive: "+testGetParameter) {
+		t.Errorf("report is missing the DIAL-scoped session lines:\n%s", got)
+	}
+	if strings.Contains(got, "Session timeout") || strings.Contains(got, "Transport") {
+		t.Errorf("report shows SETUP-scoped session lines before SETUP succeeded:\n%s", got)
+	}
+}
+
 func TestRenderReportEndReasons(t *testing.T) {
 	t.Parallel()
 	cases := []struct {

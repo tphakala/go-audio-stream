@@ -76,16 +76,24 @@ func reportHandshake(r *Report) string {
 }
 
 // reportSessionDetails renders the auth/session/keepalive/transport bullet
-// list, shown once DIAL has negotiated a session; "" before that.
+// list, shown once DIAL has negotiated a session; "" before that. The
+// session timeout and transport channels are populated by SETUP (see
+// rtsp.SessionInfo), so those two lines are shown only once SETUP has
+// succeeded, never as misleading zero values on an earlier failure.
 func reportSessionDetails(r *Report) string {
 	if !hasStepOK(r.Steps, stepDial) {
 		return ""
 	}
+	setupOK := hasStepOK(r.Steps, stepSetup)
 	var b strings.Builder
 	fmt.Fprintf(&b, "- Auth: %s\n", r.Session.AuthScheme)
-	fmt.Fprintf(&b, "- Session timeout: %ds\n", int(r.Session.SessionTimeout.Seconds()))
-	fmt.Fprintf(&b, "- Keepalive: %s\n", r.Session.KeepaliveMethod)
-	fmt.Fprintf(&b, "- Transport: TCP interleaved, %s", channelStr(&r.Session, r.AudioTrack.ID))
+	if setupOK {
+		fmt.Fprintf(&b, "- Session timeout: %ds\n", int(r.Session.SessionTimeout.Seconds()))
+	}
+	fmt.Fprintf(&b, "- Keepalive: %s", r.Session.KeepaliveMethod)
+	if setupOK {
+		fmt.Fprintf(&b, "\n- Transport: TCP interleaved, %s", channelStr(&r.Session, r.AudioTrack.ID))
+	}
 	return b.String()
 }
 
@@ -140,10 +148,7 @@ func reportCapture(r *Report) string {
 func reportListen(r *Report) string {
 	switch {
 	case r.Listen.Written:
-		seconds := 0.0
-		if r.Listen.SampleRate > 0 {
-			seconds = float64(r.Listen.Frames) / float64(r.Listen.SampleRate)
-		}
+		seconds := listenSeconds(r.Listen)
 		return fmt.Sprintf("**Listen:** wrote %.1fs of %d Hz %s s16 PCM",
 			seconds, r.Listen.SampleRate, channelsLabel(r.Listen.Channels))
 	case r.Listen.Skipped:

@@ -175,7 +175,7 @@ func TestRunDescribeAuthFails(t *testing.T) {
 		session:     happySession(),
 		describeErr: rtsp.ErrAuthFailed,
 	}
-	opts := Options{URL: testTargetURL, Duration: 10 * time.Second}
+	opts := Options{URL: testTargetURL, Duration: 10 * time.Second, Report: true}
 
 	var out strings.Builder
 	res, err := Run(context.Background(), opts, f, &out, io.Discard, testEnv(), fixedClock(5*time.Millisecond))
@@ -184,7 +184,10 @@ func TestRunDescribeAuthFails(t *testing.T) {
 	}
 	got := out.String()
 	if !strings.Contains(got, "DESCRIBE") || !strings.Contains(got, "FAIL") {
-		t.Errorf("walkthrough missing DESCRIBE FAIL:\n%s", got)
+		t.Errorf("report missing DESCRIBE FAIL:\n%s", got)
+	}
+	if !strings.Contains(got, "**Result:** authentication failed") {
+		t.Errorf("report result phrase does not match the auth exit classification:\n%s", got)
 	}
 	if code := mapExit(err, res); code != ExitAuth {
 		t.Errorf("mapExit = %d, want ExitAuth", code)

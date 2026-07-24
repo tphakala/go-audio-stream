@@ -82,7 +82,8 @@ func writeWAVG711(w io.Writer, track rtsp.Track, frames []CapturedFrame) (Listen
 // quirk: it is counted and skipped rather than aborting the whole capture.
 // A track advertising a channel count the codec cannot decode (outside 1
 // or 2) is Skipped at construction, the same treatment as a quirky AAC
-// AudioSpecificConfig.
+// AudioSpecificConfig; a capture in which every packet fails to decode is
+// likewise Skipped, never reported as a successfully written (empty) WAV.
 func writeWAVOpus(w io.Writer, track rtsp.Track, frames []CapturedFrame) (ListenResult, error) {
 	const opusSampleRate = 48000
 	ch := max(track.Channels, 1)
@@ -116,6 +117,11 @@ func writeWAVOpus(w io.Writer, track rtsp.Track, frames []CapturedFrame) (Listen
 	}
 	if err := enc.Close(); err != nil {
 		return ListenResult{}, err
+	}
+	if totalSamples == 0 && len(frames) > 0 {
+		// Every captured packet failed to decode: the stream is not usable
+		// Opus, a quirk worth surfacing rather than a clean, silent WAV.
+		return ListenResult{Skipped: true, SkipReason: "opus: no packets decoded"}, nil
 	}
 
 	return ListenResult{

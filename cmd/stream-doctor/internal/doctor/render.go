@@ -167,16 +167,24 @@ func renderCapture(b *strings.Builder, r *Report) {
 	fmt.Fprintf(b, "  %-10s%.2f ms\n", "jitter", r.Capture.JitterMS)
 }
 
+// listenSeconds returns the decoded audio duration for l in seconds, or 0
+// when the sample rate is unknown. Shared by renderListen and reportListen
+// so the walkthrough and the markdown report always agree on a run's
+// playback duration.
+func listenSeconds(l ListenResult) float64 {
+	if l.SampleRate <= 0 {
+		return 0
+	}
+	return float64(l.Frames) / float64(l.SampleRate)
+}
+
 // renderListen writes the listen-check outcome line, or nothing when the check
 // never ran (Report.Listen's zero value), so a --wav run surfaces the written
 // or skipped result on the default walkthrough path, not only under --report.
 func renderListen(b *strings.Builder, r *Report) {
 	switch {
 	case r.Listen.Written:
-		seconds := 0.0
-		if r.Listen.SampleRate > 0 {
-			seconds = float64(r.Listen.Frames) / float64(r.Listen.SampleRate)
-		}
+		seconds := listenSeconds(r.Listen)
 		fmt.Fprintln(b)
 		fmt.Fprintf(b, "listen: wrote %.1fs of %d Hz %s s16 PCM\n", seconds, r.Listen.SampleRate, channelsLabel(r.Listen.Channels))
 	case r.Listen.Skipped:

@@ -242,6 +242,32 @@ func TestWriteWAVUnsupported(t *testing.T) {
 	}
 }
 
+func TestWriteWAVOpusAllCorrupt(t *testing.T) {
+	t.Parallel()
+	// Structurally invalid Opus packets (RFC 6716: a code 3 packet needs a
+	// frame count byte after the TOC; a code 1 packet needs an even payload
+	// so the two frames split equally), so every decode fails. A capture in
+	// which nothing decodes must be reported as Skipped, never as a
+	// successfully written, empty WAV.
+	frames := []CapturedFrame{
+		{Data: []byte{0xff}},
+		{Data: []byte{0x01, 0x00}},
+	}
+	track := rtsp.Track{ID: 0, Media: audiostream.MediaAudio, Codec: audiostream.CodecOpus{}, ClockRate: 48000, Channels: 2}
+
+	var buf bytes.Buffer
+	res, err := writeWAV(&buf, track, frames)
+	if err != nil {
+		t.Fatalf("writeWAV returned an error instead of a Skipped result: %v", err)
+	}
+	if !res.Skipped || res.Written {
+		t.Fatalf("res = %+v, want Skipped and not Written", res)
+	}
+	if res.SkipReason == "" {
+		t.Error("SkipReason is empty")
+	}
+}
+
 func TestWriteWAVAACCorruptASC(t *testing.T) {
 	t.Parallel()
 	// A single byte cannot hold a valid AudioSpecificConfig (object type,
