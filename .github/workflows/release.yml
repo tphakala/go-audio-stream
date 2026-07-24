@@ -1,0 +1,81 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build stream-doctor binaries and create draft release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+        with:
+          # Full history so auto-generated notes can diff against the prior tag.
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version: '1.26.x'
+
+      - name: Build stream-doctor binaries
+        working-directory: cmd/stream-doctor
+        env:
+          # Pure-Go build: go-aac, go-opus, go-wav and simd carry no cgo, so a
+          # static cross-compile needs no C toolchain.
+          CGO_ENABLED: '0'
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME}"
+          outdir="${GITHUB_WORKSPACE}/dist"
+          mkdir -p "${outdir}"
+          for target in linux/amd64 linux/arm64 windows/amd64 darwin/arm64; do
+            goos="${target%/*}"; goarch="${target#*/}"
+            ext=""; [ "${goos}" = "windows" ] && ext=".exe"
+            bin="stream-doctor-${version}-${goos}-${goarch}${ext}"
+            echo "building ${bin}"
+            GOOS="${goos}" GOARCH="${goarch}" go build -trimpath \
+              -ldflags "-s -w" -o "${outdir}/${bin}" .
+          done
+          ( cd "${outdir}" && sha256sum stream-doctor-* > checksums.txt )
+          ls -l "${outdir}"
+
+      - name: Compose release notes preamble
+        working-directory: cmd/stream-doctor
+        run: |
+          set -euo pipefail
+          aac=$(go list -m -f '{{.Version}}' github.com/tphakala/go-aac)
+          opus=$(go list -m -f '{{.Version}}' github.com/tphakala/go-opus)
+          wav=$(go list -m -f '{{.Version}}' github.com/tphakala/go-wav)
+          {
+            echo "## go-audio-stream ${GITHUB_REF_NAME}"
+            echo
+            echo "RTSP 1.0 client library (package \`rtsp\`, zero runtime dependencies) plus the \`stream-doctor\` diagnostic CLI."
+            echo
+            echo "### stream-doctor binaries"
+            echo
+            echo "Prebuilt static binaries are attached below for linux (amd64, arm64), windows (amd64), and macos (arm64). Verify with \`checksums.txt\`."
+            echo
+            echo "Codec decoders bundled in stream-doctor: go-aac ${aac}, go-opus ${opus}, go-wav ${wav}."
+            echo
+          } > "${GITHUB_WORKSPACE}/notes-preamble.md"
+          cat "${GITHUB_WORKSPACE}/notes-preamble.md"
+
+      - name: Create draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        # Draft so the notes and binaries can be reviewed before publishing.
+        run: |
+          set -euo pipefail
+          gh release create "${GITHUB_REF_NAME}" \
+            --draft \
+            --title "${GITHUB_REF_NAME}" \
+            --notes-file "${GITHUB_WORKSPACE}/notes-preamble.md" \
+            --generate-notes \
+            "${GITHUB_WORKSPACE}"/dist/*
