@@ -136,4 +136,9 @@ func TestCodecsAACFmtpWhitespaceAndMissingEquals(t *testing.T) {
 	if p := tracks[0].AAC; p == nil || p.SizeLength != 13 || !strings.EqualFold(p.Mode, "AAC-hbr") {
 		t.Errorf("AAC params = %+v, want sizelength 13 mode AAC-hbr", p)
 	}
+	// The raw fmtp params (everything after the payload type) are retained
+	// verbatim for diagnostics, whitespace and bare flags included.
+	if want := "mode=AAC-hbr; sizelength=13 ; config= 1408 ;cpresent"; tracks[0].FMTP != want {
+		t.Errorf("FMTP = %q, want %q", tracks[0].FMTP, want)
+	}
 }

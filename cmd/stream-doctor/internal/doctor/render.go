@@ -1,6 +1,7 @@
 package doctor
 
 import (
+	"encoding/hex"
 	"fmt"
 	"io"
 	"strconv"
@@ -14,9 +15,10 @@ import (
 // Fixed column format strings for the walkthrough. Widths are constants so the
 // golden output is byte-stable.
 const (
-	stepRowFmt  = "  %-11s%s%8s   %s\n"            // name, status, elapsed, detail
-	trackRowFmt = "  %-3s%-7s%-21s%5s   %2s  %s\n" // id, kind, codec, clock, ch, depacketize
-	captureInt  = "  %-10s%d\n"                    // label, integer value
+	stepRowFmt = "  %-11s%s%8s   %s\n" // name, status, elapsed, detail
+	// captureInt's label column is wide enough for the longest capture label
+	// ("ssrc-resets") plus a separating space.
+	captureInt = "  %-12s%d\n" // label, integer value
 )
 
 // unknownLabel is the codec/reason fallback label.
@@ -88,6 +90,49 @@ func decodable(t rtsp.Track) bool {
 	}
 }
 
+// ascHex returns the AAC AudioSpecificConfig as lowercase hex, or "" for a
+// non-AAC codec or an AAC track whose ASC was absent. The ASC encodes the
+// object type, sample rate, and channel configuration a maintainer needs to
+// reproduce an AAC decode issue. Hex only, so it carries no PII.
+func ascHex(c audiostream.Codec) string {
+	aac, ok := c.(audiostream.CodecAAC)
+	if !ok || len(aac.AudioSpecificConfig) == 0 {
+		return ""
+	}
+	return hex.EncodeToString(aac.AudioSpecificConfig)
+}
+
+// writeTracksSection writes the "tracks" block: one labeled line per track and,
+// under each audio track, the raw fmtp and the AAC ASC hex when present. Shared
+// by the walkthrough and the report so both stay table-free and identical; both
+// receive tracks whose camera-controlled strings (the raw fmtp and a
+// CodecUnknown's rtpmap) were already scrubbed at the orchestration boundary.
+func writeTracksSection(b *strings.Builder, tracks []rtsp.Track) {
+	if len(tracks) == 0 {
+		return
+	}
+	fmt.Fprintln(b)
+	fmt.Fprintln(b, "tracks")
+	for i := range tracks {
+		t := tracks[i]
+		// codecName can echo a CodecUnknown's raw rtpmap; like FMTP it is
+		// scrubbed and made fence-safe at the describe boundary (doctor.go), so
+		// it is rendered raw here.
+		fmt.Fprintf(b, "  track %d: %s, %s, clock %d, ch %s, depacketize %s\n",
+			t.ID, t.Media.String(), codecName(t.Codec), t.ClockRate,
+			channelsCell(t.Channels), depacketizeCell(decodable(t)))
+		if t.Media != audiostream.MediaAudio {
+			continue
+		}
+		if t.FMTP != "" {
+			fmt.Fprintf(b, "    fmtp: %s\n", t.FMTP)
+		}
+		if asc := ascHex(t.Codec); asc != "" {
+			fmt.Fprintf(b, "    asc: %s\n", asc)
+		}
+	}
+}
+
 // renderWalkthrough writes the human-readable handshake walkthrough, SDP
 // summary, and capture summary for r to w. Plain ASCII, no color.
 //
@@ -98,10 +143,10 @@ func renderWalkthrough(w io.Writer, r Report, env Env) {
 	fmt.Fprintf(&b, "target: %s\n", r.RedactedURL)
 	fmt.Fprintln(&b)
 	renderHandshake(&b, &r)
-	renderTracks(&b, &r)
-	renderNoAudio(&b, &r)
+	writeTracksSection(&b, r.Tracks)
+	writeNoAudioSection(&b, &r)
 	renderCapture(&b, &r)
-	renderListen(&b, &r)
+	writeListenSection(&b, &r)
 	_, _ = io.WriteString(w, b.String())
 }
 
@@ -119,31 +164,9 @@ func renderHandshake(b *strings.Builder, r *Report) {
 	}
 }
 
-// renderTracks writes the SDP track summary table, or nothing when no tracks
-// were discovered.
-func renderTracks(b *strings.Builder, r *Report) {
-	if len(r.Tracks) == 0 {
-		return
-	}
-	fmt.Fprintln(b)
-	fmt.Fprintln(b, "tracks")
-	fmt.Fprintf(b, trackRowFmt, "#", "kind", "codec", "clock", "ch", "depacketize")
-	for i := range r.Tracks {
-		t := r.Tracks[i]
-		fmt.Fprintf(b, trackRowFmt,
-			strconv.Itoa(t.ID),
-			t.Media.String(),
-			codecName(t.Codec),
-			strconv.Itoa(t.ClockRate),
-			channelsCell(t.Channels),
-			depacketizeCell(decodable(t)),
-		)
-	}
-}
-
-// renderNoAudio writes the no-audio-track notice when Describe succeeded but no
-// audio track was present.
-func renderNoAudio(b *strings.Builder, r *Report) {
+// writeNoAudioSection writes the no-audio-track notice when Describe succeeded
+// but no audio track was present. Shared by the report and the walkthrough.
+func writeNoAudioSection(b *strings.Builder, r *Report) {
 	if r.HaveAudio || !hasStepOK(r.Steps, stepDescribe) {
 		return
 	}
@@ -161,16 +184,17 @@ func renderCapture(b *strings.Builder, r *Report) {
 	fmt.Fprintf(b, "capture (%s, track %d, ended: %s)\n", r.Window, r.AudioTrack.ID, r.Reason)
 	fmt.Fprintf(b, captureInt, "packets", r.Capture.Packets)
 	fmt.Fprintf(b, captureInt, "bytes", r.Capture.Bytes)
-	fmt.Fprintf(b, "  %-10s%d (%.2f%%)\n", "lost", r.Capture.Lost, r.Capture.LossRatio*100)
+	fmt.Fprintf(b, "  %-12s%d (%.2f%%)\n", "lost", r.Capture.Lost, r.Capture.LossRatio*100)
+	fmt.Fprintf(b, captureInt, "malformed", r.Capture.Malformed)
+	fmt.Fprintf(b, captureInt, "ssrc-resets", r.Capture.SSRCResets)
 	fmt.Fprintf(b, captureInt, "max gap", r.Capture.MaxGap)
-	fmt.Fprintf(b, "  %-10s%.1f kbit/s\n", "bitrate", r.Capture.Bitrate/1000)
-	fmt.Fprintf(b, "  %-10s%.2f ms\n", "jitter", r.Capture.JitterMS)
+	fmt.Fprintf(b, "  %-12s%.1f kbit/s\n", "bitrate", r.Capture.Bitrate/1000)
+	fmt.Fprintf(b, "  %-12s%.2f ms\n", "jitter", r.Capture.JitterMS)
 }
 
 // listenSeconds returns the decoded audio duration for l in seconds, or 0
-// when the sample rate is unknown. Shared by renderListen and reportListen
-// so the walkthrough and the markdown report always agree on a run's
-// playback duration.
+// when the sample rate is unknown. Used by writeListenSection so the
+// walkthrough and the report always agree on a run's playback duration.
 func listenSeconds(l ListenResult) float64 {
 	if l.SampleRate <= 0 {
 		return 0
@@ -178,10 +202,12 @@ func listenSeconds(l ListenResult) float64 {
 	return float64(l.Frames) / float64(l.SampleRate)
 }
 
-// renderListen writes the listen-check outcome line, or nothing when the check
-// never ran (Report.Listen's zero value), so a --wav run surfaces the written
-// or skipped result on the default walkthrough path, not only under --report.
-func renderListen(b *strings.Builder, r *Report) {
+// writeListenSection writes the listen-check outcome line, or nothing when the
+// check never ran (Report.Listen's zero value). Shared by the report and the
+// walkthrough. The skip reason can carry stream-derived decoder error text (a
+// go-aac/go-opus error over a camera-controlled ASC or channel count), so it is
+// made fence-safe here rather than trusted.
+func writeListenSection(b *strings.Builder, r *Report) {
 	switch {
 	case r.Listen.Written:
 		seconds := listenSeconds(r.Listen)
@@ -189,7 +215,7 @@ func renderListen(b *strings.Builder, r *Report) {
 		fmt.Fprintf(b, "listen: wrote %.1fs of %d Hz %s s16 PCM\n", seconds, r.Listen.SampleRate, channelsLabel(r.Listen.Channels))
 	case r.Listen.Skipped:
 		fmt.Fprintln(b)
-		fmt.Fprintf(b, "listen: skipped: %s\n", r.Listen.SkipReason)
+		fmt.Fprintf(b, "listen: skipped: %s\n", sanitizeLine(r.Listen.SkipReason))
 	}
 }
 
@@ -236,9 +262,15 @@ func hasStepOK(steps []HandshakeStep, name string) bool {
 	return false
 }
 
-// dialDetail summarizes the negotiated auth scheme and keepalive method.
+// dialDetail summarizes the negotiated auth scheme, keepalive method, and the
+// Server header when the camera reported one (already scrubbed at the
+// orchestration boundary).
 func dialDetail(si *rtsp.SessionInfo) string {
-	return fmt.Sprintf("auth %s, keepalive %s", si.AuthScheme, si.KeepaliveMethod)
+	d := fmt.Sprintf("auth %s, keepalive %s", si.AuthScheme, si.KeepaliveMethod)
+	if si.Server != "" {
+		d += ", server " + si.Server
+	}
+	return d
 }
 
 // describeDetail counts the discovered tracks by media kind.

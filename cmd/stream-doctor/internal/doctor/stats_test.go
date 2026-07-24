@@ -60,7 +60,7 @@ func TestComputeStatsJitterMultiAUPacket(t *testing.T) {
 
 func TestComputeStatsLossAndGap(t *testing.T) {
 	t.Parallel()
-	lib := audiostream.TrackStats{Packets: 490, Bytes: 62720, SeqGaps: 10}
+	lib := audiostream.TrackStats{Packets: 490, Bytes: 62720, SeqGaps: 10, Malformed: 4, SSRCResets: 2}
 	frames := []CapturedFrame{
 		{RTPTime: 0, SeqGap: 0},
 		{RTPTime: 1, SeqGap: 3},
@@ -69,6 +69,12 @@ func TestComputeStatsLossAndGap(t *testing.T) {
 	stats := computeStats(frames, lib, 16000, time.Second)
 	if stats.Lost != 10 {
 		t.Errorf("Lost = %d, want 10", stats.Lost)
+	}
+	if stats.Malformed != 4 {
+		t.Errorf("Malformed = %d, want 4", stats.Malformed)
+	}
+	if stats.SSRCResets != 2 {
+		t.Errorf("SSRCResets = %d, want 2", stats.SSRCResets)
 	}
 	wantRatio := 10.0 / 500
 	if stats.LossRatio != wantRatio {

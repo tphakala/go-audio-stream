@@ -111,11 +111,11 @@ func TestRunReportAndWAV(t *testing.T) {
 	}
 
 	got := out.String()
-	if !strings.Contains(got, "### stream-doctor report") {
-		t.Errorf("stdout is not the report:\n%s", got)
-	}
-	if strings.Contains(got, "handshake\n") {
-		t.Errorf("stdout contains the walkthrough, want the report only:\n%s", got)
+	// The report is a single fenced block; the walkthrough is not fenced, so
+	// the fence is what distinguishes them now that both carry a "handshake"
+	// section header.
+	if !strings.HasPrefix(got, reportFence) {
+		t.Errorf("stdout is not the fenced report:\n%s", got)
 	}
 	// The report is pasted publicly by users: a successful run must not
 	// surface the credentials or host from the target URL, nor the --wav
@@ -180,7 +180,7 @@ func TestRunListenCreateFailureRedactsPath(t *testing.T) {
 	}
 
 	got := out.String()
-	if !strings.Contains(got, "**Listen:** skipped: could not create the WAV output file") {
+	if !strings.Contains(got, "listen: skipped: could not create the WAV output file") {
 		t.Errorf("report is missing the create-failure Listen skip line:\n%s", got)
 	}
 	for _, frag := range []string{parent, "not-a-dir", testWAVName, ".stream-doctor-"} {
@@ -234,7 +234,7 @@ func TestRunListenWriteFailureRedactsPath(t *testing.T) {
 	}
 
 	got := out.String()
-	if !strings.Contains(got, "**Listen:** skipped: wav write failed:") {
+	if !strings.Contains(got, "listen: skipped: wav write failed:") {
 		t.Errorf("report is missing the sanitized write-failure Listen skip line:\n%s", got)
 	}
 	for _, frag := range []string{tmpDir, testWAVName, ".stream-doctor-"} {
@@ -283,16 +283,15 @@ func TestRunReportModeSeparation(t *testing.T) {
 		t.Errorf("mapExit = %d, want ExitOK", code)
 	}
 
-	if !strings.Contains(out.String(), "### stream-doctor report") {
-		t.Errorf("stdout does not contain the report header:\n%s", out.String())
+	if !strings.Contains(out.String(), reportFence) {
+		t.Errorf("stdout does not contain the fenced report:\n%s", out.String())
 	}
 	if !strings.Contains(errOut.String(), "handshake") {
 		t.Errorf("stderr does not contain the walkthrough:\n%s", errOut.String())
 	}
-	if strings.Contains(out.String(), "handshake\n") {
-		t.Errorf("stdout contains the walkthrough, want the report only:\n%s", out.String())
-	}
-	if strings.Contains(errOut.String(), "### stream-doctor report") {
-		t.Errorf("stderr contains the report, want the walkthrough only:\n%s", errOut.String())
+	// The walkthrough is never fenced, so the fence in stderr would mean the
+	// report leaked onto the walkthrough stream.
+	if strings.Contains(errOut.String(), reportFence) {
+		t.Errorf("stderr contains the report fence, want the walkthrough only:\n%s", errOut.String())
 	}
 }

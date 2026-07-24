@@ -41,6 +41,9 @@ func serveOptionsThenIdle(sc *testserver.ServerConn) {
 	}
 	h := rtsp.Header{}
 	h.Set("Public", "OPTIONS, DESCRIBE, SETUP, PLAY, TEARDOWN, GET_PARAMETER")
+	// A Server header so SessionInfo.Server has a value to assert; a camera
+	// reports its RTSP stack here and the client captures it for diagnostics.
+	h.Set("Server", "TestCam/1.0")
 	if err := sc.Respond(req, 200, "OK", h, nil); err != nil {
 		return
 	}
@@ -92,6 +95,10 @@ func TestDialOptions(t *testing.T) {
 	// actually parsed rather than restating KeepaliveMethod's default.
 	if info.KeepaliveMethod != "GET_PARAMETER" {
 		t.Errorf("KeepaliveMethod = %q, want GET_PARAMETER", info.KeepaliveMethod)
+	}
+	// The Server header from the OPTIONS response is captured for diagnostics.
+	if info.Server != "TestCam/1.0" {
+		t.Errorf("Server = %q, want TestCam/1.0", info.Server)
 	}
 	if info.SessionID != "" {
 		t.Errorf("SessionID = %q, want empty before Setup", info.SessionID)

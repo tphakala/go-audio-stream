@@ -18,12 +18,17 @@ func testEnv() Env {
 
 const testTargetURL = "rtsp://user:pass@cam.example:554/stream"
 
+// testHost is the host of testTargetURL, shared by the leak tests that assert it
+// never survives redaction.
+const testHost = "cam.example"
+
 const testH264 = "H264/90000"
 const testDigestAuth = rtsp.AuthDigest
 const testGetParameter = "GET_PARAMETER"
 const testL16RTPMap = "L16/8000"
 const redactedStreamURL = "rtsp://[redacted]/stream"
 const testWAVName = "out.wav"
+const testAACFmtp = "mode=AAC-hbr;sizelength=13;indexlength=3;indexdeltalength=3;config=1408"
 
 func aacTrack() rtsp.Track {
 	return rtsp.Track{ID: 0, Media: audiostream.MediaAudio, Codec: audiostream.CodecAAC{}, ClockRate: 16000, Channels: 1}
@@ -101,17 +106,18 @@ handshake
   PLAY       ok     7ms   session timeout 60s
 
 tracks
-  #  kind   codec                clock   ch  depacketize
-  0  audio  AAC                  16000    1  yes
-  1  video  H264/90000           90000    -  no
+  track 0: audio, AAC, clock 16000, ch 1, depacketize yes
+  track 1: video, H264/90000, clock 90000, ch -, depacketize no
 
 capture (10s, track 0, ended: completed)
-  packets   500
-  bytes     64000
-  lost      0 (0.00%)
-  max gap   0
-  bitrate   51.2 kbit/s
-  jitter    0.00 ms
+  packets     500
+  bytes       64000
+  lost        0 (0.00%)
+  malformed   0
+  ssrc-resets 0
+  max gap     0
+  bitrate     51.2 kbit/s
+  jitter      0.00 ms
 `
 
 func TestRunHappyPathWalkthrough(t *testing.T) {
@@ -187,8 +193,11 @@ func TestRunDescribeAuthFails(t *testing.T) {
 	if !strings.Contains(got, "DESCRIBE") || !strings.Contains(got, "FAIL") {
 		t.Errorf("report missing DESCRIBE FAIL:\n%s", got)
 	}
-	if !strings.Contains(got, "**Result:** authentication failed") {
+	if !strings.Contains(got, "result: authentication failed") {
 		t.Errorf("report result phrase does not match the auth exit classification:\n%s", got)
+	}
+	if !strings.Contains(got, "failure: DESCRIBE - ") {
+		t.Errorf("report is missing the failure line naming the failed step:\n%s", got)
 	}
 	if code := mapExit(err, res); code != ExitAuth {
 		t.Errorf("mapExit = %d, want ExitAuth", code)
@@ -254,7 +263,7 @@ func TestRunUnsupportedCodec(t *testing.T) {
 	if res.CodecSupported {
 		t.Error("CodecSupported = true, want false")
 	}
-	if !strings.Contains(out.String(), "  no") {
+	if !strings.Contains(out.String(), "depacketize no") {
 		t.Errorf("walkthrough should mark codec depacketize no:\n%s", out.String())
 	}
 	if code := mapExit(err, res); code != ExitUnsupported {

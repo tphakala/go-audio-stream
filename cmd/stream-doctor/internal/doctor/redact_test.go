@@ -69,3 +69,35 @@ func TestPIIScrubberScrubError(t *testing.T) {
 		t.Error("scrubError(nil) = non-empty, want empty")
 	}
 }
+
+
+func TestPIIScrubberScrubString(t *testing.T) {
+	t.Parallel()
+	const rawURL = "rtsp://admin:hunter2@cam.example:554/stream"
+	s := newPIIScrubber(rawURL)
+
+	// An empty input stays empty so callers can omit the line entirely.
+	if got := s.scrubString(""); got != "" {
+		t.Errorf("scrubString(\"\") = %q, want empty", got)
+	}
+
+	// A camera-controlled field (the Server header, the raw fmtp) that echoes
+	// the target host or a resolved IP must be scrubbed, since a report is
+	// pasted publicly. The non-PII remainder must survive: over-redaction that
+	// gutted the value would leave the diagnostic useless while still "leak
+	// safe", so assert the descriptive text is preserved.
+	if got := s.scrubString("cam.example RTSP server 1.0"); strings.Contains(got, "cam.example") {
+		t.Errorf("scrubString leaked the host: %q", got)
+	} else if !strings.Contains(got, "RTSP server 1.0") {
+		t.Errorf("scrubString over-redacted, dropped non-PII content: %q", got)
+	}
+	if got := s.scrubString("built for 192.168.1.50"); strings.Contains(got, "192.168.1.50") {
+		t.Errorf("scrubString leaked a resolved IPv4 address: %q", got)
+	}
+
+	// Newlines and backticks are neutralized so a hostile value cannot forge
+	// report lines or break out of the report's surrounding code fence.
+	if got := s.scrubString("evil\nline\r2 ```pwn"); strings.ContainsAny(got, "\r\n`") {
+		t.Errorf("scrubString left fence/line-breaking characters: %q", got)
+	}
+}

@@ -28,6 +28,10 @@ type DescribedTrack struct {
 	Channels int
 	// Control is the media-level a=control value, "" if absent.
 	Control string
+	// FMTP is the raw a=fmtp parameter string for PayloadType (everything after
+	// the payload type), "" when the section carried no fmtp for it. Retained
+	// verbatim for diagnostics; the codec resolution uses the parsed forms.
+	FMTP string
 	// AAC holds the parsed MPEG4-GENERIC fmtp parameters when Codec is a
 	// CodecAAC, and is nil for every other codec.
 	AAC *AACParams
@@ -80,6 +84,7 @@ func describeTrack(m *Media) DescribedTrack {
 
 	pt := m.Formats[0]
 	t.PayloadType = pt
+	t.FMTP = m.FMTPs[pt]
 
 	rm, hasRTPMap := m.RTPMaps[pt]
 	encoding := rm.EncodingName

@@ -23,18 +23,19 @@ func goldenReport() Report {
 			{Name: stepPlay, OK: true, Elapsed: 7 * time.Millisecond},
 		},
 		Session: rtsp.SessionInfo{
+			Server:          "TestCam/1.0",
 			AuthScheme:      testDigestAuth,
 			SessionTimeout:  60 * time.Second,
 			KeepaliveMethod: testGetParameter,
 			Channels:        []rtsp.ChannelPair{{TrackID: 0, RTP: 0, RTCP: 1}},
 		},
 		Tracks: []rtsp.Track{
-			{ID: 0, Media: audiostream.MediaAudio, Codec: audiostream.CodecAAC{}, ClockRate: 16000, Channels: 1},
+			{ID: 0, Media: audiostream.MediaAudio, Codec: audiostream.CodecAAC{AudioSpecificConfig: []byte{0x14, 0x08}}, ClockRate: 16000, Channels: 1, FMTP: testAACFmtp},
 			{ID: 1, Media: audiostream.MediaVideo, Codec: audiostream.CodecUnknown{RTPMap: testH264}, ClockRate: 90000, Channels: 0},
 		},
-		AudioTrack:   rtsp.Track{ID: 0, Media: audiostream.MediaAudio, Codec: audiostream.CodecAAC{}, ClockRate: 16000, Channels: 1},
+		AudioTrack:   rtsp.Track{ID: 0, Media: audiostream.MediaAudio, Codec: audiostream.CodecAAC{AudioSpecificConfig: []byte{0x14, 0x08}}, ClockRate: 16000, Channels: 1, FMTP: testAACFmtp},
 		HaveAudio:    true,
-		Capture:      CaptureStats{Packets: 500, Bytes: 64000, Lost: 0, LossRatio: 0, MaxGap: 0, Bitrate: 51200, JitterMS: 0.586},
+		Capture:      CaptureStats{Packets: 500, Bytes: 64000, Lost: 0, LossRatio: 0, Malformed: 2, SSRCResets: 1, MaxGap: 0, Bitrate: 51200, JitterMS: 0.586},
 		CaptureShown: true,
 		Window:       10 * time.Second,
 		Reason:       EndCompleted,
@@ -102,7 +103,7 @@ func TestRenderReportUnsupported(t *testing.T) {
 	}
 
 	got := renderReport(r, testEnv())
-	if !strings.Contains(got, "**Result:** unsupported audio codec") {
+	if !strings.Contains(got, "result: unsupported audio codec") {
 		t.Errorf("report does not contain the unsupported-codec result line:\n%s", got)
 	}
 	if !strings.Contains(got, r.Listen.SkipReason) {
@@ -127,10 +128,10 @@ func TestRenderReportSessionDetailsPreSetup(t *testing.T) {
 	}
 
 	got := renderReport(r, testEnv())
-	if !strings.Contains(got, "- Auth: ") || !strings.Contains(got, "- Keepalive: "+testGetParameter) {
+	if !strings.Contains(got, "  auth: ") || !strings.Contains(got, "  keepalive: "+testGetParameter) {
 		t.Errorf("report is missing the DIAL-scoped session lines:\n%s", got)
 	}
-	if strings.Contains(got, "Session timeout") || strings.Contains(got, "Transport") {
+	if strings.Contains(got, "session-timeout") || strings.Contains(got, "transport") {
 		t.Errorf("report shows SETUP-scoped session lines before SETUP succeeded:\n%s", got)
 	}
 }
