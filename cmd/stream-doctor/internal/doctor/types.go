@@ -64,6 +64,48 @@ type CaptureResult struct {
 	Reason EndReason
 }
 
+// HandshakeStep is one timed handshake stage for the walkthrough and report.
+type HandshakeStep struct {
+	Name    string // "DIAL", "DESCRIBE", "SETUP", "PLAY", "CAPTURE"
+	OK      bool
+	Elapsed time.Duration
+	Detail  string // one-line negotiated detail or failure reason
+}
+
+// Env is the injected machine context, so report and walkthrough golden tests
+// are deterministic.
+type Env struct {
+	OS      string // runtime.GOOS in production
+	Arch    string // runtime.GOARCH in production
+	Version string // Version in production
+}
+
+// ListenResult describes a written WAV. Zero value means no listen check ran.
+type ListenResult struct {
+	Written    bool
+	SampleRate int
+	Channels   int
+	Frames     int // samples per channel
+	Skipped    bool
+	SkipReason string
+}
+
+// Report is the fully-populated result of a run, consumed by both renderers.
+type Report struct {
+	RedactedURL  string
+	Result       string // human phrase: "capture OK", "no audio track", "connection failed", ...
+	Steps        []HandshakeStep
+	Session      rtsp.SessionInfo
+	Tracks       []rtsp.Track
+	AudioTrack   rtsp.Track
+	HaveAudio    bool
+	Capture      CaptureStats
+	CaptureShown bool
+	Window       time.Duration
+	Reason       EndReason
+	Listen       ListenResult
+}
+
 // Capture memory caps, independent of the duration flag.
 const (
 	// maxCaptureFrames bounds the number of frames retained; a flood stops

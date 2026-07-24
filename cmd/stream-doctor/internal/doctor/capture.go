@@ -130,8 +130,8 @@ func (p *rtspProber) SessionInfo() rtsp.SessionInfo {
 	return p.client.SessionInfo()
 }
 
-// Close ends the session; idempotent, and safe before Dial has created the
-// client (so a deferred Close after construction does not panic).
+// Close ends the session; idempotent. Safe before Dial has created the
+// client, so a deferred Close after a failed Dial does not panic.
 func (p *rtspProber) Close() error {
 	if p.client == nil {
 		return nil

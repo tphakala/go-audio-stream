@@ -1,9 +1,12 @@
 package doctor
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
+	"runtime"
+	"time"
 
 	"github.com/tphakala/go-audio-stream/rtsp"
 )
@@ -45,21 +48,18 @@ type Result struct {
 	FramesCaptured  int
 }
 
-// Run executes one full stream-doctor diagnostic pass for opts and returns
-// the run Result and terminal error for mapExit. The body is a stub for now:
-// a later change replaces it with the real dial/describe/setup/play/capture
-// walkthrough.
-//
-//nolint:gocritic // Options is the documented public Run signature; hugeParam does not apply to a per-run entry point.
-func Run(opts Options) (Result, error) {
-	return Result{}, nil
-}
-
 // Execute is the process entry point: it parses args, prints the version or
 // a usage error to stdout/stderr and returns the matching exit code, or runs
-// the diagnostic engine and returns mapExit's result. main calls Execute and
-// never changes as the engine grows in later tasks.
+// the diagnostic engine and returns mapExit's result. It runs with a
+// background context; main uses ExecuteContext to wire SIGINT.
 func Execute(args []string, stdout, stderr io.Writer) int {
+	return ExecuteContext(context.Background(), args, stdout, stderr)
+}
+
+// ExecuteContext is Execute with a caller-supplied context so main can cancel
+// a run on SIGINT. It parses args, prints the version or a usage error, or
+// drives Run against a live RTSP prober and returns mapExit's code.
+func ExecuteContext(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	opts, err := parseArgs(args)
 	switch {
 	case errors.Is(err, errVersionRequested):
@@ -71,7 +71,11 @@ func Execute(args []string, stdout, stderr io.Writer) int {
 		return ExitUsage
 	}
 
-	res, runErr := Run(opts)
+	env := Env{OS: runtime.GOOS, Arch: runtime.GOARCH, Version: Version}
+	prober := newRTSPProber(opts)
+	defer func() { _ = prober.Close() }()
+
+	res, runErr := Run(ctx, opts, prober, stdout, stderr, env, time.Now)
 	return mapExit(runErr, res)
 }
 
@@ -94,17 +98,25 @@ func mapExitErr(err error, res Result) int {
 	if errors.Is(err, ErrUsage) {
 		return ExitUsage
 	}
-	if errors.Is(err, rtsp.ErrAuthFailed) {
-		return ExitAuth
-	}
-	var unauthorized *rtsp.UnauthorizedError
-	if errors.As(err, &unauthorized) {
+	if isAuthErr(err) {
 		return ExitAuth
 	}
 	if res.Phase == PhaseCapture {
 		return ExitCapture
 	}
 	return ExitConnection
+}
+
+// isAuthErr reports whether err is an authentication failure: the client's
+// give-up sentinel, or a 401 challenge that could not be answered. Shared
+// by mapExitErr and failStep so the exit code and the report's result
+// phrase classify the same errors as auth failures.
+func isAuthErr(err error) bool {
+	if errors.Is(err, rtsp.ErrAuthFailed) {
+		return true
+	}
+	var unauthorized *rtsp.UnauthorizedError
+	return errors.As(err, &unauthorized)
 }
 
 // mapExitClean classifies a clean (nil-error) run by how far it got.
