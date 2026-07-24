@@ -86,7 +86,7 @@ func describedFixture() []describedTrack {
 func TestDescribedTrackForSelectsByID(t *testing.T) {
 	t.Parallel()
 	c := &Client{state: stateDescribed, described: describedFixture()}
-	desc, err := c.describedTrackFor(Track{ID: 1, Control: testVideoControl})
+	desc, err := c.describedTrackFor(&Track{ID: 1, Control: testVideoControl})
 	if err != nil {
 		t.Fatalf("describedTrackFor: %v", err)
 	}
@@ -142,7 +142,7 @@ func TestDescribedTrackForRejects(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			c := &Client{state: tc.state, described: describedFixture(), channelPairs: tc.pairs}
-			if _, err := c.describedTrackFor(tc.trk); !errors.Is(err, tc.want) {
+			if _, err := c.describedTrackFor(&tc.trk); !errors.Is(err, tc.want) {
 				t.Errorf("describedTrackFor = %v, want %v", err, tc.want)
 			}
 		})
@@ -152,7 +152,7 @@ func TestDescribedTrackForRejects(t *testing.T) {
 func TestDescribedTrackForStateGate(t *testing.T) {
 	t.Parallel()
 	c := &Client{state: stateIdle, described: describedFixture()}
-	_, err := c.describedTrackFor(Track{ID: 0, Control: testAudioControl})
+	_, err := c.describedTrackFor(&Track{ID: 0, Control: testAudioControl})
 	var se *StateError
 	if !errors.As(err, &se) {
 		t.Fatalf("describedTrackFor in idle = %v, want *StateError", err)

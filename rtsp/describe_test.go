@@ -225,6 +225,10 @@ func TestDescribeHappyPath(t *testing.T) {
 	if tr.Control != wantControl {
 		t.Errorf("Control = %q, want %q", tr.Control, wantControl)
 	}
+	// The raw fmtp propagates from the SDP through to the Track for diagnostics.
+	if wantFMTP := "mode=AAC-hbr;sizelength=13;indexlength=3;indexdeltalength=3;config=1408"; tr.FMTP != wantFMTP {
+		t.Errorf("FMTP = %q, want %q", tr.FMTP, wantFMTP)
+	}
 }
 
 func TestDescribeMultiTrack(t *testing.T) {

@@ -122,6 +122,12 @@ type Track struct {
 	Channels int
 	// Control is the resolved absolute control URL for this track.
 	Control string
+	// FMTP is the raw a=fmtp parameter string for this track's payload type
+	// (everything after the payload type), "" when the SDP carried no fmtp for
+	// it. It is a diagnostic aid: the depacketizer uses the parsed Codec, not
+	// this string, but the raw parameters (for example the AAC sizelength and
+	// mode) are what a maintainer needs to reproduce a codec issue.
+	FMTP string
 }
 
 // SetupOptions controls one Setup. Discard sets up a track whose frames are

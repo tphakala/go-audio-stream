@@ -64,9 +64,9 @@ type ChannelPair struct {
 
 // SessionInfo is a read-only snapshot of the negotiated session, for
 // diagnostics such as a handshake walkthrough tool. It carries no credentials
-// and no counters. Dial sets KeepaliveMethod. Setup sets Channels, and sets
-// SessionID and SessionTimeout from the first SETUP response that carries a
-// Session header, so they stay empty against a server that omits it.
+// and no counters. Dial sets KeepaliveMethod and Server. Setup sets Channels,
+// and sets SessionID and SessionTimeout from the first SETUP response that
+// carries a Session header, so they stay empty against a server that omits it.
 // AuthScheme stays AuthNone until a 401 has been answered, so it reports
 // AuthNone against a server that never challenges.
 type SessionInfo struct {
@@ -82,6 +82,11 @@ type SessionInfo struct {
 	// KeepaliveMethod is the negotiated keepalive method ("OPTIONS" or
 	// "GET_PARAMETER"), "" before Dial's OPTIONS completes.
 	KeepaliveMethod string
+	// Server is the raw RTSP Server response header (product/firmware string),
+	// captured from Dial's OPTIONS response, "" when the server omitted it. It
+	// is a diagnostic aid for identifying a camera's RTSP stack; it is not
+	// interpreted and may carry arbitrary vendor text.
+	Server string
 	// Channels lists the assigned interleaved channel pairs, one per set-up
 	// track, in Setup order. Freshly allocated; never internal state.
 	Channels []ChannelPair
@@ -122,6 +127,7 @@ type Client struct {
 	sessionID       string
 	sessionTimeout  time.Duration
 	keepaliveMethod string
+	serverHeader    string
 	baseURL         string
 	channelPairs    []ChannelPair
 	termErr         error
@@ -309,8 +315,15 @@ func (c *Client) options(ctx context.Context, reqURL string) error {
 		return err
 	}
 	km := KeepaliveMethod(ParsePublic(resp.Header.Get("Public")))
+	server := resp.Header.Get("Server")
 	c.mu.Lock()
 	c.keepaliveMethod = km
+	// Record the Server header once, from the OPTIONS probe, and do not let a
+	// later response blank it: an empty header on a subsequent response must
+	// not erase what OPTIONS reported.
+	if server != "" {
+		c.serverHeader = server
+	}
 	c.mu.Unlock()
 	return nil
 }
@@ -422,6 +435,7 @@ func (c *Client) SessionInfo() SessionInfo {
 		// reports AuthNone without a separate "is auth active" test.
 		AuthScheme:      c.auth.challenge.Scheme,
 		KeepaliveMethod: c.keepaliveMethod,
+		Server:          c.serverHeader,
 		Channels:        chans,
 	}
 }

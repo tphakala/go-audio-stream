@@ -158,6 +158,7 @@ func resolveTracks(describeURL string, resp *Response) ([]Track, string, []descr
 			ClockRate: dt.ClockRate,
 			Channels:  dt.Channels,
 			Control:   control,
+			FMTP:      dt.FMTP,
 		})
 		described = append(described, describedTrack{
 			control:     control,

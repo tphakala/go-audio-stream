@@ -53,11 +53,13 @@ var (
 //
 // Concurrent Setup calls are outside the documented contract, but they
 // serialize rather than corrupting the routing table.
+//
+//nolint:gocritic // Track is the documented public Setup signature; hugeParam does not apply to a per-track lifecycle call.
 func (c *Client) Setup(ctx context.Context, trk Track, opts SetupOptions) error {
 	c.lifecycleMu.Lock()
 	defer c.lifecycleMu.Unlock()
 
-	desc, err := c.describedTrackFor(trk)
+	desc, err := c.describedTrackFor(&trk)
 	if err != nil {
 		return err
 	}
@@ -93,7 +95,7 @@ func (c *Client) Setup(ctx context.Context, trk Track, opts SetupOptions) error 
 // descriptors Describe retained, returning the descriptor the track's ID
 // selects. The gate and the lookup share one critical section because both read
 // mu-guarded state that a concurrent shutdown may change between them.
-func (c *Client) describedTrackFor(trk Track) (describedTrack, error) {
+func (c *Client) describedTrackFor(trk *Track) (describedTrack, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if serr := c.requireState(methodSetup); serr != nil {
