@@ -89,7 +89,7 @@ func TestRenderReportUnsupported(t *testing.T) {
 			{Name: stepSetup, OK: true, Elapsed: 5 * time.Millisecond},
 			{Name: stepPlay, OK: true, Elapsed: 5 * time.Millisecond},
 		},
-		Session: rtsp.SessionInfo{AuthScheme: "none", KeepaliveMethod: "OPTIONS"},
+		Session: rtsp.SessionInfo{AuthScheme: rtsp.AuthNone, KeepaliveMethod: "OPTIONS"},
 		Tracks: []rtsp.Track{
 			{ID: 0, Media: audiostream.MediaAudio, Codec: audiostream.CodecUnknown{RTPMap: testL16RTPMap}, ClockRate: 8000, Channels: 1},
 		},

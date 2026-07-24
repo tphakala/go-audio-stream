@@ -154,7 +154,7 @@ func TestClassifyEndReason(t *testing.T) {
 		{"window elapsed but truncated", false, context.DeadlineExceeded, true, 10, EndTruncated},
 		{"truncated without a deadline", false, nil, true, 5, EndTruncated},
 		{"read-idle watchdog", false, audiostream.ErrReadTimeout, false, 3, EndWatchdog},
-		{"server teardown", false, rtsp.ErrServerTeardown, false, 3, EndTeardown},
+		{"server sent teardown", false, rtsp.ErrServerTeardown, false, 3, EndTeardown},
 		{"connection closed", false, rtsp.ErrConnectionClosed, false, 3, EndDisconnect},
 		{"unknown error, nothing captured", false, otherErr, false, 0, EndDisconnect},
 		{"unknown error with frames", false, otherErr, false, 7, EndCompleted},

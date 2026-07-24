@@ -19,7 +19,7 @@ func testEnv() Env {
 const testTargetURL = "rtsp://user:pass@cam.example:554/stream"
 
 const testH264 = "H264/90000"
-const testDigestAuth = "Digest"
+const testDigestAuth = rtsp.AuthDigest
 const testGetParameter = "GET_PARAMETER"
 const testL16RTPMap = "L16/8000"
 
