@@ -62,8 +62,18 @@ const (
 // mistake without breaking the package's no-panic contract.
 var ErrNilResponse = errors.New("rtsp: nil response")
 
+// ErrResponseStatus is the sentinel a *ResponseError matches under errors.Is,
+// so a caller can match this class without binding to the struct type. It
+// covers only the statuses ClassifyStatus turns into a *ResponseError: a
+// non-success code that is neither a 3xx redirect (*audiostream.RedirectError)
+// nor a 401 (ErrUnauthorized), each of which has its own match, so it is not a
+// catch-all for every failed request.
+var ErrResponseStatus = errors.New("rtsp: non-success response status")
+
 // ResponseError reports a non-success RTSP status the client did not
-// otherwise special-case (not a 2xx, not a 3xx redirect, not a 401).
+// otherwise special-case (not a 2xx, not a 3xx redirect, not a 401). It
+// matches errors.Is against ErrResponseStatus; use errors.As to recover the
+// Code and Reason.
 type ResponseError struct {
 	// Code is the numeric status.
 	Code int
@@ -79,9 +89,24 @@ func (e *ResponseError) Error() string {
 	return "rtsp: status " + strconv.Itoa(e.Code) + " " + e.Reason
 }
 
+// Is reports whether target is ErrResponseStatus, so any *ResponseError
+// matches errors.Is(err, ErrResponseStatus).
+func (e *ResponseError) Is(target error) bool {
+	return target == ErrResponseStatus
+}
+
+// ErrUnauthorized is the sentinel a *UnauthorizedError matches under
+// errors.Is. Because ErrAuthFailed wraps the *UnauthorizedError it could not
+// answer, an exhausted auth exchange matches both ErrAuthFailed and
+// ErrUnauthorized; a caller that needs to tell "the retries were exhausted"
+// apart from a bare 401 must test the narrower ErrAuthFailed first.
+var ErrUnauthorized = errors.New("rtsp: unauthorized")
+
 // UnauthorizedError reports a 401 response. Challenges holds the raw
 // WWW-Authenticate header field values (one string per header line,
 // unparsed); the client feeds them to ParseChallenges to run the auth flow.
+// It matches errors.Is against ErrUnauthorized; use errors.As to recover the
+// Challenges.
 type UnauthorizedError struct {
 	// Challenges are the raw WWW-Authenticate header values, in order.
 	Challenges []string
@@ -90,6 +115,12 @@ type UnauthorizedError struct {
 // Error satisfies error.
 func (e *UnauthorizedError) Error() string {
 	return "rtsp: 401 unauthorized"
+}
+
+// Is reports whether target is ErrUnauthorized, so any *UnauthorizedError
+// matches errors.Is(err, ErrUnauthorized).
+func (e *UnauthorizedError) Is(target error) bool {
+	return target == ErrUnauthorized
 }
 
 // ClassifyStatus maps resp to the error the client should act on:

@@ -173,6 +173,20 @@ func TestAuthFailureExhausted(t *testing.T) {
 	if !errors.Is(err, rtsp.ErrAuthFailed) {
 		t.Fatalf("Describe = %v, want ErrAuthFailed", err)
 	}
+	// The failure wraps the 401 it could not answer, so it also matches
+	// ErrUnauthorized under errors.Is and still yields the challenge via
+	// errors.As. A caller can branch on the category and read the realm.
+	if !errors.Is(err, rtsp.ErrUnauthorized) {
+		t.Errorf("errors.Is(err, ErrUnauthorized) = false, want true (err = %v)", err)
+	}
+	var ue *rtsp.UnauthorizedError
+	if !errors.As(err, &ue) {
+		t.Errorf("errors.As(err, &ue) = false, want true (err = %v)", err)
+	}
+	// The realm must survive the wrap, so a caller can still prompt on it.
+	if ue != nil && len(ue.Challenges) == 0 {
+		t.Error("recovered *UnauthorizedError carries no challenges; the realm was lost in the wrap")
+	}
 	// The auth path itself does not tear down the session: the caller decides.
 	// The deferred closeAndWait asserting ErrClosed is the proof; had the auth
 	// path funneled a shutdown, that first cause would win over Close's

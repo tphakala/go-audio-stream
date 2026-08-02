@@ -30,4 +30,15 @@
 // now, and each says so where it is implemented: Receiver Reports carry no
 // jitter or fraction-lost estimate, only AAC-hbr among RFC 3640's modes is
 // depacketized, and AAC PTS interpolation assumes 1024 samples per frame.
+//
+// Errors are matched two ways. Test a category with errors.Is against a
+// sentinel: the wire-layer and lifecycle sentinels (ErrMalformedTransport,
+// ErrNotSDP, ErrAuthFailed and the rest) match directly, while the three typed
+// errors this package defines match one through an Is method, ResponseError
+// against ErrResponseStatus, UnauthorizedError against ErrUnauthorized, and
+// StateError against ErrInvalidState. Recover a typed error's fields with
+// errors.As: *ResponseError for the status Code and Reason, *UnauthorizedError
+// for the raw challenges, *StateError for the rejected Method and State, and
+// the root package's *audiostream.RedirectError for a 3xx Location, which has
+// no sentinel and is matched with errors.As only.
 package rtsp
