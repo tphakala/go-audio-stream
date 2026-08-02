@@ -307,9 +307,11 @@ func TestDialMarshalErrorNoHang(t *testing.T) {
 
 	baseline := runtime.NumGoroutine()
 	// A path that pushes the request URI past rtsp.MaxRequestURILen (2048)
-	// makes MarshalRequest fail inside Dial's OPTIONS round-trip. That path
-	// runs before the pending entry and any write, so if it did not funnel
+	// makes MarshalRequest fail inside Dial's OPTIONS round-trip. The marshal
+	// now runs inside writeAuthorizedRequest, after the pending entry is
+	// registered and before any byte is written; if it did not funnel
 	// shutdown, closing/done would never close and Dial would block forever.
+	// The deferred pending cleanup removes the registered entry either way.
 	longPath := "/" + strings.Repeat("a", 2100)
 
 	done := make(chan error, 1)

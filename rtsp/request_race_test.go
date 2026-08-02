@@ -6,6 +6,8 @@ import (
 	"io"
 	"net"
 	"os"
+	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -304,5 +306,137 @@ func TestTeardownIsActuallyWritten(t *testing.T) {
 	}
 	if !sawTeardown {
 		t.Fatalf("no TEARDOWN reached the connection; writes = %d", len(written))
+	}
+}
+
+// isHexDigit reports whether b is an ASCII hexadecimal digit.
+func isHexDigit(b byte) bool {
+	return (b >= '0' && b <= '9') || (b >= 'a' && b <= 'f') || (b >= 'A' && b <= 'F')
+}
+
+// parseNonceCount extracts the Digest nonce count (nc) from a marshaled
+// request's Authorization header, returning it and whether one was present. The
+// nc value is written unquoted as eight hex digits (RFC 7616), and "cnonce="
+// does not contain the substring "nc=", so a plain search is unambiguous.
+func parseNonceCount(raw []byte) (uint64, bool) {
+	req, _, err := ParseRequest(raw)
+	if err != nil {
+		return 0, false
+	}
+	auth := req.Header.Get("Authorization")
+	i := strings.Index(auth, "nc=")
+	if i < 0 {
+		return 0, false
+	}
+	rest := auth[i+len("nc="):]
+	end := 0
+	for end < len(rest) && isHexDigit(rest[end]) {
+		end++
+	}
+	n, err := strconv.ParseUint(rest[:end], 16, 32)
+	if err != nil {
+		return 0, false
+	}
+	return n, true
+}
+
+// TestConcurrentSendersPreserveNonceOrder asserts a Digest nonce count reaches
+// the wire in the order it was allocated. attachAuthorization increments nc
+// under mu; were the write to happen outside that lock, two concurrent senders
+// could allocate nc in one order and reach the socket in the other, and an
+// RFC 7616 section 3.4.3 server tracking the highest nc seen under a nonce would
+// answer the lower one 401 (issue #17). Folding the nc allocation and the write
+// into one writeMu hold keeps the two orders identical, so the counts recorded
+// in write order are strictly increasing.
+//
+// With the fix the property is deterministic (writeMu serializes each sender's
+// allocate-then-write), so this passes on every run; reverting the fix makes it
+// racy, so it is looped with high fan-out to fail often rather than one run in
+// many.
+func TestConcurrentSendersPreserveNonceOrder(t *testing.T) {
+	const (
+		iterations = 20
+		senders    = 40
+	)
+	for iter := range iterations {
+		cfg := Config{URL: scriptedURL, Timeout: 2 * time.Second}
+		cfg.applyDefaults()
+
+		var mu sync.Mutex
+		var ncs []uint64
+		conn := newScriptedConn(nil)
+		c := newClient(&cfg, conn, &target{requestURL: scriptedURL})
+		// Record the nonce count of every request as it reaches the wire, and
+		// answer it 200 so a concurrent roundTrip caller unblocks. A keepalive
+		// registers no pending entry, so the reader drops its 200.
+		conn.onWrite = func(sc *scriptedConn, p []byte) {
+			req, _, err := ParseRequest(p)
+			if err != nil {
+				return
+			}
+			if nc, ok := parseNonceCount(p); ok {
+				mu.Lock()
+				ncs = append(ncs, nc)
+				mu.Unlock()
+			}
+			if raw, merr := MarshalResponse(&Response{StatusCode: StatusOK, Reason: "OK", CSeq: req.CSeq}); merr == nil {
+				sc.deliver(raw)
+			}
+		}
+		c.mu.Lock()
+		c.baseURL = scriptedURL
+		c.keepaliveMethod = methodOptions
+		c.auth = authState{
+			active: true,
+			challenge: Challenge{
+				Scheme: AuthDigest,
+				Realm:  "test-realm",
+				Params: map[string]string{
+					paramNonce:     "server-nonce",
+					paramQOP:       "auth",
+					paramAlgorithm: algMD5,
+				},
+			},
+			creds:  Credentials{Username: "alice", Password: "s3cr3t"},
+			cnonce: "00112233445566778899aabbccddeeff",
+		}
+		c.mu.Unlock()
+
+		go c.reader()
+
+		// Mix the two authenticated write paths that can genuinely run at once:
+		// the keepalive/best-effort-TEARDOWN builder (marshalBareRequest) and the
+		// lifecycle builder (roundTrip via writeAuthorizedRequest). Both allocate
+		// nc and write under one writeMu hold, so their counts must reach the
+		// wire in allocation order however they interleave. Testing one path
+		// alone would leave a per-site revert of the other green.
+		var wg sync.WaitGroup
+		wg.Add(senders)
+		for i := range senders {
+			go func(i int) {
+				defer wg.Done()
+				if i%2 == 0 {
+					c.sendKeepalive()
+					return
+				}
+				_, _ = c.roundTrip(context.Background(), &Request{Method: methodOptions, URL: scriptedURL})
+			}(i)
+		}
+		wg.Wait()
+		_ = c.Close()
+		<-c.done
+
+		mu.Lock()
+		got := append([]uint64(nil), ncs...)
+		mu.Unlock()
+
+		if len(got) != senders {
+			t.Fatalf("iteration %d: recorded %d nonce counts on the wire, want %d", iter, len(got), senders)
+		}
+		for i := 1; i < len(got); i++ {
+			if got[i] <= got[i-1] {
+				t.Fatalf("iteration %d: nonce counts reached the wire out of order: %v", iter, got)
+			}
+		}
 	}
 }
