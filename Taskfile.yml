@@ -33,6 +33,17 @@ tasks:
     cmds:
       - golangci-lint run ./...
 
+  fmt:
+    desc: Fail if any Go file is not gofmt-formatted
+    cmds:
+      - |
+        files=$(gofmt -l .)
+        if [ -n "$files" ]; then
+          echo "These files are not gofmt-formatted (run: gofmt -w .):"
+          echo "$files"
+          exit 1
+        fi
+
   fuzz:
     desc: Run fuzz targets (2m each); targets are added as packages land
     cmds:
@@ -58,11 +69,12 @@ tasks:
       - go mod verify
 
   check:
-    desc: Full local gate (build, vet, lint, race tests)
+    desc: Full local gate (build, vet, lint, fmt, race tests)
     cmds:
       - task: build
       - task: vet
       - task: lint
+      - task: fmt
       - task: test:race
 
   doctor:build:
@@ -84,6 +96,18 @@ tasks:
     cmds:
       - golangci-lint run ./...
 
+  doctor:fmt:
+    desc: Fail if any stream-doctor Go file is not gofmt-formatted
+    dir: cmd/stream-doctor
+    cmds:
+      - |
+        files=$(gofmt -l .)
+        if [ -n "$files" ]; then
+          echo "These files are not gofmt-formatted (run: gofmt -w .):"
+          echo "$files"
+          exit 1
+        fi
+
   doctor:test:
     desc: Test the stream-doctor module with the race detector
     dir: cmd/stream-doctor
@@ -96,6 +120,7 @@ tasks:
       - task: doctor:build
       - task: doctor:vet
       - task: doctor:lint
+      - task: doctor:fmt
       - task: doctor:test
 
   check:all:

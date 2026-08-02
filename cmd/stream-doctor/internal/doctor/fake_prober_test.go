@@ -14,12 +14,12 @@ import (
 // full-stream pattern.
 type fakeProber struct {
 	dialErr, describeErr, setupErr, playErr error
-	tracks     []rtsp.Track
-	session    rtsp.SessionInfo
-	result     CaptureResult
-	collectErr error
-	calls      []string
-	setups     []setupCall // one per Setup, in call order
+	tracks                                  []rtsp.Track
+	session                                 rtsp.SessionInfo
+	result                                  CaptureResult
+	collectErr                              error
+	calls                                   []string
+	setups                                  []setupCall // one per Setup, in call order
 }
 
 // setupCall records one Setup invocation for assertion.
