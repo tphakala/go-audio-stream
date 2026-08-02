@@ -31,11 +31,11 @@ const testWAVName = "out.wav"
 const testAACFmtp = "mode=AAC-hbr;sizelength=13;indexlength=3;indexdeltalength=3;config=1408"
 
 func aacTrack() rtsp.Track {
-	return rtsp.Track{ID: 0, Media: audiostream.MediaAudio, Codec: audiostream.CodecAAC{}, ClockRate: 16000, Channels: 1}
+	return rtsp.Track{ID: 0, Media: audiostream.MediaAudio, Codec: audiostream.CodecAAC{}, ClockRate: 16000, Channels: 1, PayloadType: 97}
 }
 
 func videoTrack() rtsp.Track {
-	return rtsp.Track{ID: 1, Media: audiostream.MediaVideo, Codec: audiostream.CodecUnknown{RTPMap: testH264}, ClockRate: 90000, Channels: 0}
+	return rtsp.Track{ID: 1, Media: audiostream.MediaVideo, Codec: audiostream.CodecUnknown{RTPMap: testH264}, ClockRate: 90000, Channels: 0, PayloadType: 96}
 }
 
 func happySession() rtsp.SessionInfo {
@@ -106,13 +106,15 @@ handshake
   PLAY       ok     7ms   session timeout 60s
 
 tracks
-  track 0: audio, AAC, clock 16000, ch 1, depacketize yes
-  track 1: video, H264/90000, clock 90000, ch -, depacketize no
+  track 0: audio, AAC, PT 97, clock 16000, ch 1, depacketize yes
+  track 1: video, H264/90000, PT 96, clock 90000, ch -, depacketize no
 
 capture (10s, track 0, ended: completed)
   packets     500
+  received    500
   bytes       64000
   lost        0 (0.00%)
+  duplicates  0
   malformed   0
   ssrc-resets 0
   max gap     0
@@ -127,7 +129,7 @@ func TestRunHappyPathWalkthrough(t *testing.T) {
 		session: happySession(),
 		result: CaptureResult{
 			Frames:  frames500(),
-			Stats:   audiostream.TrackStats{Packets: 500, Bytes: 64000},
+			Stats:   audiostream.TrackStats{Packets: 500, Received: 500, Bytes: 64000},
 			Window:  10 * time.Second,
 			Elapsed: 10 * time.Second,
 			Reason:  EndCompleted,
@@ -247,7 +249,7 @@ func TestRunUnsupportedCodec(t *testing.T) {
 		session: happySession(),
 		result: CaptureResult{
 			Frames:  frames500(),
-			Stats:   audiostream.TrackStats{Packets: 500, Bytes: 64000},
+			Stats:   audiostream.TrackStats{Packets: 500, Received: 500, Bytes: 64000},
 			Window:  10 * time.Second,
 			Elapsed: 10 * time.Second,
 			Reason:  EndCompleted,
@@ -278,7 +280,7 @@ func TestRunSetupAudioOnly(t *testing.T) {
 		session: happySession(),
 		result: CaptureResult{
 			Frames:  frames500(),
-			Stats:   audiostream.TrackStats{Packets: 500, Bytes: 64000},
+			Stats:   audiostream.TrackStats{Packets: 500, Received: 500, Bytes: 64000},
 			Elapsed: 10 * time.Second,
 			Reason:  EndCompleted,
 		},
@@ -310,7 +312,7 @@ func TestRunSetupFullStream(t *testing.T) {
 		},
 		result: CaptureResult{
 			Frames:  frames500(),
-			Stats:   audiostream.TrackStats{Packets: 500, Bytes: 64000},
+			Stats:   audiostream.TrackStats{Packets: 500, Received: 500, Bytes: 64000},
 			Elapsed: 10 * time.Second,
 			Reason:  EndCompleted,
 		},
@@ -342,7 +344,7 @@ func TestRunSetupFullStreamTwoNonAudio(t *testing.T) {
 		session: happySession(),
 		result: CaptureResult{
 			Frames:  frames500(),
-			Stats:   audiostream.TrackStats{Packets: 500, Bytes: 64000},
+			Stats:   audiostream.TrackStats{Packets: 500, Received: 500, Bytes: 64000},
 			Elapsed: 10 * time.Second,
 			Reason:  EndCompleted,
 		},

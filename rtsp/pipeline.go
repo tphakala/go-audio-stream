@@ -104,7 +104,9 @@ type track struct {
 	// Per-track receive counters: reader writes, Stats reads.
 	packets    atomic.Uint64
 	bytes      atomic.Uint64
+	received   atomic.Uint64
 	seqGaps    atomic.Uint64
+	duplicates atomic.Uint64
 	malformed  atomic.Uint64
 	ssrcResets atomic.Uint64
 
@@ -443,6 +445,10 @@ func (tr *track) publishRRSnapshot() {
 	st := tr.stream.Stats()
 	tr.rrHighestSeq.Store(st.ExtendedHighestSeq)
 	tr.rrCumulativeLost.Store(cumulativeLost(st.SeqGaps))
+	// Mirror the reader-owned stream's arrival counters into atomics so Stats
+	// can surface them from any goroutine, as Received and Duplicates.
+	tr.received.Store(st.Received)
+	tr.duplicates.Store(st.Duplicates)
 }
 
 // cumulativeLost narrows the 64-bit loss count to what an RFC 3550 report block

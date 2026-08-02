@@ -408,8 +408,10 @@ func (c *Client) Stats() audiostream.Stats {
 	for _, tr := range tracks {
 		m[tr.id] = audiostream.TrackStats{
 			Packets:    tr.packets.Load(),
+			Received:   tr.received.Load(),
 			Bytes:      tr.bytes.Load(),
 			SeqGaps:    tr.seqGaps.Load(),
+			Duplicates: tr.duplicates.Load(),
 			Malformed:  tr.malformed.Load(),
 			SSRCResets: tr.ssrcResets.Load(),
 		}

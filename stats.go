@@ -4,6 +4,12 @@ package audiostream
 type TrackStats struct {
 	// Packets is the number of RTP packets accepted.
 	Packets uint64
+	// Received is the number of RTP headers the track's stream observed. For an
+	// active track it tracks Packets, since the reader observes exactly the
+	// packets it accepts; it stays 0 for a discard track, which is counted but
+	// never observed. It is the stream layer's own arrival counter, surfaced
+	// alongside Duplicates.
+	Received uint64
 	// Bytes is the total payload bytes accepted. For an active (parsed)
 	// track this counts the RTP payload only, with the RTP header stripped.
 	// For a discard track it counts the full interleaved payload, RTP
@@ -13,6 +19,11 @@ type TrackStats struct {
 	// SeqGaps is the total number of packets lost per sequence
 	// number tracking.
 	SeqGaps uint64
+	// Duplicates is the number of duplicate or reordered packets the stream
+	// observed: a sequence number that did not advance. Rare over the in-order
+	// TCP transport, so a nonzero value points at the server resending or
+	// reordering rather than ordinary loss.
+	Duplicates uint64
 	// Malformed is the number of packets discarded without being delivered,
 	// for any reason: an RTP header that will not parse, a payload type the
 	// track does not carry (a second format multiplexed onto the same
