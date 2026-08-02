@@ -64,17 +64,20 @@ func captureTeardown(t *testing.T, sc *testserver.ServerConn, ch chan<- string) 
 		t.Errorf("reading the expected per-track TEARDOWN: %v", err)
 		return
 	}
-	ch <- req.Method + " " + req.URL
+	ch <- req.Method + " " + req.URL + " Session=" + req.Header.Get("Session")
 	_ = sc.Respond(req, 200, "OK", nil, nil)
 }
 
 // assertTeardown fails unless captureTeardown recorded a TEARDOWN addressed to
-// wantControl within a short window.
-func assertTeardown(t *testing.T, ch <-chan string, wantControl string) {
+// wantControl and carrying wantSession within a short window. Checking the
+// Session header guards the invariant that the fire-and-forget TEARDOWN carries
+// the session recordSession stored before the transport parse, so a compliant
+// server can scope the release to the one rejected stream.
+func assertTeardown(t *testing.T, ch <-chan string, wantControl, wantSession string) {
 	t.Helper()
 	select {
 	case got := <-ch:
-		if want := methodTeardown + " " + wantControl; got != want {
+		if want := methodTeardown + " " + wantControl + " Session=" + wantSession; got != want {
 			t.Errorf("server received %q, want %q", got, want)
 		}
 	case <-time.After(2 * time.Second):
@@ -146,7 +149,7 @@ func TestSetupChannelConflict(t *testing.T) {
 	}
 	// The rejected stream is released on the server so an aggregate PLAY cannot
 	// stream it into track 0's depacketizer.
-	assertTeardown(t, teardownURL, tracks[1].Control)
+	assertTeardown(t, teardownURL, tracks[1].Control, testSessionID)
 	// The session must survive a rejected Setup: the first track's exact channel
 	// pair is still bound, untouched by track 1's teardown.
 	chans := c.SessionInfo().Channels
@@ -178,7 +181,7 @@ func TestSetupBadTransport(t *testing.T) {
 	if !errors.Is(err, rtsp.ErrNoInterleaved) {
 		t.Fatalf("Setup = %v, want ErrNoInterleaved", err)
 	}
-	assertTeardown(t, teardownURL, tracks[0].Control)
+	assertTeardown(t, teardownURL, tracks[0].Control, testSessionID)
 }
 
 // TestSetupMalformedTransportTearsDown covers the ParseTransport-failure branch
@@ -204,7 +207,7 @@ func TestSetupMalformedTransportTearsDown(t *testing.T) {
 	if !errors.Is(err, rtsp.ErrMalformedTransport) {
 		t.Fatalf("Setup = %v, want ErrMalformedTransport", err)
 	}
-	assertTeardown(t, teardownURL, tracks[0].Control)
+	assertTeardown(t, teardownURL, tracks[0].Control, testSessionID)
 	if c.SessionInfo().SessionID != testSessionID {
 		t.Errorf("SessionID = %q, want %q", c.SessionInfo().SessionID, testSessionID)
 	}
