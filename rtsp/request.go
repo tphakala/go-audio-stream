@@ -31,19 +31,6 @@ func (c *Client) roundTrip(ctx context.Context, req *Request) (*Response, error)
 	if sess != "" {
 		req.Header.Set("Session", sess)
 	}
-	c.attachAuthorization(req)
-
-	raw, err := MarshalRequest(req)
-	if err != nil {
-		// A marshal failure (for example a request URI over MaxRequestURILen)
-		// happens before the pending entry is registered and before any write,
-		// so nothing else will ever funnel shutdown. Funnel it here as the
-		// first cause so closing/done close and callers (Dial's cleanup, Wait)
-		// unblock instead of parking on a bare receive forever.
-		c.initiateShutdown(err)
-		return nil, err
-	}
-
 	ch := make(chan *Response, 1)
 	c.pendMu.Lock()
 	c.pending[cseq] = ch
@@ -54,10 +41,25 @@ func (c *Client) roundTrip(ctx context.Context, req *Request) (*Response, error)
 		c.pendMu.Unlock()
 	}()
 
-	if werr := c.writeMessage(raw); werr != nil {
-		wrapped := fmt.Errorf("%w: %w", ErrConnectionClosed, werr)
-		c.initiateShutdown(wrapped)
-		return nil, wrapped
+	// Allocate the nonce count, compute the Authorization, marshal, and write,
+	// all under one writeMu (writeAuthorizedRequest), so the nonce-count order
+	// and the wire order stay the same order (RFC 7616 section 3.4.3, issue
+	// #17). Every non-nil error funnels shutdown here, but for different
+	// reasons: a write or deadline error also reaches the reader through the
+	// broken socket, whereas a marshal failure (for example a request URI over
+	// MaxRequestURILen) never touched the wire, so this is the one funnel point
+	// nothing else would reach. The deferred cleanup above removes the pending
+	// entry regardless, so callers (Dial's cleanup, Wait) unblock instead of
+	// parking on a bare receive forever. A marshal failure returns
+	// ErrInvalidRequest unwrapped; a write or deadline error wraps
+	// ErrConnectionClosed.
+	if werr := c.writeAuthorizedRequest(req); werr != nil {
+		cause := werr
+		if !errors.Is(werr, ErrInvalidRequest) {
+			cause = fmt.Errorf("%w: %w", ErrConnectionClosed, werr)
+		}
+		c.initiateShutdown(cause)
+		return nil, cause
 	}
 
 	timer := time.NewTimer(c.cfg.Timeout)
@@ -89,6 +91,34 @@ func (c *Client) roundTrip(ctx context.Context, req *Request) (*Response, error)
 	}
 }
 
+// writeAuthorizedRequest allocates the nonce count and computes the
+// Authorization header (attachAuthorization), marshals req, and writes it, all
+// under one writeMu critical section, so the nonce-count order and the wire
+// order are the same order (RFC 7616 section 3.4.3, issue #17).
+// attachAuthorization increments nc under mu; folding it and the write into a
+// single writeMu hold stops a second sender from allocating a higher nc and
+// reaching the socket first.
+//
+// It returns MarshalRequest's error unwrapped, so a caller can match
+// ErrInvalidRequest, and the deadline or socket write error otherwise.
+// attachAuthorization takes mu while this holds writeMu; mu is only ever taken
+// while writeMu is held, never the reverse, so the writeMu->mu order is uniform
+// and cannot deadlock.
+func (c *Client) writeAuthorizedRequest(req *Request) error {
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
+	c.attachAuthorization(req)
+	raw, err := MarshalRequest(req)
+	if err != nil {
+		return err
+	}
+	if err := c.armWriteDeadline(c.cfg.Timeout); err != nil {
+		return err
+	}
+	_, err = c.conn.Write(raw)
+	return err
+}
+
 // marshalBareRequest builds and marshals a request that deliberately bypasses
 // roundTrip: a fresh CSeq, the standard headers, and credentials when auth is
 // active, with no pending entry registered and no reply awaited. Its two callers
@@ -100,6 +130,10 @@ func (c *Client) roundTrip(ctx context.Context, req *Request) (*Response, error)
 // challenges every request leaves the session allocated until the server's own
 // timeout. Note it applies no lifecycle-state branch of its own, so routing a
 // caller through it cannot change what that caller sends.
+//
+// Callers must hold writeMu across this call and the socket write that follows,
+// so the nonce count attachAuthorization allocates reaches the wire in
+// allocation order relative to a concurrent sender's (issue #17).
 func (c *Client) marshalBareRequest(method, url string) ([]byte, error) {
 	c.mu.Lock()
 	sess := c.sessionID
@@ -231,13 +265,14 @@ func authFailed(ue *UnauthorizedError, why string) error {
 // seen; deleting it sends the request unauthenticated instead, which is what
 // re-enters the auth path.
 //
-// marshalBareRequest calls it too, on behalf of the keepalive timer and the
-// best-effort TEARDOWN, so nc is allocated on whichever goroutine is sending.
-// The count is allocated under mu but the write happens after mu is released, so
-// two goroutines sending at once can put their nc values on the wire out of
-// order. A server that requires a strictly increasing nc would reject the later
-// one; that costs one keepalive against the alternative of sending none of them
-// authenticated at all.
+// The nonce count is allocated here under mu. The senders that can run at the
+// same time (roundTrip via writeAuthorizedRequest, the keepalive timer, and the
+// best-effort TEARDOWN) each perform this call and the socket write inside a
+// single writeMu hold, so the nc order and the wire order are the same order
+// (issue #17): an RFC 7616 section 3.4.3 server tracking the highest nc seen
+// under a nonce cannot observe a later count reach the socket before an earlier
+// one. This takes mu while the caller holds writeMu; mu is only ever taken
+// while writeMu is held, never the reverse, so the ordering cannot deadlock.
 func (c *Client) attachAuthorization(req *Request) {
 	c.mu.Lock()
 	if !c.auth.active {

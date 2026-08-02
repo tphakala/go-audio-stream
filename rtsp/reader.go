@@ -545,18 +545,20 @@ func (c *Client) sendTeardownBestEffort() {
 	reqURL := c.baseURL
 	c.mu.Unlock()
 
+	c.writeMu.Lock()
 	// Credentials matter more here than anywhere. A TEARDOWN answered 401 leaves
 	// the server holding the session until its own timeout, and on a camera that
 	// allows one session at a time that refuses the next Dial. They come from
 	// marshalBareRequest, shared with the keepalive, because this request does
 	// not go through roundTrip and an inline copy of the header set is exactly
-	// how they came to be missing here in the first place.
+	// how they came to be missing here in the first place. Building and writing
+	// under one writeMu also keeps the nonce count marshalBareRequest allocates
+	// in the same order on the wire as a concurrent sender's (issue #17).
 	raw, err := c.marshalBareRequest(methodTeardown, reqURL)
 	if err != nil {
+		c.writeMu.Unlock()
 		return
 	}
-
-	c.writeMu.Lock()
 	// Both deadlines go through the guarded helpers. Setting them directly
 	// would push the socket deadline FORWARD, which is exactly what
 	// deadlineMu exists to stop: initiateShutdown closes c.closing before it

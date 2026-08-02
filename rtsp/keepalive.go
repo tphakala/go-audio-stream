@@ -77,6 +77,11 @@ func (c *Client) sendKeepalive() {
 		method = methodOptions
 	}
 
+	// Allocate the nonce count (inside marshalBareRequest) and write under one
+	// writeMu, so a concurrent sender cannot put a later nonce count on the wire
+	// ahead of this one (RFC 7616 section 3.4.3, issue #17).
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
 	raw, err := c.marshalBareRequest(method, reqURL)
 	if err != nil {
 		// Nothing to fall back to: the same request will be built the same way
@@ -88,7 +93,10 @@ func (c *Client) sendKeepalive() {
 			"method", method, "error", err)
 		return
 	}
-	_ = c.writeMessage(raw)
+	if err := c.armWriteDeadline(c.cfg.Timeout); err != nil {
+		return
+	}
+	_, _ = c.conn.Write(raw)
 }
 
 // sendReceiverReports emits one RTCP Receiver Report per non-discard track on
