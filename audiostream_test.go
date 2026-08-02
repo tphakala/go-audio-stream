@@ -69,6 +69,9 @@ func TestRedirectError(t *testing.T) {
 	if !errors.As(err, &redirect) {
 		t.Fatal("RedirectError must be matchable with errors.As")
 	}
+	if !errors.Is(err, audiostream.ErrRedirect) {
+		t.Error("RedirectError must be matchable with errors.Is via ErrRedirect")
+	}
 	if redirect.Location != "rtsp://other/stream" {
 		t.Errorf("Location = %q, want %q", redirect.Location, "rtsp://other/stream")
 	}

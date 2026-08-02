@@ -98,7 +98,6 @@ func reportCapture(b *strings.Builder, r *Report) {
 	fmt.Fprintf(b, "capture: track %d, window %s, ended %s\n",
 		r.AudioTrack.ID, r.Window, endReasonPhrase(r.Reason))
 	fmt.Fprintf(b, "  packets: %d\n", c.Packets)
-	fmt.Fprintf(b, "  received: %d\n", c.Received)
 	fmt.Fprintf(b, "  bytes: %d\n", c.Bytes)
 	fmt.Fprintf(b, "  lost: %d (%.2f%%)\n", c.Lost, c.LossRatio*100)
 	fmt.Fprintf(b, "  duplicates: %d\n", c.Duplicates)

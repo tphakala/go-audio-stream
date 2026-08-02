@@ -24,7 +24,6 @@ tracks
 
 capture: track 0, window 10s, ended completed
   packets: 500
-  received: 500
   bytes: 64000
   lost: 0 (0.00%)
   duplicates: 0

@@ -58,15 +58,12 @@ func TestComputeStatsJitterMultiAUPacket(t *testing.T) {
 	}
 }
 
-// TestComputeStatsReceivedAndDuplicates checks that the library's Received and
-// Duplicates counters are surfaced into CaptureStats unchanged.
-func TestComputeStatsReceivedAndDuplicates(t *testing.T) {
+// TestComputeStatsDuplicates checks that the library's Duplicates counter is
+// surfaced into CaptureStats unchanged.
+func TestComputeStatsDuplicates(t *testing.T) {
 	t.Parallel()
-	lib := audiostream.TrackStats{Packets: 500, Received: 500, Bytes: 64000, SeqGaps: 3, Duplicates: 2, Malformed: 1}
+	lib := audiostream.TrackStats{Packets: 500, Bytes: 64000, SeqGaps: 3, Duplicates: 2, Malformed: 1}
 	stats := computeStats(nil, lib, 48000, time.Second)
-	if stats.Received != 500 {
-		t.Errorf("Received = %d, want 500", stats.Received)
-	}
 	if stats.Duplicates != 2 {
 		t.Errorf("Duplicates = %d, want 2", stats.Duplicates)
 	}
