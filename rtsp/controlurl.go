@@ -107,13 +107,15 @@ func ResolveBaseURL(requestURL, contentBase, contentLocation string) (string, er
 // One consequence is worth knowing. When base already carries a query, the
 // appended segment lands INSIDE that query: "rtsp://h/s?token=a" plus
 // "trackID=1" gives "rtsp://h/s?token=a/trackID=1", which re-parses with
-// RawQuery "token=a/trackID=1" rather than as a new path segment. The string
-// is a well-formed URL and this is the long-standing behaviour, so it is
-// pinned by test rather than changed blind; whether a query-bearing base
-// wants this form or "<path>/<control>?<query>" has not been confirmed
-// against real hardware. Revisit it with live camera testing before
-// changing it, since either choice silently rewrites every SETUP target for
-// token-authenticated cameras.
+// RawQuery "token=a/trackID=1" rather than as a new path segment. This is
+// deliberate and validated, not a quirk to fix: it mirrors how MediaMTX forms
+// its own aggregate base (it advertises Content-Base "rtsp://h/s?token=a/",
+// with the separator inside the query) and how ffmpeg/libav resolves the same
+// input, and a server that authenticates from the query still recovers the
+// token, because it strips the trailing control segment before reading the
+// query. Confirmed end to end against MediaMTX with token-in-query
+// authentication, and against a camera that carries no query; the behaviour is
+// kept and pinned by test.
 //
 // The userinfo from base is preserved. It returns ErrInvalidURL when base
 // does not parse, and never panics.

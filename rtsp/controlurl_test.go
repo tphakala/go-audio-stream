@@ -170,10 +170,11 @@ func TestResolveControlURL(t *testing.T) {
 		},
 		// The base-carrying-a-query cases. Appending is textual, so a
 		// non-"?" control lands inside the existing query rather than after
-		// it. These pin the current behaviour so it cannot drift silently:
-		// re-attaching the query after the control path would rewrite every
-		// request URL sent to a token-authenticated camera, so that change
-		// needs live-hardware evidence, not a passing unit test.
+		// it. Live testing confirmed this is the right form: MediaMTX
+		// advertises it in its own Content-Base and recovers the query token
+		// from the resulting SETUP URI, so re-attaching the query after the
+		// control path is unnecessary and would needlessly rewrite every
+		// request URL sent to a token-authenticated camera.
 		{
 			name:    "C4a relative control appends inside an existing query",
 			base:    "rtsp://cam:554/stream?token=abc",
