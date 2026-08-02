@@ -44,10 +44,11 @@ var (
 //
 // A Transport this client rejects (ErrNoInterleaved, ErrBadChannelPair,
 // ErrChannelConflict, ErrMalformedTransport) is not the same case. The server
-// answered 2xx, so it has already allocated that stream and its channels, and
-// this client neither records them nor tears that one track down. Prefer Close
-// after such a rejection: continuing with another track risks the server
-// streaming two tracks over one channel once PLAY starts the aggregate session.
+// answered 2xx, so it has already allocated that stream and its channels. This
+// client records nothing for the track and releases the server's stream with a
+// best-effort per-track TEARDOWN, so an aggregate PLAY cannot go on to stream it
+// over a channel no track claimed. The session survives: the caller may set up
+// another track or PLAY the ones that succeeded.
 //
 // On success it transitions the client into the setup state.
 //
@@ -80,15 +81,55 @@ func (c *Client) Setup(ctx context.Context, trk Track, opts SetupOptions) error 
 	raw := resp.Header.Get("Transport")
 	th, terr := ParseTransport(raw)
 	if terr != nil {
+		// The server answered SETUP 2xx and allocated the stream before echoing
+		// a Transport this client cannot parse. Release just that stream so an
+		// aggregate PLAY does not go on to stream it (see #15).
+		c.teardownRejectedStream(trk.Control)
 		return fmt.Errorf("track %d: %w (Transport: %q)", trk.ID, terr, raw)
 	}
 	gotRTP, gotRTCP, cerr := th.InterleavedChannels(c.claimedChannels())
 	if cerr != nil {
+		// The server allocated the stream, then echoed an interleaved Transport
+		// this client cannot bind (a channel conflict or missing pair). Release
+		// just that stream: an aggregate PLAY would otherwise stream it on
+		// channels no track claimed, routing its RTP into another track's
+		// depacketizer as counterfeit audio (see #15).
+		c.teardownRejectedStream(trk.Control)
 		return fmt.Errorf("track %d: %w (Transport: %q)", trk.ID, cerr, raw)
 	}
 
 	tr := newTrack(trk.ID, desc, opts, gotRTCP, c.cfg.Logger)
 	return c.publishTrack(tr, gotRTP, gotRTCP)
+}
+
+// teardownRejectedStream sends a best-effort per-track TEARDOWN for a stream the
+// server allocated (it answered SETUP 2xx) but whose echoed Transport this
+// client could not bind. Without it the server keeps that stream, and because
+// PLAY is an aggregate operation the server would stream it on channels this
+// client never bound, feeding its RTP into another track's depacketizer as
+// counterfeit audio. Only the one rejected stream is released; the session and
+// any already-bound tracks survive, so the caller may still set up other tracks
+// or PLAY the ones that succeeded.
+//
+// It is fire-and-forget through marshalBareRequest and writeMessage, the same
+// non-fatal idiom the keepalive and the close-time TEARDOWN use, and
+// deliberately NOT c.do/roundTrip. roundTrip funnels a write error, a request
+// timeout, or a ctx cancellation into initiateShutdown, which would tear the
+// whole session down, and a server that just echoed an unbindable Transport is
+// exactly the kind that may never answer this TEARDOWN. The request-URI is the
+// rejected track's own control URL (so a compliant server releases just that
+// stream), and marshalBareRequest attaches the Session recordSession stored
+// before the parse. No pending entry is registered, so any reply is dropped as
+// an unknown CSeq; a server that honours only an aggregate TEARDOWN still
+// releases the stream when the session is closed.
+func (c *Client) teardownRejectedStream(control string) {
+	raw, err := c.marshalBareRequest(methodTeardown, control)
+	if err != nil {
+		logWarn(c.cfg.Logger, "could not marshal a TEARDOWN for a rejected stream; the server may hold it until its own timeout",
+			"error", err)
+		return
+	}
+	_ = c.writeMessage(raw)
 }
 
 // describedTrackFor checks the lifecycle gate and validates trk against the
