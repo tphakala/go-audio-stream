@@ -111,7 +111,6 @@ tracks
 
 capture (10s, track 0, ended: completed)
   packets     500
-  received    500
   bytes       64000
   lost        0 (0.00%)
   duplicates  0
@@ -129,7 +128,7 @@ func TestRunHappyPathWalkthrough(t *testing.T) {
 		session: happySession(),
 		result: CaptureResult{
 			Frames:  frames500(),
-			Stats:   audiostream.TrackStats{Packets: 500, Received: 500, Bytes: 64000},
+			Stats:   audiostream.TrackStats{Packets: 500, Bytes: 64000},
 			Window:  10 * time.Second,
 			Elapsed: 10 * time.Second,
 			Reason:  EndCompleted,
@@ -249,7 +248,7 @@ func TestRunUnsupportedCodec(t *testing.T) {
 		session: happySession(),
 		result: CaptureResult{
 			Frames:  frames500(),
-			Stats:   audiostream.TrackStats{Packets: 500, Received: 500, Bytes: 64000},
+			Stats:   audiostream.TrackStats{Packets: 500, Bytes: 64000},
 			Window:  10 * time.Second,
 			Elapsed: 10 * time.Second,
 			Reason:  EndCompleted,
@@ -280,7 +279,7 @@ func TestRunSetupAudioOnly(t *testing.T) {
 		session: happySession(),
 		result: CaptureResult{
 			Frames:  frames500(),
-			Stats:   audiostream.TrackStats{Packets: 500, Received: 500, Bytes: 64000},
+			Stats:   audiostream.TrackStats{Packets: 500, Bytes: 64000},
 			Elapsed: 10 * time.Second,
 			Reason:  EndCompleted,
 		},
@@ -312,7 +311,7 @@ func TestRunSetupFullStream(t *testing.T) {
 		},
 		result: CaptureResult{
 			Frames:  frames500(),
-			Stats:   audiostream.TrackStats{Packets: 500, Received: 500, Bytes: 64000},
+			Stats:   audiostream.TrackStats{Packets: 500, Bytes: 64000},
 			Elapsed: 10 * time.Second,
 			Reason:  EndCompleted,
 		},
@@ -344,7 +343,7 @@ func TestRunSetupFullStreamTwoNonAudio(t *testing.T) {
 		session: happySession(),
 		result: CaptureResult{
 			Frames:  frames500(),
-			Stats:   audiostream.TrackStats{Packets: 500, Received: 500, Bytes: 64000},
+			Stats:   audiostream.TrackStats{Packets: 500, Bytes: 64000},
 			Elapsed: 10 * time.Second,
 			Reason:  EndCompleted,
 		},

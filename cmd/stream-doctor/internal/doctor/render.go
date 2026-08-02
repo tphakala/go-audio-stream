@@ -183,7 +183,6 @@ func renderCapture(b *strings.Builder, r *Report) {
 	fmt.Fprintln(b)
 	fmt.Fprintf(b, "capture (%s, track %d, ended: %s)\n", r.Window, r.AudioTrack.ID, r.Reason)
 	fmt.Fprintf(b, captureInt, "packets", r.Capture.Packets)
-	fmt.Fprintf(b, captureInt, "received", r.Capture.Received)
 	fmt.Fprintf(b, captureInt, "bytes", r.Capture.Bytes)
 	fmt.Fprintf(b, "  %-12s%d (%.2f%%)\n", "lost", r.Capture.Lost, r.Capture.LossRatio*100)
 	fmt.Fprintf(b, captureInt, "duplicates", r.Capture.Duplicates)

@@ -35,7 +35,7 @@ func goldenReport() Report {
 		},
 		AudioTrack:   rtsp.Track{ID: 0, Media: audiostream.MediaAudio, Codec: audiostream.CodecAAC{AudioSpecificConfig: []byte{0x14, 0x08}}, ClockRate: 16000, Channels: 1, PayloadType: 97, FMTP: testAACFmtp},
 		HaveAudio:    true,
-		Capture:      CaptureStats{Packets: 500, Received: 500, Bytes: 64000, Lost: 0, LossRatio: 0, Duplicates: 0, Malformed: 2, SSRCResets: 1, MaxGap: 0, Bitrate: 51200, JitterMS: 0.586},
+		Capture:      CaptureStats{Packets: 500, Bytes: 64000, Lost: 0, LossRatio: 0, Duplicates: 0, Malformed: 2, SSRCResets: 1, MaxGap: 0, Bitrate: 51200, JitterMS: 0.586},
 		CaptureShown: true,
 		Window:       10 * time.Second,
 		Reason:       EndCompleted,

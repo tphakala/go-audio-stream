@@ -39,6 +39,6 @@
 // StateError against ErrInvalidState. Recover a typed error's fields with
 // errors.As: *ResponseError for the status Code and Reason, *UnauthorizedError
 // for the raw challenges, *StateError for the rejected Method and State, and
-// the root package's *audiostream.RedirectError for a 3xx Location, which has
-// no sentinel and is matched with errors.As only.
+// the root package's *audiostream.RedirectError for a 3xx Location, which also
+// matches errors.Is against audiostream.ErrRedirect.
 package rtsp
