@@ -347,26 +347,31 @@ func TestDescribeTwiceRejected(t *testing.T) {
 }
 
 func TestControlURLVariants(t *testing.T) {
-	// A fixed Content-Base (different host) makes the resolved SETUP URL
-	// port-independent for the trailing-slash row, so every fixture is built
-	// before the server starts and captured read-only by the handler.
-	const trailingBase = "rtsp://cam.example/stream/"
+	// The Content-Base and Content-Location rows carry a foreign host
+	// (cam.example) the request was never dialed against, AND a path (/onvif/)
+	// distinct from the dial path (/stream). ResolveBaseURL keeps only such a
+	// header's path and takes the authority from the request URL, so the
+	// resolved SETUP URL is rtsp://<dialhost>/onvif/trackID=1: the host proves
+	// the authority was forced (see #14), and the /onvif/ path proves the header
+	// (not the request URL) sourced the path and, for the last row, that the
+	// Content-Location fallback actually fired.
+	const foreignBase = "rtsp://cam.example/onvif/"
 	cases := []struct {
 		name            string
 		control         string
 		contentBase     string // "" omits Content-Base
 		contentLocation string // "" omits Content-Location
 		wantSuffix      string // appended to the dial host base (scheme://host:port)
-		wantFixed       string // non-empty overrides wantSuffix with an absolute URL
 	}{
 		{name: "bare token", control: controlTrackID1, wantSuffix: "/stream/trackID=1"},
-		{name: "trailing-slash base", control: controlTrackID1, contentBase: trailingBase, wantFixed: "rtsp://cam.example/stream/trackID=1"},
+		{name: "content-base foreign host forced, header path kept", control: controlTrackID1, contentBase: foreignBase, wantSuffix: "/onvif/trackID=1"},
 		{name: "absolute wrong host", control: "rtsp://192.168.1.99:554/wrong/track1", wantSuffix: "/wrong/track1"},
 		{name: "query only", control: "?ctl=1", wantSuffix: "/stream?ctl=1"},
 		{name: "star", control: "*", wantSuffix: "/stream"},
 		// Content-Base absent, so ResolveBaseURL falls back to Content-Location.
-		// The previous row here repeated "bare token" verbatim and tested nothing.
-		{name: "content-location fallback", control: controlTrackID1, contentLocation: trailingBase, wantFixed: "rtsp://cam.example/stream/trackID=1"},
+		// The /onvif/ path (distinct from the /stream dial path) makes this row
+		// fail if the fallback were dropped, so it genuinely exercises it.
+		{name: "content-location fallback forced, header path kept", control: controlTrackID1, contentLocation: foreignBase, wantSuffix: "/onvif/trackID=1"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -385,11 +390,7 @@ func TestControlURLVariants(t *testing.T) {
 				drainRequests(sc)
 			}})
 
-			want := tc.wantFixed
-			if want == "" {
-				hostBase := strings.TrimSuffix(s.URL(""), "/")
-				want = hostBase + tc.wantSuffix
-			}
+			want := strings.TrimSuffix(s.URL(""), "/") + tc.wantSuffix
 
 			c := dialIdle(t, s.URL("/stream"))
 			defer closeAndWait(t, c)

@@ -16,8 +16,14 @@ var ErrInvalidURL = errors.New("rtsp: invalid URL")
 // request URL. A header value beginning with "/" is resolved as an absolute
 // path against the request URL's scheme and host (ignoring any host a
 // misbehaving server put after the path); an otherwise-absolute header
-// value is used as-is; a relative header value is joined onto the request
-// URL. The userinfo (credentials) from requestURL is re-attached to the
+// value contributes only its path and query, with scheme and host taken from
+// the request URL (firmware bakes wrong LAN or placeholder authorities into
+// these headers, and the request-URI must address the host the socket is
+// already connected to); an absolute header value carrying no authority (an
+// opaque "rtsp:stream" or an empty-authority "rtsp:///path") is malformed as a
+// base and is ignored in favour of the request URL; a relative header value is
+// joined onto the request URL. The userinfo (credentials) from requestURL is
+// re-attached to the
 // result, since the base URL later carries aggregate PLAY/TEARDOWN/keepalive
 // requests that must still authenticate. It returns ErrInvalidURL when
 // requestURL does not parse, and never panics.
@@ -47,9 +53,29 @@ func ResolveBaseURL(requestURL, contentBase, contentLocation string) (string, er
 		if perr != nil {
 			return "", ErrInvalidURL
 		}
-		if parsed.IsAbs() {
-			resolvedStr = source
-		} else {
+		switch {
+		case parsed.IsAbs() && parsed.Host != "":
+			// An absolute Content-Base/Content-Location with an authority
+			// contributes only its path and query; scheme and host come from
+			// the already-connected request URL, mirroring resolveAbsoluteControl.
+			// IsAbs tests only that a scheme is present, so the header authority
+			// (and even its scheme) is untrusted: firmware bakes wrong LAN or
+			// placeholder addresses into it, and every later aggregate
+			// PLAY/TEARDOWN/keepalive travels the established socket regardless,
+			// so a header authority must never redirect the request-URI.
+			resolvedStr = reqURL.Scheme + "://" + reqURL.Host + parsed.EscapedPath()
+			if parsed.RawQuery != "" {
+				resolvedStr = resolvedStr + "?" + parsed.RawQuery
+			}
+		case parsed.IsAbs():
+			// Absolute but authority-less: an opaque form ("rtsp:stream", whose
+			// segment url.Parse stores in Opaque, not Path) or an empty authority
+			// ("rtsp:///path"). It carries no host to distrust and is malformed
+			// as an RTSP base, so fall back to the request URL rather than adopt
+			// a hostless base or silently drop the opaque segment through
+			// EscapedPath.
+			resolvedStr = requestURL
+		default:
 			resolvedStr = reqURL.ResolveReference(parsed).String()
 		}
 	}
