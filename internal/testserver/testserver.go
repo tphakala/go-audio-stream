@@ -26,17 +26,17 @@ import (
 	"github.com/tphakala/go-audio-stream/rtsp"
 )
 
-// readTimeout bounds a single server-side read, re-armed per read. Long enough
-// not to fire on a scripted exchange, short enough that a stalled client fails
-// the test rather than hanging the package. A test that deliberately holds a
-// session idle longer than this (a keepalive-interval test, say) must raise it,
-// or the server will close mid-test and the client will report a connection
+// defaultReadTimeout bounds a single server-side read, re-armed per read, when
+// Options.ReadTimeout is unset. Long enough not to fire on a scripted exchange,
+// short enough that a stalled client fails the test rather than hanging the
+// package. A test that deliberately holds a session idle longer than this (a
+// keepalive-interval test, say) raises it through Options.ReadTimeout;
+// otherwise the server closes mid-test and the client reports a connection
 // error instead of the behaviour under test.
-const readTimeout = 10 * time.Second
+const defaultReadTimeout = 10 * time.Second
 
-// readChunk is the per-read buffer size for the connection accumulation
-// buffer. It is a plain constant, not tuned: the wire units are small and
-// the M4a parsers enforce their own caps.
+// readChunk is the per-read scratch size for the connection accumulation
+// buffer.
 const readChunk = 4096
 
 // Server is a scripted in-process RTSP server on a loopback listener. It
@@ -65,6 +65,10 @@ type Options struct {
 	// Handle runs once per accepted connection with a ServerConn bound to
 	// it. When Handle returns, the connection is closed. Required.
 	Handle func(*ServerConn)
+	// ReadTimeout bounds each server-side socket read. Zero uses
+	// defaultReadTimeout. Raise it for a test that deliberately holds the
+	// session idle longer than the default, such as a keepalive-interval test.
+	ReadTimeout time.Duration
 }
 
 // New starts a Server and registers cleanup on t. It listens on
@@ -162,7 +166,11 @@ func (s *Server) acceptLoop() {
 func (s *Server) handle(conn net.Conn) {
 	defer s.wg.Done()
 	defer func() { _ = conn.Close() }()
-	sc := &ServerConn{t: s.t, conn: conn}
+	rt := s.opts.ReadTimeout
+	if rt <= 0 {
+		rt = defaultReadTimeout
+	}
+	sc := &ServerConn{t: s.t, conn: conn, readTimeout: rt}
 	s.opts.Handle(sc)
 }
 
@@ -219,6 +227,9 @@ func generateSelfSigned() (tls.Certificate, []byte, error) {
 type ServerConn struct {
 	t    *testing.T
 	conn net.Conn
+	// readTimeout is the deadline fill arms before each read, taken from
+	// Options.ReadTimeout or defaultReadTimeout.
+	readTimeout time.Duration
 
 	// buf accumulates unparsed bytes; start is the parse offset into buf.
 	buf   []byte
@@ -243,7 +254,7 @@ func (sc *ServerConn) fill() error {
 	// what a bug in the code under test produces) blocks here forever, so the
 	// package dies on the 10-minute timeout with a stack pointing at the
 	// harness rather than failing at the assertion.
-	_ = sc.conn.SetReadDeadline(time.Now().Add(readTimeout))
+	_ = sc.conn.SetReadDeadline(time.Now().Add(sc.readTimeout))
 	var tmp [readChunk]byte
 	n, err := sc.conn.Read(tmp[:])
 	if n > 0 {
@@ -399,6 +410,24 @@ func (sc *ServerConn) Respond(req *rtsp.Request, code int, reason string, header
 		CSeq:       req.CSeq,
 		Header:     headers,
 		Body:       body,
+	})
+	if err != nil {
+		return err
+	}
+	_, err = sc.conn.Write(raw)
+	return err
+}
+
+// SendResponse writes a bare response carrying an explicit status code and
+// CSeq, for a test that must answer with a CSeq no request produced: Respond
+// echoes a *rtsp.Request's CSeq and cannot express a stray response the client
+// never asked for (the reader's unknown-CSeq drop path). The reason phrase is a
+// fixed "OK"; these tests assert on the status code and CSeq, not the phrase.
+func (sc *ServerConn) SendResponse(code, cseq int) error {
+	raw, err := rtsp.MarshalResponse(&rtsp.Response{
+		StatusCode: code,
+		Reason:     "OK",
+		CSeq:       cseq,
 	})
 	if err != nil {
 		return err
@@ -721,11 +750,13 @@ func (sc *ServerConn) verifyDigest(req *rtsp.Request, spec *AuthSpec) {
 }
 
 // parseDigestParams splits a Digest Authorization value into its auth-params,
-// lowercasing names and stripping surrounding quotes. It is sufficient for the
-// test payloads, whose values carry no embedded commas.
+// lowercasing names and stripping surrounding quotes. The split respects
+// double-quoted values, so a comma inside a quoted value (a digest uri carrying
+// a query string, say) no longer truncates it. The first "=" separates each
+// param's name from its value, so a value's own "=" is preserved.
 func parseDigestParams(header string) map[string]string {
 	params := map[string]string{}
-	for _, part := range strings.Split(strings.TrimPrefix(header, "Digest "), ",") {
+	for _, part := range splitUnquoted(strings.TrimPrefix(header, "Digest "), ',') {
 		k, v, ok := strings.Cut(strings.TrimSpace(part), "=")
 		if !ok {
 			continue
@@ -733,6 +764,26 @@ func parseDigestParams(header string) map[string]string {
 		params[strings.ToLower(strings.TrimSpace(k))] = strings.Trim(strings.TrimSpace(v), `"`)
 	}
 	return params
+}
+
+// splitUnquoted splits s on sep, but only where sep falls outside a
+// double-quoted span, so a quoted auth-param value containing sep stays intact.
+func splitUnquoted(s string, sep byte) []string {
+	var parts []string
+	inQuote := false
+	start := 0
+	for i := 0; i < len(s); i++ {
+		switch s[i] {
+		case '"':
+			inQuote = !inQuote
+		case sep:
+			if !inQuote {
+				parts = append(parts, s[start:i])
+				start = i + 1
+			}
+		}
+	}
+	return append(parts, s[start:])
 }
 
 // digestHasher returns a hex-hashing function for the challenge algorithm:

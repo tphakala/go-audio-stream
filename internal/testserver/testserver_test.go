@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/tphakala/go-audio-stream/rtsp"
 )
@@ -537,6 +538,51 @@ func TestServerCloseAbrupt(t *testing.T) {
 	c.send(methodOptions, s.URL("/stream"), nil, nil)
 	if _, err := c.readResponse(); err == nil {
 		t.Error("expected read error after abrupt Close, got nil")
+	}
+}
+
+func TestParseDigestParamsQuotedComma(t *testing.T) {
+	t.Parallel()
+	// A digest uri carrying a query string puts a comma and an interior '='
+	// inside the quoted value. The parser must keep the value whole rather than
+	// splitting on the interior comma or truncating at the interior '=' (the
+	// latent flake noted in issue #20).
+	header := `Digest username="admin", realm="cam", nonce="abc", ` +
+		`uri="rtsp://cam/stream?a=1,b=2", response="deadbeef", qop=auth, nc=00000001, cnonce="xyz"`
+	params := parseDigestParams(header)
+	checks := map[string]string{
+		"uri":      "rtsp://cam/stream?a=1,b=2",
+		"response": "deadbeef",
+		"qop":      "auth",
+		"nc":       "00000001",
+		"nonce":    "abc",
+	}
+	for key, want := range checks {
+		if got := params[key]; got != want {
+			t.Errorf("params[%q] = %q, want %q", key, got, want)
+		}
+	}
+}
+
+func TestOptionsReadTimeout(t *testing.T) {
+	t.Parallel()
+	// A small ReadTimeout makes an idle read fail quickly instead of waiting out
+	// defaultReadTimeout, which is what lets a keepalive-interval test hold the
+	// session idle without the server closing under it (issue #20).
+	errCh := make(chan error, 1)
+	s := New(t, Options{ReadTimeout: 50 * time.Millisecond, Handle: func(sc *ServerConn) {
+		_, err := sc.ReadRequest()
+		errCh <- err
+	}})
+	// Connect but never send: the server's ReadRequest must hit the deadline.
+	dialPlain(t, s, "/stream")
+	select {
+	case err := <-errCh:
+		if err == nil {
+			t.Error("ReadRequest returned nil, want a read-deadline error")
+		}
+	case <-time.After(2 * time.Second):
+		t.Error("ReadRequest did not return within 2s; ReadTimeout was not applied")
 	}
 }
 
