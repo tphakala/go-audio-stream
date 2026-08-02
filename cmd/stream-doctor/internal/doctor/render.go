@@ -118,8 +118,8 @@ func writeTracksSection(b *strings.Builder, tracks []rtsp.Track) {
 		// codecName can echo a CodecUnknown's raw rtpmap; like FMTP it is
 		// scrubbed and made fence-safe at the describe boundary (doctor.go), so
 		// it is rendered raw here.
-		fmt.Fprintf(b, "  track %d: %s, %s, PT %d, clock %d, ch %s, depacketize %s\n",
-			t.ID, t.Media.String(), codecName(t.Codec), t.PayloadType, t.ClockRate,
+		fmt.Fprintf(b, "  track %d: %s, %s, PT %s, clock %d, ch %s, depacketize %s\n",
+			t.ID, t.Media.String(), codecName(t.Codec), payloadTypeCell(t.PayloadType), t.ClockRate,
 			channelsCell(t.Channels), depacketizeCell(decodable(t)))
 		if t.Media != audiostream.MediaAudio {
 			continue
@@ -244,6 +244,16 @@ func channelsCell(n int) string {
 		return "-"
 	}
 	return strconv.Itoa(n)
+}
+
+// payloadTypeCell renders the payload-type column: the numeric RTP payload
+// type, or "-" for the -1 sentinel a media section that lists no format
+// carries, matching how channelsCell renders an unknown channel count.
+func payloadTypeCell(pt int) string {
+	if pt < 0 {
+		return "-"
+	}
+	return strconv.Itoa(pt)
 }
 
 // depacketizeCell renders the depacketize column from decodability.

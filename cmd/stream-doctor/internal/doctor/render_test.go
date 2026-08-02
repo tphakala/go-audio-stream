@@ -79,6 +79,22 @@ func TestRenderWalkthroughColumns(t *testing.T) {
 		}
 	})
 
+	t.Run("unknown payload type renders dash", func(t *testing.T) {
+		t.Parallel()
+		r := Report{
+			RedactedURL: redactedStreamURL,
+			HaveAudio:   true,
+			Tracks: []rtsp.Track{
+				{ID: 0, Media: audiostream.MediaAudio, Codec: audiostream.CodecOpus{}, PayloadType: -1, ClockRate: 48000, Channels: 2},
+			},
+		}
+		var b strings.Builder
+		renderWalkthrough(&b, r, env)
+		if got := b.String(); !strings.Contains(got, "Opus, PT -, clock") {
+			t.Errorf("unknown payload type (-1) should render as a dash:\n%s", got)
+		}
+	})
+
 	t.Run("failed step omits later steps", func(t *testing.T) {
 		t.Parallel()
 		r := Report{

@@ -5,10 +5,11 @@ type TrackStats struct {
 	// Packets is the number of RTP packets accepted.
 	Packets uint64
 	// Received is the number of RTP headers the track's stream observed. For an
-	// active track it tracks Packets, since the reader observes exactly the
-	// packets it accepts; it stays 0 for a discard track, which is counted but
-	// never observed. It is the stream layer's own arrival counter, surfaced
-	// alongside Duplicates.
+	// active track it settles to Packets, since the reader observes exactly the
+	// packets it accepts, though a snapshot taken mid-packet can briefly show
+	// one fewer, because Packets and this are stored in separate atomic steps.
+	// It stays 0 for a discard track, which is counted but never observed. It
+	// is the stream layer's own arrival counter, surfaced alongside Duplicates.
 	Received uint64
 	// Bytes is the total payload bytes accepted. For an active (parsed)
 	// track this counts the RTP payload only, with the RTP header stripped.
