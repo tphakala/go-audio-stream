@@ -453,6 +453,36 @@ func TestMarshalRequestRejectsCRLFInjection(t *testing.T) {
 	}
 }
 
+func TestMarshalRequestRejectsWhitespaceInURI(t *testing.T) {
+	t.Parallel()
+	// A raw space or tab in the request-URI truncates the request line at the
+	// server's tokenizer, so a control URL from the session description (remote
+	// input) that carried one would make the server act on a Request-URI this
+	// client never resolved. RFC 3986 admits no space, tab, control byte, or
+	// DEL unescaped, so a legitimate URI carries them percent-encoded.
+	const method = "SETUP"
+	cases := map[string]string{
+		"space in uri":   "rtsp://cam/stream/trk 1",
+		"tab in uri":     "rtsp://cam/stream/trk\t1",
+		"trailing space": "rtsp://cam/stream ",
+		"nul in uri":     "rtsp://cam/stream\x00",
+		"del in uri":     "rtsp://cam/stream\x7f",
+	}
+	for name, uri := range cases {
+		if _, err := rtsp.MarshalRequest(&rtsp.Request{Method: method, URL: uri}); !errors.Is(err, rtsp.ErrInvalidRequest) {
+			t.Errorf("%s (%q): err = %v, want ErrInvalidRequest", name, uri, err)
+		}
+	}
+	// Bytes just outside the forbidden set stay legal: a percent-encoded space,
+	// "~" (0x7E, immediately below DEL), and a raw high byte (0x80, non-ASCII)
+	// none truncate a request line, so a URI carrying them must still marshal.
+	for _, uri := range []string{"rtsp://cam/stream/trk%201", "rtsp://cam/str~am", "rtsp://cam/stream/\x80"} {
+		if _, err := rtsp.MarshalRequest(&rtsp.Request{Method: method, URL: uri}); err != nil {
+			t.Errorf("legal uri %q: err = %v, want nil", uri, err)
+		}
+	}
+}
+
 func TestMarshalResponseValidates(t *testing.T) {
 	t.Parallel()
 	cases := map[string]*rtsp.Response{

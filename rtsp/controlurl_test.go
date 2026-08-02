@@ -21,6 +21,7 @@ const (
 	onvifTrackWithSSRC     = "rtsp://cam:554/onvif1/track1?ssrc=1"
 	liveURLCamExample      = "rtsp://cam.example:554/live"
 	liveURLCamExampleSlash = "rtsp://cam.example:554/live/"
+	forcedOnvifBase        = "rtsp://user:pass@cam.example:554/onvif/"
 )
 
 func TestResolveBaseURL(t *testing.T) {
@@ -54,6 +55,63 @@ func TestResolveBaseURL(t *testing.T) {
 			requestURL:      liveURLCamExample,
 			contentLocation: liveURLCamExampleSlash,
 			want:            liveURLCamExampleSlash,
+		},
+		{
+			// Firmware bakes a wrong LAN or placeholder authority into the
+			// Content-Base. The socket is already connected to the request
+			// host, and every later aggregate request travels it, so the
+			// header may contribute only its path and query; scheme and host
+			// come from the request URL, matching resolveAbsoluteControl.
+			name:        "B5 content-base foreign authority forced to request host",
+			requestURL:  requestURLCamExample,
+			contentBase: "rtsp://10.0.0.1:8554/onvif/",
+			want:        forcedOnvifBase,
+		},
+		{
+			name:        "B6 content-base non-rtsp scheme forced to request scheme and host",
+			requestURL:  requestURLCamExample,
+			contentBase: "http://10.0.0.1:8554/onvif/",
+			want:        forcedOnvifBase,
+		},
+		{
+			name:        "B7 content-base foreign authority keeps its path and query",
+			requestURL:  requestURLCamExample,
+			contentBase: "rtsp://10.0.0.1/onvif/?token=xyz",
+			want:        "rtsp://user:pass@cam.example:554/onvif/?token=xyz",
+		},
+		{
+			name:        "B8 rtsps request keeps its scheme against an rtsp content-base",
+			requestURL:  "rtsps://user:pass@cam.example:322/stream",
+			contentBase: "rtsp://10.0.0.1:554/onvif/",
+			want:        "rtsps://user:pass@cam.example:322/onvif/",
+		},
+		{
+			// Absolute but opaque ("rtsp:stream" parses with the segment in
+			// Opaque, not Path). It has no authority to distrust and is
+			// malformed as a base, so it is ignored for the request URL rather
+			// than collapsing to a hostless or path-stripped base.
+			name:        "B9 opaque absolute content-base is ignored for the request URL",
+			requestURL:  requestURLCamExample,
+			contentBase: "rtsp:stream",
+			want:        requestURLCamExample,
+		},
+		{
+			name:        "B10 content-base authority without a path yields a pathless base",
+			requestURL:  requestURLCamExample,
+			contentBase: "rtsp://10.0.0.1:8554",
+			want:        "rtsp://user:pass@cam.example:554",
+		},
+		{
+			name:        "B11 IPv6 request host is preserved with brackets",
+			requestURL:  "rtsp://[2001:db8::1]:554/stream",
+			contentBase: "rtsp://10.0.0.1/onvif/",
+			want:        "rtsp://[2001:db8::1]:554/onvif/",
+		},
+		{
+			name:        "B12 header userinfo dropped, request userinfo re-attached",
+			requestURL:  requestURLCamExample,
+			contentBase: "rtsp://bad:bad@10.0.0.1/onvif/",
+			want:        forcedOnvifBase,
 		},
 	}
 	for _, tt := range tests {

@@ -225,10 +225,13 @@ func MarshalRequest(req *Request) ([]byte, error) {
 	}
 	// A CR or LF anywhere in the start line or the header fields would end
 	// the line early on the wire and let everything after it be read as
-	// further headers. These strings are not all locally authored: a
-	// control URL comes from the session description, which is remote
-	// input, so refuse them here rather than trusting every caller.
-	if hasCRLF(req.Method) || hasCRLF(req.URL) || headerHasCRLF(req.Header) {
+	// further headers. The request-URI is held to a stricter rule still: a
+	// raw space or tab truncates the request line at the server's tokenizer,
+	// so a control URL carrying one would make the server act on a Request-URI
+	// this client never resolved. These strings are not all locally authored:
+	// a control URL comes from the session description, which is remote input,
+	// so refuse them here rather than trusting every caller.
+	if hasCRLF(req.Method) || hasForbiddenURIByte(req.URL) || headerHasCRLF(req.Header) {
 		return nil, ErrInvalidRequest
 	}
 
@@ -287,6 +290,23 @@ func MarshalResponse(resp *Response) ([]byte, error) {
 // of which would terminate a line early in the serialized message.
 func hasCRLF(s string) bool {
 	return strings.ContainsAny(s, "\r\n")
+}
+
+// hasForbiddenURIByte reports whether s contains a byte that must never appear
+// raw in an RTSP request-URI: any control byte (0x00-0x1F, which includes CR,
+// LF, and tab), a space (0x20), or DEL (0x7F). A raw space or tab truncates the
+// request line at the server's tokenizer, so a control URL from the session
+// description (remote input) carrying one would make the server act on a
+// Request-URI this client never resolved; a control byte would split the line
+// outright. RFC 3986 admits none of these unescaped, so a legitimate URI
+// carries them percent-encoded and is unaffected.
+func hasForbiddenURIByte(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] <= 0x20 || s[i] == 0x7f {
+			return true
+		}
+	}
+	return false
 }
 
 // headerHasCRLF reports whether any field name or value in h contains a
