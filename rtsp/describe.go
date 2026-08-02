@@ -152,13 +152,14 @@ func resolveTracks(describeURL string, resp *Response) ([]Track, string, []descr
 			return nil, "", nil, cerr
 		}
 		tracks = append(tracks, Track{
-			ID:        i,
-			Media:     dt.Media,
-			Codec:     dt.Codec,
-			ClockRate: dt.ClockRate,
-			Channels:  dt.Channels,
-			Control:   control,
-			FMTP:      dt.FMTP,
+			ID:          i,
+			Media:       dt.Media,
+			Codec:       dt.Codec,
+			ClockRate:   dt.ClockRate,
+			Channels:    dt.Channels,
+			PayloadType: dt.PayloadType,
+			Control:     control,
+			FMTP:        dt.FMTP,
 		})
 		described = append(described, describedTrack{
 			control:     control,

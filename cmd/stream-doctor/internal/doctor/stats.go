@@ -11,12 +11,20 @@ type CaptureStats struct {
 	// Packets is the number of RTP packets accepted (from the library
 	// Stats).
 	Packets uint64
+	// Received is the number of RTP headers the stream observed (from the
+	// library Stats.Received). For an active capture it equals Packets, since
+	// the reader observes exactly the packets it accepts.
+	Received uint64
 	// Bytes is the number of RTP payload bytes accepted (from the library
 	// Stats).
 	Bytes uint64
 	// Lost is the number of packets lost per sequence tracking (from the
 	// library Stats.SeqGaps).
 	Lost uint64
+	// Duplicates is the number of duplicate or reordered packets the stream
+	// observed (from the library Stats.Duplicates). Rare over TCP; a nonzero
+	// value points at the server resending or reordering.
+	Duplicates uint64
 	// Malformed is the number of packets the library discarded without
 	// delivering (from the library Stats.Malformed): an unparseable RTP
 	// header, a payload type the track does not carry, or a depacketizer
@@ -45,8 +53,10 @@ type CaptureStats struct {
 func computeStats(frames []CapturedFrame, lib audiostream.TrackStats, clockRate int, elapsed time.Duration) CaptureStats {
 	stats := CaptureStats{
 		Packets:    lib.Packets,
+		Received:   lib.Received,
 		Bytes:      lib.Bytes,
 		Lost:       lib.SeqGaps,
+		Duplicates: lib.Duplicates,
 		Malformed:  lib.Malformed,
 		SSRCResets: lib.SSRCResets,
 	}

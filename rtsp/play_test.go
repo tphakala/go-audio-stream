@@ -482,6 +482,35 @@ func TestForeignPayloadTypeRejected(t *testing.T) {
 	}
 }
 
+// Received counts every RTP header the stream observes, and Duplicates counts a
+// resent sequence number. Both surface through Stats, independently of Packets
+// (the accepted-and-delivered count).
+func TestStatsReceivedAndDuplicates(t *testing.T) {
+	c, _ := playAndInject(t, &testserver.HandshakeConfig{SDP: opusSDP}, nil,
+		func(sc *testserver.ServerConn, pairs []testserver.ChannelPair) {
+			_ = sc.InjectFrame(pairs[0].RTP, buildRTPPacket(ptOpus, 1, 960, 0x01, false, []byte{0x78, 0x01}))
+			_ = sc.InjectFrame(pairs[0].RTP, buildRTPPacket(ptOpus, 2, 1920, 0x01, false, []byte{0x78, 0x02}))
+			_ = sc.InjectFrame(pairs[0].RTP, buildRTPPacket(ptOpus, 3, 2880, 0x01, false, []byte{0x78, 0x03}))
+			// Resend sequence 3: the stream observes the header but marks it a
+			// duplicate rather than advancing.
+			_ = sc.InjectFrame(pairs[0].RTP, buildRTPPacket(ptOpus, 3, 2880, 0x01, false, []byte{0x78, 0x03}))
+		})
+	defer closeAndWait(t, c)
+
+	// Wait on both fields together: Stats reads received before duplicates and
+	// the reader writes them in that order, so a predicate on duplicates alone
+	// could approve a snapshot torn between the two.
+	st := waitForStats(t, c, 0, func(ts audiostream.TrackStats) bool {
+		return ts.Received == 4 && ts.Duplicates == 1
+	})
+	if st.Received != 4 {
+		t.Errorf("Received = %d, want 4 (every observed header, including the duplicate)", st.Received)
+	}
+	if st.Duplicates != 1 {
+		t.Errorf("Duplicates = %d, want 1 (the resent sequence number)", st.Duplicates)
+	}
+}
+
 // A camera whose stream consistently carries a payload type its own SDP did not
 // declare keeps working. Enforcing the SDP's value would reject every packet,
 // deliver nothing, and never trip the read-idle watchdog, because frames would
@@ -681,9 +710,14 @@ func TestDiscardTrackNotDelivered(t *testing.T) {
 	if !bytes.Equal(f0.Data, au0) || !bytes.Equal(f1.Data, au1) {
 		t.Errorf("audio AUs = % x / % x, want % x / % x", f0.Data, f1.Data, au0, au1)
 	}
-	// The discarded video track counts packets but delivers nothing.
-	if st := waitForStats(t, c, 1, func(ts audiostream.TrackStats) bool { return ts.Packets == 2 }); st.Packets != 2 {
+	// The discarded video track counts packets but delivers nothing, and it
+	// never reaches the RTP stream, so Received stays 0 while Packets does not.
+	st := waitForStats(t, c, 1, func(ts audiostream.TrackStats) bool { return ts.Packets == 2 })
+	if st.Packets != 2 {
 		t.Errorf("discarded track Packets = %d, want 2", st.Packets)
+	}
+	if st.Received != 0 {
+		t.Errorf("discarded track Received = %d, want 0 (a discard track never reaches the RTP stream)", st.Received)
 	}
 }
 

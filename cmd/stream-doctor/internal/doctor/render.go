@@ -118,8 +118,8 @@ func writeTracksSection(b *strings.Builder, tracks []rtsp.Track) {
 		// codecName can echo a CodecUnknown's raw rtpmap; like FMTP it is
 		// scrubbed and made fence-safe at the describe boundary (doctor.go), so
 		// it is rendered raw here.
-		fmt.Fprintf(b, "  track %d: %s, %s, clock %d, ch %s, depacketize %s\n",
-			t.ID, t.Media.String(), codecName(t.Codec), t.ClockRate,
+		fmt.Fprintf(b, "  track %d: %s, %s, PT %s, clock %d, ch %s, depacketize %s\n",
+			t.ID, t.Media.String(), codecName(t.Codec), payloadTypeCell(t.PayloadType), t.ClockRate,
 			channelsCell(t.Channels), depacketizeCell(decodable(t)))
 		if t.Media != audiostream.MediaAudio {
 			continue
@@ -183,8 +183,10 @@ func renderCapture(b *strings.Builder, r *Report) {
 	fmt.Fprintln(b)
 	fmt.Fprintf(b, "capture (%s, track %d, ended: %s)\n", r.Window, r.AudioTrack.ID, r.Reason)
 	fmt.Fprintf(b, captureInt, "packets", r.Capture.Packets)
+	fmt.Fprintf(b, captureInt, "received", r.Capture.Received)
 	fmt.Fprintf(b, captureInt, "bytes", r.Capture.Bytes)
 	fmt.Fprintf(b, "  %-12s%d (%.2f%%)\n", "lost", r.Capture.Lost, r.Capture.LossRatio*100)
+	fmt.Fprintf(b, captureInt, "duplicates", r.Capture.Duplicates)
 	fmt.Fprintf(b, captureInt, "malformed", r.Capture.Malformed)
 	fmt.Fprintf(b, captureInt, "ssrc-resets", r.Capture.SSRCResets)
 	fmt.Fprintf(b, captureInt, "max gap", r.Capture.MaxGap)
@@ -242,6 +244,16 @@ func channelsCell(n int) string {
 		return "-"
 	}
 	return strconv.Itoa(n)
+}
+
+// payloadTypeCell renders the payload-type column: the numeric RTP payload
+// type, or "-" for the -1 sentinel a media section that lists no format
+// carries, matching how channelsCell renders an unknown channel count.
+func payloadTypeCell(pt int) string {
+	if pt < 0 {
+		return "-"
+	}
+	return strconv.Itoa(pt)
 }
 
 // depacketizeCell renders the depacketize column from decodability.

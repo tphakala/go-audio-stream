@@ -229,6 +229,11 @@ func TestDescribeHappyPath(t *testing.T) {
 	if wantFMTP := "mode=AAC-hbr;sizelength=13;indexlength=3;indexdeltalength=3;config=1408"; tr.FMTP != wantFMTP {
 		t.Errorf("FMTP = %q, want %q", tr.FMTP, wantFMTP)
 	}
+	// The RTP payload type from the m= line is exposed so a caller can identify
+	// the track on the wire.
+	if tr.PayloadType != 97 {
+		t.Errorf("PayloadType = %d, want 97 (from the m= line)", tr.PayloadType)
+	}
 }
 
 func TestDescribeMultiTrack(t *testing.T) {
@@ -259,6 +264,15 @@ func TestDescribeMultiTrack(t *testing.T) {
 	}
 	if _, ok := tracks[1].Codec.(audiostream.CodecUnknown); !ok {
 		t.Errorf("track[1].Codec = %T, want CodecUnknown", tracks[1].Codec)
+	}
+	// PayloadType is exposed per track from the m= line. It is the one field
+	// that still identifies the video track, whose codec resolved to
+	// CodecUnknown, which is the case this field exists for.
+	if tracks[0].PayloadType != 97 {
+		t.Errorf("track[0].PayloadType = %d, want 97", tracks[0].PayloadType)
+	}
+	if tracks[1].PayloadType != 96 {
+		t.Errorf("track[1].PayloadType = %d, want 96", tracks[1].PayloadType)
 	}
 }
 

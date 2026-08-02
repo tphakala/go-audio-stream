@@ -120,6 +120,12 @@ type Track struct {
 	// encoding name alone. It is 0 only when there was no rtpmap to read.
 	// Do not use it to detect an unsupported codec; compare Codec instead.
 	Channels int
+	// PayloadType is the RTP payload type from the m= line (0-127), or -1 when
+	// the media section listed no format, matching sdp.DescribedTrack. It
+	// identifies the track on the wire, and it is the one wire identity left
+	// for a track resolved from a static payload type with no a=rtpmap, where
+	// Codec is CodecUnknown and ClockRate and Channels are 0.
+	PayloadType int
 	// Control is the resolved absolute control URL for this track.
 	Control string
 	// FMTP is the raw a=fmtp parameter string for this track's payload type
