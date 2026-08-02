@@ -576,6 +576,10 @@ func (c *Client) sendTeardownBestEffort() {
 	}
 	c.writeMu.Unlock()
 
-	var scratch [readChunk]byte
-	_, _ = c.conn.Read(scratch[:])
+	// Reuse the reader's own read scratch instead of a local array, which would
+	// escape to the heap because c.conn is an interface (the same reason fill's
+	// scratch was hoisted onto the Client). This runs on the reader goroutine's
+	// terminal path after the framing loop has ended, so fill is no longer using
+	// c.rscratch and there is no concurrent access (issue #21).
+	_, _ = c.conn.Read(c.rscratch[:])
 }

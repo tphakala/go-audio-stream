@@ -241,6 +241,15 @@ func TestResolveControlURL(t *testing.T) {
 			control: "video",
 			want:    "rtsp://cam:8554/cam/video",
 		},
+		{
+			// An opaque absolute control (segment in Opaque, no authority) has no
+			// host, so it resolves relatively rather than dropping its payload to a
+			// bare base (issue #31). Real cameras do not emit this shape.
+			name:    "C13 opaque absolute control falls back to relative",
+			base:    streamURLWithAuth,
+			control: "rtsp:trackID=1",
+			want:    "rtsp://user:pass@cam:554/stream/rtsp:trackID=1",
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

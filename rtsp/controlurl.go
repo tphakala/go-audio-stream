@@ -130,7 +130,15 @@ func ResolveControlURL(base, control string) (string, error) {
 	}
 
 	var resolved string
-	if controlURL, cerr := url.Parse(control); cerr == nil && isRTSPScheme(controlURL.Scheme) {
+	// The absolute branch is taken only when the control actually carries an
+	// authority. An opaque "rtsp:trackID=1" (its segment lands in Opaque, not
+	// Path, so EscapedPath is empty and the payload would be dropped) and an
+	// empty-authority "rtsp:///x" both have no host, so they fall back to
+	// relative resolution instead of a path-stripped URL that addresses no
+	// track. This mirrors ResolveBaseURL's parsed.Host != "" guard for the same
+	// input class (issue #31); real cameras do not emit an opaque control, so
+	// this only keeps the two resolvers from diverging on it.
+	if controlURL, cerr := url.Parse(control); cerr == nil && isRTSPScheme(controlURL.Scheme) && controlURL.Host != "" {
 		resolved = resolveAbsoluteControl(baseURL, controlURL)
 	} else {
 		resolved = resolveRelativeControl(base, control)
