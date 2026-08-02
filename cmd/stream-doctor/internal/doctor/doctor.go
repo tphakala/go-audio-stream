@@ -32,12 +32,12 @@ const (
 //nolint:gocritic // hugeParam: Options/Env are the documented Run signature, evaluated once per run.
 func Run(ctx context.Context, opts Options, prober Prober, out io.Writer, errOut io.Writer, env Env, now func() time.Time) (Result, error) {
 	r := &runner{
-		ctx:    ctx,
-		opts:   opts,
-		prober: prober,
-		out:    out,
-		errOut: errOut,
-		env:    env,
+		ctx:      ctx,
+		opts:     opts,
+		prober:   prober,
+		out:      out,
+		errOut:   errOut,
+		env:      env,
 		now:      now,
 		scrubber: newPIIScrubber(opts.URL),
 		report:   Report{RedactedURL: redactTarget(opts.URL), Window: opts.Duration},

@@ -70,7 +70,6 @@ func TestPIIScrubberScrubError(t *testing.T) {
 	}
 }
 
-
 func TestPIIScrubberScrubString(t *testing.T) {
 	t.Parallel()
 	const rawURL = "rtsp://admin:hunter2@cam.example:554/stream"

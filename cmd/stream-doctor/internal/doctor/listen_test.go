@@ -65,7 +65,7 @@ func TestWriteWAVG711MuLaw(t *testing.T) {
 	}
 	track := rtsp.Track{
 		ID: 0, Media: audiostream.MediaAudio,
-		Codec: audiostream.CodecG711{Law: audiostream.MuLaw},
+		Codec:     audiostream.CodecG711{Law: audiostream.MuLaw},
 		ClockRate: sampleRate, Channels: channels,
 	}
 
