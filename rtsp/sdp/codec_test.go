@@ -2,6 +2,7 @@ package sdp_test
 
 import (
 	"bytes"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -140,5 +141,91 @@ func TestCodecsAACFmtpWhitespaceAndMissingEquals(t *testing.T) {
 	// verbatim for diagnostics, whitespace and bare flags included.
 	if want := "mode=AAC-hbr; sizelength=13 ; config= 1408 ;cpresent"; tracks[0].FMTP != want {
 		t.Errorf("FMTP = %q, want %q", tracks[0].FMTP, want)
+	}
+}
+
+// TestCodecsL16Dynamic covers L16 linear PCM resolved from an a=rtpmap. The
+// target ESP32/M5Stack microphones advertise a dynamic payload type with an
+// explicit L16/<rate>/<channels>.
+func TestCodecsL16Dynamic(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name     string
+		rtpmap   string
+		clock    int
+		channels int
+	}{
+		{"mono 48k", "L16/48000/1", 48000, 1},
+		{"stereo 48k", "L16/48000/2", 48000, 2},
+		{"mono 24k", "L16/24000/1", 24000, 1},
+		// A rtpmap that omits the channel segment defaults to 1 channel, the
+		// same normalization the other codecs get.
+		{"no channel segment", "L16/48000", 48000, 1},
+		// A nonsensical negative channel count (the segment is a plain Atoi) is
+		// clamped to 1 rather than surfacing negative on CodecL16.Channels.
+		{"negative channels", "L16/48000/-2", 48000, 1},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			body := []byte("v=0\r\n" +
+				"m=audio 0 RTP/AVP 97\r\n" +
+				"a=rtpmap:97 " + tc.rtpmap + "\r\n")
+			s, err := sdp.Parse(body)
+			if err != nil {
+				t.Fatalf("Parse: %v", err)
+			}
+			tracks := s.Codecs()
+			if len(tracks) != 1 {
+				t.Fatalf("track count = %d, want 1", len(tracks))
+			}
+			l16, ok := tracks[0].Codec.(audiostream.CodecL16)
+			if !ok {
+				t.Fatalf("Codec = %T, want CodecL16", tracks[0].Codec)
+			}
+			if l16.ClockRate != tc.clock || l16.Channels != tc.channels {
+				t.Errorf("CodecL16 = %+v, want {%d %d}", l16, tc.clock, tc.channels)
+			}
+			if tracks[0].ClockRate != tc.clock || tracks[0].Channels != tc.channels {
+				t.Errorf("track clock/channels = %d/%d, want %d/%d",
+					tracks[0].ClockRate, tracks[0].Channels, tc.clock, tc.channels)
+			}
+		})
+	}
+}
+
+// TestCodecsL16Static covers the RFC 3551 static payload types 10 (L16 stereo
+// 44100) and 11 (L16 mono 44100) resolved with no a=rtpmap present.
+func TestCodecsL16Static(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		pt       int
+		clock    int
+		channels int
+	}{
+		{10, 44100, 2},
+		{11, 44100, 1},
+	}
+	for _, tc := range cases {
+		t.Run(strconv.Itoa(tc.pt), func(t *testing.T) {
+			t.Parallel()
+			body := []byte("v=0\r\n" +
+				"m=audio 0 RTP/AVP " + strconv.Itoa(tc.pt) + "\r\n")
+			s, err := sdp.Parse(body)
+			if err != nil {
+				t.Fatalf("Parse: %v", err)
+			}
+			tracks := s.Codecs()
+			if len(tracks) != 1 {
+				t.Fatalf("track count = %d, want 1", len(tracks))
+			}
+			l16, ok := tracks[0].Codec.(audiostream.CodecL16)
+			if !ok {
+				t.Fatalf("PT %d Codec = %T, want CodecL16", tc.pt, tracks[0].Codec)
+			}
+			if l16.ClockRate != tc.clock || l16.Channels != tc.channels {
+				t.Errorf("CodecL16 = %+v, want {%d %d}", l16, tc.clock, tc.channels)
+			}
+		})
 	}
 }
