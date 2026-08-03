@@ -8,7 +8,7 @@
 
 A pure-Go RTSP client for pulling audio off IP cameras and restreamers. It runs
 the DESCRIBE / SETUP / PLAY handshake over TCP-interleaved RTP, depacketizes AAC,
-Opus and G.711, and hands the consumer timestamped codec frames. No cgo, no
+Opus, G.711 and L16 PCM, and hands the consumer timestamped codec frames. No cgo, no
 runtime dependencies.
 
 Where the rest of the family reads and writes files, this library brings audio
@@ -39,8 +39,11 @@ testing, not core functionality.
   Basic and Digest authentication (answered and retried automatically, including
   a stale-nonce rotation), `rtsps` TLS, session keepalive, and RTCP Receiver
   Reports.
-- **Depacketizers**: AAC (RFC 3640 AAC-hbr), Opus (RFC 7587), and G.711 mu-law
-  and A-law. An unrecognized codec, a non-audio track, or an AAC mode this
+- **Depacketizers**: AAC (RFC 3640 AAC-hbr), Opus (RFC 7587), G.711 mu-law and
+  A-law, and L16 linear PCM (RFC 3551, from an `L16` rtpmap or the static
+  payload types 10 and 11). G.711 and L16 are delivered as little-endian s16le
+  PCM, so a consumer gets PCM in one byte order regardless of which of the two
+  it received. An unrecognized codec, a non-audio track, or an AAC mode this
   milestone does not decode degrades to raw payload delivery rather than
   failing the session.
 - **Frame delivery**: each frame carries its track ID, a presentation time
@@ -84,7 +87,7 @@ c, err := rtsp.Dial(ctx, rtsp.Config{
     URL: "rtsp://user:pass@camera.local/stream",
     OnFrame: func(f audiostream.Frame) {
         // f.Data is the codec frame (AAC AU, Opus packet, or s16le PCM for
-        // G.711). It aliases library memory and is valid only for this call;
+        // G.711 and L16). It aliases library memory and is valid only for this call;
         // copy it to keep it. Hand it to a codec decoder from the family.
         _ = f
     },

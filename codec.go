@@ -27,6 +27,19 @@ type CodecG711 struct {
 
 func (CodecG711) isCodec() {}
 
+// CodecL16 is uncompressed 16-bit linear PCM (RFC 3551 "L16"). Frames are
+// delivered as little-endian s16le PCM: the library byte-swaps the big-endian
+// (network byte order) RTP payload before delivery, so an L16 track and a
+// G.711 track hand the consumer PCM in the same byte order. ClockRate is the
+// RTP clock in Hz and Channels the channel count, both from the rtpmap (or the
+// RFC 3551 static payload-type default), enough to interpret the samples.
+type CodecL16 struct {
+	ClockRate int
+	Channels  int
+}
+
+func (CodecL16) isCodec() {}
+
 // CodecUnknown is a track whose rtpmap was not recognized. It can still
 // be set up; its frames carry raw RTP payloads without depacketization.
 type CodecUnknown struct {

@@ -8,6 +8,12 @@ import (
 	audiostream "github.com/tphakala/go-audio-stream"
 )
 
+// encodingL16 is the RFC 3551 rtpmap encoding name for 16-bit linear PCM. It is
+// a constant because the literal occurs three times (the encoding switch plus
+// the two static payload types 10 and 11), which the goconst linter flags,
+// whereas PCMU/PCMA occur twice each and stay inline.
+const encodingL16 = "L16"
+
 // DescribedTrack is one media section resolved to a codec identity with
 // its clock rate, channel count, and control URL. It is what the RTSP
 // client turns into a Track.
@@ -18,8 +24,8 @@ type DescribedTrack struct {
 	// from (the first entry of the m= format list), or -1 if the section
 	// listed no formats.
 	PayloadType int
-	// Codec is the resolved codec: CodecAAC, CodecOpus, CodecG711, or
-	// CodecUnknown. Never nil.
+	// Codec is the resolved codec: CodecAAC, CodecOpus, CodecG711, CodecL16,
+	// or CodecUnknown. Never nil.
 	Codec audiostream.Codec
 	// ClockRate is the RTP clock rate in Hz, 0 if unknown.
 	ClockRate int
@@ -60,7 +66,8 @@ type AACParams struct {
 // fails: an unrecognized encoding maps to CodecUnknown, and a media
 // section with no formats yields a CodecUnknown track with PayloadType
 // -1. RFC 3551 static payload types 0 (PCMU) and 8 (PCMA) resolve to
-// CodecG711 even when no a=rtpmap is present.
+// CodecG711, and 10 (L16 stereo 44100) and 11 (L16 mono 44100) resolve to
+// CodecL16, even when no a=rtpmap is present.
 func (s *Session) Codecs() []DescribedTrack {
 	tracks := make([]DescribedTrack, 0, len(s.Media))
 	for i := range s.Media {
@@ -96,6 +103,10 @@ func describeTrack(m *Media) DescribedTrack {
 			encoding, clock, channels = "PCMU", 8000, 1
 		case 8:
 			encoding, clock, channels = "PCMA", 8000, 1
+		case 10:
+			encoding, clock, channels = encodingL16, 44100, 2
+		case 11:
+			encoding, clock, channels = encodingL16, 44100, 1
 		default:
 			encoding, clock, channels = "", 0, 0
 		}
@@ -125,6 +136,8 @@ func describeTrack(m *Media) DescribedTrack {
 		t.Codec = audiostream.CodecG711{Law: audiostream.MuLaw}
 	case "PCMA":
 		t.Codec = audiostream.CodecG711{Law: audiostream.ALaw}
+	case encodingL16:
+		t.Codec = audiostream.CodecL16{ClockRate: clock, Channels: channels}
 	default:
 		t.Codec = audiostream.CodecUnknown{RTPMap: rtpmapString(encoding, clock, rawChannels, hasRTPMap)}
 	}

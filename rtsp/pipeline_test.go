@@ -92,6 +92,7 @@ func TestNewTrackCodecSelection(t *testing.T) {
 	}{
 		{name: "opus", codec: audiostream.CodecOpus{}, wantKind: deliverOpus},
 		{name: "g711 mulaw", codec: audiostream.CodecG711{Law: audiostream.MuLaw}, wantKind: deliverG711},
+		{name: "l16", codec: audiostream.CodecL16{ClockRate: 48000, Channels: 1}, wantKind: deliverL16},
 		{name: "unknown", codec: audiostream.CodecUnknown{}, wantKind: deliverRaw},
 	}
 	for _, tc := range cases {
@@ -333,15 +334,154 @@ func TestDeliverG711BufferReuse(t *testing.T) {
 	tr := &track{id: 0, kind: deliverG711, clockRate: 8000, law: audiostream.MuLaw, baseSet: true}
 	big := rtp.Packet{Payload: make([]byte, 200)}
 	tr.deliver(big, rtp.Update{}, time.Unix(1, 0), func(audiostream.Frame) {})
-	grown := cap(tr.g711Buf)
+	grown := cap(tr.pcmBuf)
 	if grown < 400 {
-		t.Fatalf("g711Buf cap = %d, want >= 400 after a 200-byte packet", grown)
+		t.Fatalf("pcmBuf cap = %d, want >= 400 after a 200-byte packet", grown)
 	}
 	// A smaller subsequent packet must reuse the buffer, not grow it.
 	small := rtp.Packet{Payload: make([]byte, 10)}
 	tr.deliver(small, rtp.Update{}, time.Unix(1, 0), func(audiostream.Frame) {})
-	if cap(tr.g711Buf) != grown {
-		t.Errorf("g711Buf cap = %d after a smaller packet, want unchanged %d", cap(tr.g711Buf), grown)
+	if cap(tr.pcmBuf) != grown {
+		t.Errorf("pcmBuf cap = %d after a smaller packet, want unchanged %d", cap(tr.pcmBuf), grown)
+	}
+}
+
+func TestDeliverL16(t *testing.T) {
+	t.Parallel()
+	// Two 16-bit samples, big-endian on the wire (RFC 3551 network byte order).
+	// deliverL16 must hand them to OnFrame byte-swapped to little-endian s16le,
+	// the same byte order G.711 delivers.
+	tr := &track{id: 4, kind: deliverL16, clockRate: 48000, baseSet: true}
+	// Three distinct-valued samples, so a length-dependent or short-prefix swap
+	// bug (which a single 2-sample payload would miss) is caught.
+	payload := []byte{0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc}
+	want := []byte{0x34, 0x12, 0x78, 0x56, 0xbc, 0x9a}
+	pkt := rtp.Packet{Header: rtp.Header{Timestamp: 480}, Payload: payload}
+
+	var got audiostream.Frame
+	n := 0
+	tr.deliver(pkt, rtp.Update{Timestamp: 480}, time.Unix(1, 0), func(f audiostream.Frame) { got = f; n++ })
+	if n != 1 {
+		t.Fatalf("delivered %d frames, want 1", n)
+	}
+	if got.TrackID != 4 {
+		t.Errorf("TrackID = %d, want 4", got.TrackID)
+	}
+	if !bytes.Equal(got.Data, want) {
+		t.Errorf("Data = % x, want s16le % x", got.Data, want)
+	}
+	if got.RTPTime != 480 {
+		t.Errorf("RTPTime = %d, want 480", got.RTPTime)
+	}
+	if got.PTS != 10*time.Millisecond { // 480 ticks / 48000 Hz
+		t.Errorf("PTS = %v, want 10ms", got.PTS)
+	}
+	// The original payload must be left untouched: the swap writes into pcmBuf.
+	if !bytes.Equal(payload, []byte{0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc}) {
+		t.Errorf("source payload mutated to % x", payload)
+	}
+}
+
+func TestDeliverL16Malformed(t *testing.T) {
+	t.Parallel()
+	// A payload that is not a whole number of 16-bit samples (odd length) or is
+	// empty counts malformed and yields no frame, mirroring the empty-Opus rule.
+	for _, tc := range []struct {
+		name    string
+		payload []byte
+	}{
+		{name: "odd length", payload: []byte{0x00, 0x11, 0x22}},
+		{name: "empty", payload: nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			tr := &track{id: 0, kind: deliverL16, clockRate: 48000, baseSet: true}
+			pkt := rtp.Packet{Header: rtp.Header{}, Payload: tc.payload}
+			n := 0
+			tr.deliver(pkt, rtp.Update{}, time.Unix(1, 0), func(audiostream.Frame) { n++ })
+			if n != 0 {
+				t.Errorf("delivered %d frames for a %s L16 payload, want 0", n, tc.name)
+			}
+			if tr.malformed.Load() != 1 {
+				t.Errorf("malformed = %d, want 1", tr.malformed.Load())
+			}
+		})
+	}
+}
+
+func TestDeliverL16BufferReuse(t *testing.T) {
+	t.Parallel()
+	tr := &track{id: 0, kind: deliverL16, clockRate: 48000, baseSet: true}
+	big := rtp.Packet{Payload: make([]byte, 320)}
+	tr.deliver(big, rtp.Update{}, time.Unix(1, 0), func(audiostream.Frame) {})
+	grown := cap(tr.pcmBuf)
+	if grown < 320 {
+		t.Fatalf("pcmBuf cap = %d, want >= 320 after a 320-byte packet", grown)
+	}
+	small := rtp.Packet{Payload: make([]byte, 40)}
+	tr.deliver(small, rtp.Update{}, time.Unix(1, 0), func(audiostream.Frame) {})
+	if cap(tr.pcmBuf) != grown {
+		t.Errorf("pcmBuf cap = %d after a smaller packet, want unchanged %d", cap(tr.pcmBuf), grown)
+	}
+}
+
+func TestDeliverL16NilOnFrame(t *testing.T) {
+	t.Parallel()
+	// A valid payload with a nil OnFrame delivers nothing and, like the Opus
+	// path, records no malformed packet.
+	valid := &track{id: 0, kind: deliverL16, clockRate: 48000, baseSet: true}
+	valid.deliver(rtp.Packet{Payload: []byte{0x00, 0x11}}, rtp.Update{}, time.Unix(1, 0), nil)
+	if valid.malformed.Load() != 0 {
+		t.Errorf("malformed = %d for a valid payload with nil OnFrame, want 0", valid.malformed.Load())
+	}
+	// An odd-length payload with a nil OnFrame still counts malformed: the count
+	// must not depend on a callback being registered. This pins the guard order
+	// (malformed counted before the onFrame==nil check); reordering the two
+	// guards would make this assertion fail.
+	odd := &track{id: 0, kind: deliverL16, clockRate: 48000, baseSet: true}
+	odd.deliver(rtp.Packet{Payload: []byte{0x00, 0x11, 0x22}}, rtp.Update{}, time.Unix(1, 0), nil)
+	if odd.malformed.Load() != 1 {
+		t.Errorf("malformed = %d for an odd payload with nil OnFrame, want 1", odd.malformed.Load())
+	}
+}
+
+func TestDeliverL16StereoWholeFrames(t *testing.T) {
+	t.Parallel()
+	// A stereo L16 track validates whole sample-frames (2*channels = 4 bytes),
+	// not just whole samples, so a truncated packet that is a whole number of
+	// samples but not of frames is rejected rather than delivering a half-frame
+	// that would shift L/R interleaving downstream.
+	tr := newTrack(0, describedTrack{
+		codec:     audiostream.CodecL16{ClockRate: 44100, Channels: 2},
+		clockRate: 44100,
+		media:     audiostream.MediaAudio,
+	}, SetupOptions{}, 1, nil)
+	if tr.kind != deliverL16 {
+		t.Fatalf("kind = %d, want deliverL16", tr.kind)
+	}
+	if tr.l16FrameSize != 4 {
+		t.Fatalf("l16FrameSize = %d, want 4 for stereo", tr.l16FrameSize)
+	}
+
+	// 6 bytes = 1.5 stereo frames: rejected as malformed, no frame.
+	n := 0
+	tr.deliver(rtp.Packet{Payload: make([]byte, 6)}, rtp.Update{}, time.Unix(1, 0), func(audiostream.Frame) { n++ })
+	if n != 0 || tr.malformed.Load() != 1 {
+		t.Errorf("half-frame stereo packet: frames=%d malformed=%d, want 0 and 1", n, tr.malformed.Load())
+	}
+
+	// 8 bytes = 2 whole stereo frames: delivered as one frame.
+	var got audiostream.Frame
+	tr.deliver(rtp.Packet{Payload: []byte{0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, 0xde, 0xf0}},
+		rtp.Update{}, time.Unix(1, 0), func(f audiostream.Frame) { got = f; n++ })
+	if n != 1 {
+		t.Fatalf("whole-frame stereo packet delivered %d frames, want 1", n)
+	}
+	if want := []byte{0x34, 0x12, 0x78, 0x56, 0xbc, 0x9a, 0xf0, 0xde}; !bytes.Equal(got.Data, want) {
+		t.Errorf("Data = % x, want s16le % x", got.Data, want)
+	}
+	if tr.malformed.Load() != 1 {
+		t.Errorf("malformed = %d after one valid packet, want 1 (only the half-frame)", tr.malformed.Load())
 	}
 }
 
@@ -559,6 +699,9 @@ func TestZeroAllocSteadyStateDelivery(t *testing.T) {
 	rawTr := &track{id: 3, kind: deliverRaw, clockRate: 90000, baseSet: true}
 	rawPkt := rtp.Packet{Header: rtp.Header{Timestamp: 0}, Payload: []byte{0xaa, 0xbb, 0xcc}}
 
+	l16Tr := &track{id: 4, kind: deliverL16, clockRate: 48000, baseSet: true}
+	l16Pkt := rtp.Packet{Header: rtp.Header{Timestamp: 0}, Payload: make([]byte, 320)}
+
 	cases := []struct {
 		name string
 		tr   *track
@@ -574,6 +717,7 @@ func TestZeroAllocSteadyStateDelivery(t *testing.T) {
 		{name: "opus", tr: opusTr, pkt: opusPkt, maxAlloc: 0},
 		{name: "g711", tr: g711Tr, pkt: g711Pkt, maxAlloc: 0},
 		{name: "raw", tr: rawTr, pkt: rawPkt, maxAlloc: 0},
+		{name: "l16", tr: l16Tr, pkt: l16Pkt, maxAlloc: 0},
 	}
 	for _, tc := range cases {
 		tc.tr.deliver(tc.pkt, rtp.Update{Timestamp: 0}, now, noop) // pre-warm reusable buffers

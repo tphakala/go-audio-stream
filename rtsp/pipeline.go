@@ -46,13 +46,15 @@ const (
 	deliverOpus
 	// deliverG711 expands companded G.711 to s16le PCM.
 	deliverG711
+	// deliverL16 byte-swaps big-endian L16 linear PCM to s16le.
+	deliverL16
 )
 
 // track is one set-up track's pipeline state. Setup fully initializes it and
 // publishes it into the channel table by an atomic store; that store
 // establishes the happens-before edge, after which only the reader goroutine
 // mutates the non-atomic fields (stream, aac, baseTS/baseSet/baselineFixed,
-// g711Buf).
+// pcmBuf).
 // The atomic stat and RR-snapshot fields are written by the reader and read by
 // Stats and the keepalive timer. A track is always referenced by pointer and
 // never copied.
@@ -92,7 +94,16 @@ type track struct {
 	// but leaves baselineFixed set, so the reset falls back to the first-packet
 	// baseline rather than re-applying a stale seed.
 	baselineFixed bool
-	g711Buf       []byte
+	// pcmBuf is the reused s16le output scratch shared by the two codecs that
+	// write PCM into it, G.711 (deliverG711 expands companded bytes) and L16
+	// (deliverL16 byte-swaps). A track is only ever one codec, so the two paths
+	// never contend for it.
+	pcmBuf []byte
+	// l16FrameSize is the byte width of one L16 sample-frame (2 * channels), set
+	// by newTrack for a CodecL16 track and 0 otherwise. deliverL16 rejects a
+	// payload that is not a whole number of frames, so a truncated multichannel
+	// packet cannot deliver a half-frame that shifts channel interleaving.
+	l16FrameSize int
 
 	// seed and hasSeed carry the RTP-Info timestamp origin. Play stores them
 	// on the caller goroutine, potentially while the reader is already
@@ -154,6 +165,9 @@ func newTrack(id int, desc describedTrack, opts SetupOptions, rtcpCh int, logger
 	case audiostream.CodecG711:
 		tr.kind = deliverG711
 		tr.law = codec.Law
+	case audiostream.CodecL16:
+		tr.kind = deliverL16
+		tr.l16FrameSize = 2 * codec.Channels
 	default:
 		logWarn(logger, "unrecognized codec; delivering raw payloads", "track", id)
 	}
@@ -283,7 +297,7 @@ func (tr *track) acceptPayloadType(pt uint8, logger *slog.Logger) bool {
 // session continues. onFrame may be nil, in which case nothing is delivered but
 // counters still advance. The delivered Frame is a stack value whose Data
 // aliases reader-owned memory (the AAC depacketizer buffer, the RTP payload, or
-// tr.g711Buf); it is valid only for the duration of the callback.
+// tr.pcmBuf); it is valid only for the duration of the callback.
 func (tr *track) deliver(pkt rtp.Packet, up rtp.Update, now time.Time, onFrame func(audiostream.Frame)) {
 	switch tr.kind {
 	case deliverAAC:
@@ -292,6 +306,8 @@ func (tr *track) deliver(pkt rtp.Packet, up rtp.Update, now time.Time, onFrame f
 		tr.deliverOpus(pkt, up, now, onFrame)
 	case deliverG711:
 		tr.deliverG711(pkt, up, now, onFrame)
+	case deliverL16:
+		tr.deliverL16(pkt, up, now, onFrame)
 	default: // deliverRaw, and any kind a future codec adds without a path here.
 		tr.deliverRaw(pkt, up, now, onFrame)
 	}
@@ -338,7 +354,7 @@ func (tr *track) deliverOpus(pkt rtp.Packet, up rtp.Update, now time.Time, onFra
 	tr.deliverOne(data, pkt, up, now, onFrame)
 }
 
-// deliverG711 expands companded G.711 into s16le PCM in the reused tr.g711Buf,
+// deliverG711 expands companded G.711 into s16le PCM in the reused tr.pcmBuf,
 // growing it only when a larger packet arrives, and delivers one frame.
 //
 // The expansion is skipped entirely when nothing will consume it. A nil OnFrame
@@ -354,17 +370,58 @@ func (tr *track) deliverG711(pkt rtp.Packet, up rtp.Update, now time.Time, onFra
 		return
 	}
 	need := 2 * len(pkt.Payload)
-	if cap(tr.g711Buf) < need {
-		tr.g711Buf = make([]byte, need, need+need/4)
+	if cap(tr.pcmBuf) < need {
+		tr.pcmBuf = make([]byte, need, need+need/4)
 	} else {
-		tr.g711Buf = tr.g711Buf[:need]
+		tr.pcmBuf = tr.pcmBuf[:need]
 	}
-	n, err := g711.Depacketize(tr.g711Buf, pkt.Payload, tr.law)
+	n, err := g711.Depacketize(tr.pcmBuf, pkt.Payload, tr.law)
 	if err != nil {
 		tr.malformed.Add(1)
 		return
 	}
-	tr.deliverOne(tr.g711Buf[:n], pkt, up, now, onFrame)
+	tr.deliverOne(tr.pcmBuf[:n], pkt, up, now, onFrame)
+}
+
+// deliverL16 converts big-endian L16 linear PCM (RFC 3551, network byte order)
+// to little-endian s16le in the reused tr.pcmBuf and delivers one frame, so an
+// L16 track hands the consumer PCM in the same byte order a G.711 track does.
+//
+// A payload that is empty or not a whole number of sample-frames counts as
+// malformed and yields no frame, mirroring the empty-Opus rule. The frame width
+// is 2*channels (tr.l16FrameSize): validating whole frames rather than whole
+// samples means a truncated stereo packet is rejected instead of delivering a
+// half-frame that would shift L/R interleaving for a consumer concatenating
+// frames. A track not built by newTrack has l16FrameSize 0, which falls back to
+// whole-sample (mono) validation rather than dividing by zero. malformed is
+// counted before the onFrame==nil check, so the statistic does not depend on a
+// callback being registered, matching deliverAAC and deliverOpus.
+//
+// The byte swap is a deliberate manual loop, not encoding/binary: a benchmark
+// found binary.BigEndian.Uint16 plus binary.LittleEndian.PutUint16 about 40%
+// slower on this per-packet path, and the manual form is equally alloc-free.
+func (tr *track) deliverL16(pkt rtp.Packet, up rtp.Update, now time.Time, onFrame func(audiostream.Frame)) {
+	n := len(pkt.Payload)
+	frame := max(tr.l16FrameSize, 2)
+	if n == 0 || n%frame != 0 {
+		tr.malformed.Add(1)
+		return
+	}
+	if onFrame == nil {
+		return
+	}
+	if cap(tr.pcmBuf) < n {
+		tr.pcmBuf = make([]byte, n, n+n/4)
+	} else {
+		tr.pcmBuf = tr.pcmBuf[:n]
+	}
+	src := pkt.Payload
+	dst := tr.pcmBuf
+	for i := 0; i+1 < n; i += 2 {
+		dst[i] = src[i+1]
+		dst[i+1] = src[i]
+	}
+	tr.deliverOne(dst[:n], pkt, up, now, onFrame)
 }
 
 // deliverRaw delivers the undecoded RTP payload as one frame. It is the
@@ -376,7 +433,7 @@ func (tr *track) deliverRaw(pkt rtp.Packet, up rtp.Update, now time.Time, onFram
 }
 
 // deliverOne delivers a single-frame codec's payload, shared by Opus, G.711,
-// and raw. onFrame may be nil.
+// L16, and raw. onFrame may be nil.
 func (tr *track) deliverOne(data []byte, pkt rtp.Packet, up rtp.Update, now time.Time, onFrame func(audiostream.Frame)) {
 	if onFrame == nil {
 		return
