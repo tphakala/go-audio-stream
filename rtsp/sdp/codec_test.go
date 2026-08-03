@@ -161,6 +161,9 @@ func TestCodecsL16Dynamic(t *testing.T) {
 		// A rtpmap that omits the channel segment defaults to 1 channel, the
 		// same normalization the other codecs get.
 		{"no channel segment", "L16/48000", 48000, 1},
+		// A nonsensical negative channel count (the segment is a plain Atoi) is
+		// clamped to 1 rather than surfacing negative on CodecL16.Channels.
+		{"negative channels", "L16/48000/-2", 48000, 1},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

@@ -118,7 +118,12 @@ func describeTrack(m *Media) DescribedTrack {
 	// channel segment when the source rtpmap omitted it.
 	rawChannels := channels
 
-	if channels == 0 && encoding != "" {
+	// Default a missing (0) or nonsensical (negative) channel count to 1 for any
+	// recognized encoding. The rtpmap channel segment is a plain Atoi (parse.go),
+	// so a value like L16/44100/-2 parses to a negative; left unclamped it would
+	// surface on the exported CodecL16.Channels/Track.Channels and feed the L16
+	// frame-size math.
+	if channels <= 0 && encoding != "" {
 		channels = 1
 	}
 
