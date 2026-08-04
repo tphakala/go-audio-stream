@@ -99,13 +99,21 @@ func reportCapture(b *strings.Builder, r *Report) {
 		r.AudioTrack.ID, r.Window, endReasonPhrase(r.Reason))
 	fmt.Fprintf(b, "  packets: %d\n", c.Packets)
 	fmt.Fprintf(b, "  bytes: %d\n", c.Bytes)
+	if c.WireBytes > 0 {
+		fmt.Fprintf(b, "  wire-bytes: %d\n", c.WireBytes)
+	}
 	fmt.Fprintf(b, "  lost: %d (%.2f%%)\n", c.Lost, c.LossRatio*100)
 	fmt.Fprintf(b, "  duplicates: %d\n", c.Duplicates)
 	fmt.Fprintf(b, "  malformed: %d\n", c.Malformed)
 	fmt.Fprintf(b, "  ssrc-resets: %d\n", c.SSRCResets)
 	fmt.Fprintf(b, "  max-gap: %d\n", c.MaxGap)
 	fmt.Fprintf(b, "  bitrate: %.1f kbit/s\n", c.Bitrate/1000)
+	if c.WireBytes > 0 {
+		fmt.Fprintf(b, "  wire-bitrate: %.1f kbit/s\n", c.WireBitrate/1000)
+	}
 	fmt.Fprintf(b, "  jitter: %.2f ms\n", c.JitterMS)
+	fmt.Fprintf(b, "  last-frame: %s\n", lastFrameCell(&c))
+	fmt.Fprintf(b, "  sender-clock: %s\n", senderClockCell(&c))
 }
 
 // endReasonPhrase maps an EndReason to the report's longer prose phrase. It is

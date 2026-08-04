@@ -196,7 +196,7 @@ func (r *runner) play() bool {
 func (r *runner) capture() {
 	audio := r.audio
 	cr, _ := r.prober.Collect(r.ctx, audio, r.opts.Duration)
-	stats := computeStats(cr.Frames, &cr.Stats, audio.ClockRate, cr.Elapsed)
+	stats := computeStats(cr.Frames, &cr.Stats, audio.ClockRate, cr.Elapsed, cr.CapturedAt)
 
 	r.frames = cr.Frames
 	r.report.Capture = stats
@@ -284,6 +284,12 @@ func (r *runner) listen() {
 			_ = os.Remove(tmpName)
 			r.report.Listen = ListenResult{Skipped: true, SkipReason: "could not finalize the WAV output file"}
 			return
+		}
+		// Anchor the written WAV to absolute time when the sender clock is
+		// valid: the first captured frame's RTP timestamp extrapolates to the
+		// sender's wall clock.
+		if sc := r.report.Capture.SenderClock; sc.Valid && len(r.frames) > 0 {
+			res.SenderStart = sc.WallClock(r.frames[0].RTPTime)
 		}
 		r.report.Listen = res
 	}

@@ -3,6 +3,7 @@ package doctor
 import (
 	"strings"
 	"testing"
+	"time"
 
 	audiostream "github.com/tphakala/go-audio-stream"
 	"github.com/tphakala/go-audio-stream/rtsp"
@@ -117,4 +118,82 @@ func TestRenderWalkthroughColumns(t *testing.T) {
 			}
 		}
 	})
+}
+
+// telemetryReport returns a Report with a shown capture block and the given
+// CaptureStats, used to exercise the telemetry lines through the walkthrough.
+func telemetryReport(c *CaptureStats) Report {
+	return Report{
+		RedactedURL:  redactedStreamURL,
+		HaveAudio:    true,
+		CaptureShown: true,
+		Window:       10 * time.Second,
+		Reason:       EndCompleted,
+		AudioTrack:   rtsp.Track{ID: 0, Media: audiostream.MediaAudio, Codec: audiostream.CodecOpus{}},
+		Capture:      *c,
+	}
+}
+
+// TestRenderCaptureTelemetryPresent asserts the walkthrough renders the wire,
+// last-frame, and sender-clock lines with their widened %-14s label column
+// when the values are present.
+func TestRenderCaptureTelemetryPresent(t *testing.T) {
+	t.Parallel()
+	r := telemetryReport(&CaptureStats{
+		WireBytes: 70000, WireBitrate: 56000,
+		HaveLastFrame: true, LastFrameAge: 400 * time.Millisecond,
+		SenderClock:  audiostream.SenderClock{Valid: true},
+		SenderWall:   time.Date(2026, 8, 4, 9, 12, 33, 512_000_000, time.UTC),
+		SenderOffset: 120 * time.Millisecond,
+	})
+	var b strings.Builder
+	renderWalkthrough(&b, r, testEnv())
+	got := b.String()
+	for _, want := range []string{
+		"  wire bytes    70000\n",
+		"  wire bitrate  56.0 kbit/s\n",
+		"  last frame    0.4s ago\n",
+		"  sender clock  2026-08-04T09:12:33.512Z (offset +0.12s)\n",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("walkthrough missing %q:\n%s", want, got)
+		}
+	}
+}
+
+// TestRenderCaptureTelemetryAbsent asserts the wire lines are omitted when
+// WireBytes is zero and that the last-frame and sender-clock lines render
+// their "none" forms.
+func TestRenderCaptureTelemetryAbsent(t *testing.T) {
+	t.Parallel()
+	var b strings.Builder
+	renderWalkthrough(&b, telemetryReport(&CaptureStats{}), testEnv())
+	got := b.String()
+	if strings.Contains(got, "wire bytes") || strings.Contains(got, "wire bitrate") {
+		t.Errorf("wire lines must be omitted when WireBytes is zero:\n%s", got)
+	}
+	if !strings.Contains(got, "  last frame    none\n") {
+		t.Errorf("walkthrough missing the last-frame none form:\n%s", got)
+	}
+	if !strings.Contains(got, "  sender clock  none (no RTCP sender report)\n") {
+		t.Errorf("walkthrough missing the sender-clock none form:\n%s", got)
+	}
+}
+
+// TestRenderCaptureSenderClockNoRate covers the degenerate case of a valid
+// sender report on a track that declared no clock rate: WallClock cannot
+// extrapolate, so SenderWall is the zero Time and the line must render the
+// distinct "no clock rate" none form rather than a year-one timestamp.
+func TestRenderCaptureSenderClockNoRate(t *testing.T) {
+	t.Parallel()
+	r := telemetryReport(&CaptureStats{SenderClock: audiostream.SenderClock{Valid: true}})
+	var b strings.Builder
+	renderWalkthrough(&b, r, testEnv())
+	got := b.String()
+	if !strings.Contains(got, "  sender clock  none (sender report, no clock rate)\n") {
+		t.Errorf("a valid clock with a zero wall time must render the no-clock-rate none form:\n%s", got)
+	}
+	if strings.Contains(got, "0001-01-01") {
+		t.Errorf("walkthrough rendered a year-one sender-clock timestamp:\n%s", got)
+	}
 }

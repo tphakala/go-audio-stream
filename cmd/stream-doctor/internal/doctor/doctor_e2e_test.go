@@ -92,11 +92,12 @@ func TestRunReportAndWAV(t *testing.T) {
 		tracks:  []rtsp.Track{track},
 		session: happySession(),
 		result: CaptureResult{
-			Frames:  frames,
-			Stats:   audiostream.TrackStats{Packets: uint64(len(frames)), PayloadBytes: uint64(totalBytes)}, //nolint:gosec // test data, bounded by numFrames above.
-			Window:  10 * time.Second,
-			Elapsed: 10 * time.Second,
-			Reason:  EndCompleted,
+			Frames:     frames,
+			Stats:      audiostream.TrackStats{Packets: uint64(len(frames)), PayloadBytes: uint64(totalBytes), WireBytes: uint64(totalBytes) + 100}, //nolint:gosec // test data, bounded by numFrames above.
+			CapturedAt: time.Unix(400, 0),
+			Window:     10 * time.Second,
+			Elapsed:    10 * time.Second,
+			Reason:     EndCompleted,
 		},
 	}
 	opts := Options{URL: testTargetURL, Duration: 10 * time.Second, Report: true, WAVPath: wavPath}
@@ -123,6 +124,13 @@ func TestRunReportAndWAV(t *testing.T) {
 	for _, frag := range []string{wavPath, "user:pass", "cam.example"} {
 		if strings.Contains(got, frag) {
 			t.Errorf("report leaks %q:\n%s", frag, got)
+		}
+	}
+	// The telemetry lines are part of the report: wire-bytes surfaces because
+	// the fake reported WireBytes, and last-frame is always present.
+	for _, frag := range []string{"wire-bytes:", "last-frame:"} {
+		if !strings.Contains(got, frag) {
+			t.Errorf("report missing the telemetry line %q:\n%s", frag, got)
 		}
 	}
 

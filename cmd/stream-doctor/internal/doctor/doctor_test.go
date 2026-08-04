@@ -115,15 +115,19 @@ tracks
   track 1: video, H264/90000, PT 96, clock 90000, ch -, depacketize no
 
 capture (10s, track 0, ended: completed)
-  packets     500
-  bytes       64000
-  lost        0 (0.00%)
-  duplicates  0
-  malformed   0
-  ssrc-resets 0
-  max gap     0
-  bitrate     51.2 kbit/s
-  jitter      0.00 ms
+  packets       500
+  bytes         64000
+  wire bytes    70000
+  lost          0 (0.00%)
+  duplicates    0
+  malformed     0
+  ssrc-resets   0
+  max gap       0
+  bitrate       51.2 kbit/s
+  wire bitrate  56.0 kbit/s
+  jitter        0.00 ms
+  last frame    0.4s ago
+  sender clock  none (no RTCP sender report)
 `
 
 func TestRunHappyPathWalkthrough(t *testing.T) {
@@ -132,11 +136,12 @@ func TestRunHappyPathWalkthrough(t *testing.T) {
 		tracks:  []rtsp.Track{aacTrack(), videoTrack()},
 		session: happySession(),
 		result: CaptureResult{
-			Frames:  frames500(),
-			Stats:   audiostream.TrackStats{Packets: 500, PayloadBytes: 64000},
-			Window:  10 * time.Second,
-			Elapsed: 10 * time.Second,
-			Reason:  EndCompleted,
+			Frames:     frames500(),
+			Stats:      audiostream.TrackStats{Packets: 500, PayloadBytes: 64000, WireBytes: 70000, LastFrameAt: time.Unix(110, 0)},
+			CapturedAt: time.Unix(110, 400_000_000),
+			Window:     10 * time.Second,
+			Elapsed:    10 * time.Second,
+			Reason:     EndCompleted,
 		},
 	}
 	opts := Options{URL: testTargetURL, Duration: 10 * time.Second}
