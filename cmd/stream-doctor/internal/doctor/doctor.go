@@ -92,8 +92,12 @@ func (r *runner) run() (Result, error) {
 		pre = []func() bool{r.dial, r.describe, r.selectAudio, r.setup, r.play}
 	default:
 		// proberFor only builds an RTSP or HTTP prober, so this is unreachable
-		// in production; a test passing a bare Prober lands here rather than
-		// panicking on a failed assertion.
+		// in production. A bare Prober (neither negotiation surface) has nothing
+		// to probe: record a terminal usage error and PhaseStart so mapExit
+		// yields ExitUsage, rather than letting a nil termErr render as a clean,
+		// misleading success.
+		r.res.Phase = PhaseStart
+		r.termErr = fmt.Errorf("%w: unsupported source", ErrUsage)
 		r.report.Result = "unsupported source"
 		r.render()
 		return r.res, r.termErr

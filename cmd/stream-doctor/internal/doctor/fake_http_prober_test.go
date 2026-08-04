@@ -53,6 +53,42 @@ func (f *fakeHTTPProber) Close() error {
 	return nil
 }
 
+// bareProber implements only the narrow Prober (Collect/Close), satisfying
+// neither RTSPProber nor HTTPProber, so Run's type switch falls to its default
+// branch. It exists to pin that an unsupported prober kind fails as a usage
+// error rather than rendering a misleading clean result.
+type bareProber struct{}
+
+// compile-time: bareProber implements Prober but neither negotiation surface.
+var _ Prober = bareProber{}
+
+func (bareProber) Collect(context.Context, rtsp.Track, time.Duration) (CaptureResult, error) {
+	return CaptureResult{}, nil
+}
+
+func (bareProber) Close() error { return nil }
+
+// TestRunUnsupportedProberKind asserts a prober that is neither an RTSPProber
+// nor an HTTPProber terminates with a wrapped usage error and ExitUsage, never
+// a nil-error clean result. proberFor never yields such a prober in production;
+// this guards the unreachable default branch against silently reporting success.
+func TestRunUnsupportedProberKind(t *testing.T) {
+	t.Parallel()
+	opts := Options{URL: "rtsp://cam/stream", Duration: time.Second}
+
+	var out strings.Builder
+	res, err := Run(context.Background(), opts, bareProber{}, &out, io.Discard, testEnv(), fixedClock(time.Millisecond))
+	if err == nil {
+		t.Fatal("Run() error = nil, want a usage error for a bare prober")
+	}
+	if !errors.Is(err, ErrUsage) {
+		t.Errorf("Run() error = %v, want it to wrap ErrUsage", err)
+	}
+	if code := mapExit(err, res); code != ExitUsage {
+		t.Errorf("mapExit = %d, want ExitUsage", code)
+	}
+}
+
 // httpL16Track is the synthesized single L16 track the doctor builds for an
 // HTTP source: ID 0, no RTP payload type, s16le at 44100 Hz stereo.
 func httpL16Track() rtsp.Track {
