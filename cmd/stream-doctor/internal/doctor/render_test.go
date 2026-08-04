@@ -19,6 +19,7 @@ func TestCodecName(t *testing.T) {
 		{"opus", audiostream.CodecOpus{}, "Opus"},
 		{"g711 mu-law", audiostream.CodecG711{Law: audiostream.MuLaw}, "PCMU (G.711 mu-law)"},
 		{"g711 a-law", audiostream.CodecG711{Law: audiostream.ALaw}, "PCMA (G.711 A-law)"},
+		{"l16", audiostream.CodecL16{ClockRate: 8000, Channels: 1}, "L16"},
 		{"unknown with rtpmap", audiostream.CodecUnknown{RTPMap: testH264}, testH264},
 		{"unknown empty", audiostream.CodecUnknown{}, "unknown"},
 	}
@@ -42,7 +43,8 @@ func TestDecodable(t *testing.T) {
 		{"aac audio", rtsp.Track{Media: audiostream.MediaAudio, Codec: audiostream.CodecAAC{}}, true},
 		{"opus audio", rtsp.Track{Media: audiostream.MediaAudio, Codec: audiostream.CodecOpus{}}, true},
 		{"g711 audio", rtsp.Track{Media: audiostream.MediaAudio, Codec: audiostream.CodecG711{}}, true},
-		{"unknown audio", rtsp.Track{Media: audiostream.MediaAudio, Codec: audiostream.CodecUnknown{RTPMap: testL16RTPMap}}, false},
+		{"l16 audio", rtsp.Track{Media: audiostream.MediaAudio, Codec: audiostream.CodecL16{}}, true},
+		{"unknown audio", rtsp.Track{Media: audiostream.MediaAudio, Codec: audiostream.CodecUnknown{RTPMap: testUnknownRTPMap}}, false},
 		{"video track", rtsp.Track{Media: audiostream.MediaVideo, Codec: audiostream.CodecUnknown{RTPMap: testH264}}, false},
 	}
 	for _, tc := range cases {

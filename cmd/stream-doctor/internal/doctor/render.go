@@ -65,6 +65,8 @@ func codecName(c audiostream.Codec) string {
 			return "PCMA (G.711 A-law)"
 		}
 		return "PCMU (G.711 mu-law)"
+	case audiostream.CodecL16:
+		return "L16"
 	case audiostream.CodecUnknown:
 		if v.RTPMap == "" {
 			return unknownLabel
@@ -76,14 +78,14 @@ func codecName(c audiostream.Codec) string {
 }
 
 // decodable reports whether the doctor can turn a track's audio into a WAV:
-// true for CodecAAC, CodecOpus, and CodecG711; false for CodecUnknown and any
-// non-audio track.
+// true for CodecAAC, CodecOpus, CodecG711, and CodecL16; false for
+// CodecUnknown and any non-audio track.
 func decodable(t rtsp.Track) bool {
 	if t.Media != audiostream.MediaAudio {
 		return false
 	}
 	switch t.Codec.(type) {
-	case audiostream.CodecAAC, audiostream.CodecOpus, audiostream.CodecG711:
+	case audiostream.CodecAAC, audiostream.CodecOpus, audiostream.CodecG711, audiostream.CodecL16:
 		return true
 	default:
 		return false

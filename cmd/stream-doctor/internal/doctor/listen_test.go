@@ -96,6 +96,59 @@ func TestWriteWAVG711MuLaw(t *testing.T) {
 	}
 }
 
+func TestWriteWAVL16(t *testing.T) {
+	t.Parallel()
+	const sampleRate = 8000
+	const channels = 1
+
+	// A known s16le ramp, as the library delivers for L16: the RTP payload
+	// arrives big-endian and the library byte-swaps it to little-endian
+	// before Frame.Data reaches the doctor, so this is already the shape
+	// writeWAVG711's pass-through expects.
+	ramp := make([]int16, 300)
+	for i := range ramp {
+		ramp[i] = int16(i*100 - 15000)
+	}
+	pcmBytes := int16sToLE(ramp)
+
+	frames := []CapturedFrame{
+		{Data: append([]byte(nil), pcmBytes[:200]...)},
+		{Data: append([]byte(nil), pcmBytes[200:400]...)},
+		{Data: append([]byte(nil), pcmBytes[400:]...)},
+	}
+	track := rtsp.Track{
+		ID: 0, Media: audiostream.MediaAudio,
+		Codec:     audiostream.CodecL16{ClockRate: sampleRate, Channels: channels},
+		ClockRate: sampleRate, Channels: channels,
+	}
+
+	var buf bytes.Buffer
+	res, err := writeWAV(&buf, track, frames)
+	if err != nil {
+		t.Fatalf("writeWAV: %v", err)
+	}
+	if !res.Written || res.Skipped {
+		t.Fatalf("res = %+v, want Written", res)
+	}
+	if res.SampleRate != sampleRate || res.Channels != channels {
+		t.Errorf("res sample rate/channels = %d/%d, want %d/%d", res.SampleRate, res.Channels, sampleRate, channels)
+	}
+	if res.Frames != len(ramp) {
+		t.Errorf("res.Frames = %d, want %d", res.Frames, len(ramp))
+	}
+
+	info, decoded, err := wavpcm.DecodeInterleaved(buf.Bytes())
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if info.SampleRate != sampleRate || info.Channels != channels || info.BitDepth != 16 {
+		t.Errorf("decoded StreamInfo = %+v, want %d Hz, %d ch, 16-bit", info, sampleRate, channels)
+	}
+	if !bytes.Equal(decoded, pcmBytes) {
+		t.Error("decoded PCM does not round-trip byte for byte")
+	}
+}
+
 func TestWriteWAVOpus(t *testing.T) {
 	t.Parallel()
 	const sampleRate = 48000

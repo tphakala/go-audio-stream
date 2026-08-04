@@ -95,9 +95,9 @@ func TestRenderReportUnsupported(t *testing.T) {
 		},
 		Session: rtsp.SessionInfo{AuthScheme: rtsp.AuthNone, KeepaliveMethod: "OPTIONS"},
 		Tracks: []rtsp.Track{
-			{ID: 0, Media: audiostream.MediaAudio, Codec: audiostream.CodecUnknown{RTPMap: testL16RTPMap}, ClockRate: 8000, Channels: 1},
+			{ID: 0, Media: audiostream.MediaAudio, Codec: audiostream.CodecUnknown{RTPMap: testUnknownRTPMap}, ClockRate: 8000, Channels: 1},
 		},
-		AudioTrack: rtsp.Track{ID: 0, Media: audiostream.MediaAudio, Codec: audiostream.CodecUnknown{RTPMap: testL16RTPMap}, ClockRate: 8000, Channels: 1},
+		AudioTrack: rtsp.Track{ID: 0, Media: audiostream.MediaAudio, Codec: audiostream.CodecUnknown{RTPMap: testUnknownRTPMap}, ClockRate: 8000, Channels: 1},
 		HaveAudio:  true,
 		Listen:     ListenResult{Skipped: true, SkipReason: "codec not supported for the listen check"},
 	}

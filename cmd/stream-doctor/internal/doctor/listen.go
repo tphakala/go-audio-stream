@@ -18,8 +18,8 @@ import (
 
 // unsupportedListenReason is the ListenResult.SkipReason for a track whose
 // codec the listen check does not handle: CodecUnknown, and any non-audio
-// track, since only CodecAAC, CodecOpus, and CodecG711 have a decode or
-// pass-through path to PCM.
+// track, since only CodecAAC, CodecOpus, CodecG711, and CodecL16 have a
+// decode or pass-through path to PCM.
 const unsupportedListenReason = "codec not supported for the listen check"
 
 // opusMaxFrameSamples bounds a decode buffer for one Opus frame: 120 ms at
@@ -28,8 +28,8 @@ const opusMaxFrameSamples = 5760
 
 // writeWAV decodes or passes through the captured frames for track and
 // writes a WAV to w. It dispatches on the track codec: AAC via go-aac,
-// Opus via go-opus, G.711 pass-through, all written with go-wav. It
-// returns a ListenResult describing what was written, or Skipped with a
+// Opus via go-opus, G.711 and L16 pass-through, all written with go-wav.
+// It returns a ListenResult describing what was written, or Skipped with a
 // reason when the track's codec or stream configuration cannot be turned
 // into PCM at all (an unsupported codec, or input a decoder refuses to
 // construct against, such as a quirky AudioSpecificConfig); a quirk of the
@@ -38,7 +38,7 @@ const opusMaxFrameSamples = 5760
 // w.
 func writeWAV(w io.Writer, track rtsp.Track, frames []CapturedFrame) (ListenResult, error) {
 	switch track.Codec.(type) {
-	case audiostream.CodecG711:
+	case audiostream.CodecG711, audiostream.CodecL16:
 		return writeWAVG711(w, track, frames)
 	case audiostream.CodecOpus:
 		return writeWAVOpus(w, track, frames)
@@ -50,8 +50,10 @@ func writeWAV(w io.Writer, track rtsp.Track, frames []CapturedFrame) (ListenResu
 }
 
 // writeWAVG711 concatenates the already-linear s16le PCM the library
-// delivers for G.711 (Frame.Data is decompanded on arrival) and writes it
-// once with go-wav.
+// delivers for G.711 (Frame.Data is decompanded on arrival) and for L16
+// (Frame.Data is byte-swapped to little-endian on arrival), and writes it
+// once with go-wav. Both codecs hand the doctor PCM in the same shape, so
+// they share this one pass-through path.
 func writeWAVG711(w io.Writer, track rtsp.Track, frames []CapturedFrame) (ListenResult, error) {
 	channels := max(track.Channels, 1)
 
