@@ -12,13 +12,17 @@
 // authoritative for the rate and channel count, and a bounded data chunk ends
 // the stream when its declared bytes are consumed. A raw response (audio/L16,
 // or an unlabeled application/octet-stream or audio/pcm) carries no header, so
-// its shape comes from the Content-Type parameters and Config.Format: audio/L16
-// is big-endian per RFC 3551 and byte-swapped to little-endian on delivery,
-// while unlabeled embedded PCM is taken as native little-endian. An explicit
-// Config.Format.Endian overrides the implied byte order. The precedence for
-// rate and channels is WAV header, then Content-Type parameters, then
-// Config.Format; an unresolvable shape fails Open with ErrFormatUnknown rather
-// than being guessed.
+// its shape comes from the Content-Type parameters and Config.Format. Raw PCM
+// defaults to little-endian and is delivered verbatim. RFC 3551 defines
+// audio/L16 as big-endian, but real HTTP embedded microphones (for example
+// esp32-audio-streamer's /stream.pcm) send native little-endian while labeling
+// the stream audio/L16, so this source defaults audio/L16 to little-endian to
+// match the devices in the field; unlabeled embedded PCM is native
+// little-endian for the same reason. Set Config.Format.Endian = EndianBig for a
+// spec-strict big-endian audio/L16 source, which is byte-swapped to
+// little-endian on delivery. The precedence for rate and channels is WAV header,
+// then Content-Type parameters, then Config.Format; an unresolvable shape fails
+// Open with ErrFormatUnknown rather than being guessed.
 //
 // Compressed and container formats are out of scope by design. A Content-Type
 // this source does not carry (audio/mpeg, audio/aac, audio/ogg and the rest)

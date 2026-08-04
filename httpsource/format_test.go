@@ -11,8 +11,8 @@ import (
 
 func TestFormatPrecedence(t *testing.T) {
 	t.Run("bare L16 falls back to Config.Format", func(t *testing.T) {
-		be := pcmMono(256)
-		srv := httptest.NewServer(serveStatic("audio/l16", be))
+		src := pcmMono(256)
+		srv := httptest.NewServer(serveStatic("audio/l16", src))
 		defer srv.Close()
 		var col collector
 		c := openOK(t, srv, Config{OnFrame: col.onFrame, Format: PCMFormat{SampleRate: 22050, Channels: 1}})
@@ -20,8 +20,8 @@ func TestFormatPrecedence(t *testing.T) {
 		if c.Codec().ClockRate != 22050 || c.Codec().Channels != 1 {
 			t.Fatalf("Codec = %+v, want {22050 1}", c.Codec())
 		}
-		if !bytes.Equal(col.bytes(), swapPairs(be)) {
-			t.Fatal("L16 default byte order should be big-endian (swapped on delivery)")
+		if !bytes.Equal(col.bytes(), src) {
+			t.Fatal("L16 default byte order should be little-endian (delivered verbatim)")
 		}
 	})
 
@@ -35,7 +35,7 @@ func TestFormatPrecedence(t *testing.T) {
 		}
 	})
 
-	t.Run("explicit little-endian overrides L16 big-endian", func(t *testing.T) {
+	t.Run("explicit little-endian delivers L16 verbatim", func(t *testing.T) {
 		src := pcmMono(256)
 		srv := httptest.NewServer(serveStatic("audio/l16;rate=8000;channels=1", src))
 		defer srv.Close()
@@ -43,7 +43,37 @@ func TestFormatPrecedence(t *testing.T) {
 		c := openOK(t, srv, Config{OnFrame: col.onFrame, Format: PCMFormat{Endian: EndianLittle}})
 		_ = waitResult(t, c, 5*time.Second)
 		if !bytes.Equal(col.bytes(), src) {
-			t.Fatal("EndianLittle override should deliver source bytes unswapped")
+			t.Fatal("EndianLittle should deliver source bytes verbatim")
+		}
+	})
+
+	t.Run("explicit big-endian byte-swaps L16 to s16le", func(t *testing.T) {
+		be := pcmMono(256) // treated as a spec-strict big-endian source
+		srv := httptest.NewServer(serveStatic("audio/l16;rate=8000;channels=1", be))
+		defer srv.Close()
+		var col collector
+		c := openOK(t, srv, Config{OnFrame: col.onFrame, Format: PCMFormat{Endian: EndianBig}})
+		_ = waitResult(t, c, 5*time.Second)
+		if !bytes.Equal(col.bytes(), swapPairs(be)) {
+			t.Fatal("EndianBig should byte-swap a big-endian source to little-endian s16le")
+		}
+	})
+
+	t.Run("esp32-style L16 little-endian delivered verbatim", func(t *testing.T) {
+		// esp32-audio-streamer's /stream.pcm labels the body audio/L16 but sends
+		// native little-endian s16le. With no override it must be delivered
+		// verbatim, not byte-swapped as an RFC 3551 reading would imply.
+		src := pcmMono(256)
+		srv := httptest.NewServer(serveStatic("audio/l16; rate=48000; channels=1", src))
+		defer srv.Close()
+		var col collector
+		c := openOK(t, srv, Config{OnFrame: col.onFrame})
+		_ = waitResult(t, c, 5*time.Second)
+		if c.Codec().ClockRate != 48000 || c.Codec().Channels != 1 {
+			t.Fatalf("Codec = %+v, want {48000 1}", c.Codec())
+		}
+		if !bytes.Equal(col.bytes(), src) {
+			t.Fatal("esp32-style little-endian L16 should be delivered verbatim as s16le")
 		}
 	})
 

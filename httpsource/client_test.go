@@ -271,12 +271,15 @@ func TestOpenWAVHappyPath(t *testing.T) {
 }
 
 func TestOpenRawL16BigEndian(t *testing.T) {
-	be := pcmMono(500) // treated as big-endian source bytes
+	be := pcmMono(500) // treated as a spec-strict big-endian source
 	srv := httptest.NewServer(serveStatic("audio/l16;rate=24000;channels=1", be))
 	defer srv.Close()
 
+	// audio/L16 now defaults to little-endian for embedded-device compatibility,
+	// so a spec-strict RFC 3551 big-endian source needs the explicit EndianBig
+	// opt-in to be byte-swapped to s16le on delivery.
 	var col collector
-	c := openOK(t, srv, Config{OnFrame: col.onFrame})
+	c := openOK(t, srv, Config{OnFrame: col.onFrame, Format: PCMFormat{Endian: EndianBig}})
 	if err := waitResult(t, c, 5*time.Second); !errors.Is(err, ErrStreamEnded) {
 		t.Fatalf("Wait = %v, want ErrStreamEnded", err)
 	}

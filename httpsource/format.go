@@ -15,15 +15,6 @@ import (
 // this library ingests.
 const maxChannels = 8
 
-// rawDefaultBigEndian and rawDefaultLittleEndian name the implied byte order of
-// a raw source when Config.Format.Endian is EndianUnspecified, at the two call
-// sites that resolve it: audio/L16 is network byte order (RFC 3551), unlabeled
-// embedded PCM is native little-endian.
-const (
-	rawDefaultBigEndian    = true
-	rawDefaultLittleEndian = false
-)
-
 // resolveFormat dispatches on the response Content-Type and fills the reader's
 // immutable format fields (rate, channels, frameBytes, swap, and the data
 // budget). It runs during Open, before the reader goroutine spawns, so those
@@ -31,8 +22,8 @@ const (
 //
 // Precedence for rate and channels is WAV header > Content-Type parameters >
 // Config.Format; for byte order it is an explicit Config.Format.Endian > the
-// Content-Type implication > the raw default. An unresolvable rate or channel
-// count is an open-phase error, never a guess.
+// raw default, which is little-endian for all raw PCM this source carries. An
+// unresolvable rate or channel count is an open-phase error, never a guess.
 func (c *Client) resolveFormat(resp *http.Response) error {
 	mediaType, params, _ := mime.ParseMediaType(resp.Header.Get("Content-Type"))
 	switch mediaType {
@@ -70,9 +61,13 @@ func (c *Client) setupWAV() error {
 	return nil
 }
 
-// setupL16 configures a raw audio/L16 source (RFC 3551 big-endian PCM16). The
-// rate and channels MIME parameters win over Config.Format; a missing channel
-// count defaults to one (the audio/L16 registration default), a missing rate is
+// setupL16 configures a raw audio/L16 source. RFC 3551 defines audio/L16 as
+// big-endian, but real HTTP embedded microphones (for example
+// esp32-audio-streamer's /stream.pcm) send native little-endian while labeling
+// the stream audio/L16, so this source defaults audio/L16 to little-endian; set
+// Config.Format.Endian = EndianBig for a spec-strict big-endian source. The rate
+// and channels MIME parameters win over Config.Format; a missing channel count
+// defaults to one (the audio/L16 registration default), a missing rate is
 // unresolvable and fails Open.
 func (c *Client) setupL16(params map[string]string) error {
 	rate := paramInt(params, "rate", c.cfg.Format.SampleRate)
@@ -80,7 +75,7 @@ func (c *Client) setupL16(params map[string]string) error {
 	if channels <= 0 {
 		channels = 1
 	}
-	return c.setupRaw(rate, channels, rawDefaultBigEndian)
+	return c.setupRaw(rate, channels)
 }
 
 // setupSniff handles an unlabeled body. It peeks the leading signature; a Peek
@@ -100,21 +95,21 @@ func (c *Client) setupSniff() error {
 			return fmt.Errorf("%w: %s (64-bit RIFF) is not supported", ErrUnsupportedFormat, magic)
 		}
 	}
-	return c.setupRaw(c.cfg.Format.SampleRate, c.cfg.Format.Channels, rawDefaultLittleEndian)
+	return c.setupRaw(c.cfg.Format.SampleRate, c.cfg.Format.Channels)
 }
 
 // setupRaw validates a raw shape and records it, resolving the byte order from
-// the explicit Config override or the caller's default. A raw source has no
-// self-described length, so it streams unbounded until EOF, Close, or the
-// watchdog.
-func (c *Client) setupRaw(rate, channels int, defaultBig bool) error {
+// the explicit Config override or the little-endian default that every raw PCM
+// stream this source carries now takes. A raw source has no self-described
+// length, so it streams unbounded until EOF, Close, or the watchdog.
+func (c *Client) setupRaw(rate, channels int) error {
 	if err := validateRawShape(rate, channels); err != nil {
 		return err
 	}
 	c.rate = rate
 	c.channels = channels
 	c.frameBytes = 2 * channels
-	c.swap = resolveBigEndian(c.cfg.Format.Endian, defaultBig)
+	c.swap = resolveBigEndian(c.cfg.Format.Endian)
 	c.bounded = false
 	return nil
 }
@@ -134,17 +129,11 @@ func validateRawShape(rate, channels int) error {
 }
 
 // resolveBigEndian reports whether the source samples are big-endian (and so
-// need a swap to little-endian s16le on delivery), from the explicit override
-// or the format's default when the override is EndianUnspecified.
-func resolveBigEndian(override Endianness, defaultBig bool) bool {
-	switch override {
-	case EndianLittle:
-		return false
-	case EndianBig:
-		return true
-	default:
-		return defaultBig
-	}
+// need a swap to little-endian s16le on delivery). Only an explicit EndianBig
+// override is big-endian; EndianLittle and the EndianUnspecified default are
+// little-endian, so raw PCM defaults to being delivered verbatim.
+func resolveBigEndian(override Endianness) bool {
+	return override == EndianBig
 }
 
 // paramInt returns a positive integer MIME parameter, or fallback when the
