@@ -49,7 +49,7 @@ type CaptureStats struct {
 func computeStats(frames []CapturedFrame, lib audiostream.TrackStats, clockRate int, elapsed time.Duration) CaptureStats {
 	stats := CaptureStats{
 		Packets:    lib.Packets,
-		Bytes:      lib.Bytes,
+		Bytes:      lib.PayloadBytes,
 		Lost:       lib.SeqGaps,
 		Duplicates: lib.Duplicates,
 		Malformed:  lib.Malformed,

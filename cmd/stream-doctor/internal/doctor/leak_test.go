@@ -38,7 +38,7 @@ func TestRunReportScrubsCameraStrings(t *testing.T) {
 		},
 		result: CaptureResult{
 			Frames:  frames500(),
-			Stats:   audiostream.TrackStats{Packets: 500, Bytes: 64000},
+			Stats:   audiostream.TrackStats{Packets: 500, PayloadBytes: 64000},
 			Window:  time.Second,
 			Elapsed: time.Second,
 			Reason:  EndCompleted,

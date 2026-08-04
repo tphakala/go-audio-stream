@@ -418,23 +418,39 @@ func (c *Client) Wait(ctx context.Context) error {
 //
 // The counters are read one at a time rather than under a single barrier, so a
 // snapshot taken mid-packet can show a packet counted and its bytes not yet.
-// They are cumulative diagnostics, never a ledger to reconcile.
+// They are cumulative diagnostics, never a ledger to reconcile. CapturedAt is
+// stamped after every counter is loaded, so it marks when the read completed
+// and is never earlier than any track's LastFrameAt.
 func (c *Client) Stats() audiostream.Stats {
 	c.mu.Lock()
 	tracks := c.tracks
 	c.mu.Unlock()
 	m := make(map[int]audiostream.TrackStats, len(tracks))
 	for _, tr := range tracks {
-		m[tr.id] = audiostream.TrackStats{
-			Packets:    tr.packets.Load(),
-			Bytes:      tr.bytes.Load(),
-			SeqGaps:    tr.seqGaps.Load(),
-			Duplicates: tr.duplicates.Load(),
-			Malformed:  tr.malformed.Load(),
-			SSRCResets: tr.ssrcResets.Load(),
+		ts := audiostream.TrackStats{
+			Packets:      tr.packets.Load(),
+			PayloadBytes: tr.payloadBytes.Load(),
+			WireBytes:    tr.wireBytes.Load(),
+			SeqGaps:      tr.seqGaps.Load(),
+			Duplicates:   tr.duplicates.Load(),
+			Malformed:    tr.malformed.Load(),
+			SSRCResets:   tr.ssrcResets.Load(),
 		}
+		// A zero UnixNano means no frame has arrived yet, so leave LastFrameAt as
+		// the zero Time rather than mapping it to the 1970 epoch.
+		if nanos := tr.lastFrameUnixNano.Load(); nanos != 0 {
+			ts.LastFrameAt = time.Unix(0, nanos)
+		}
+		m[tr.id] = ts
 	}
-	return audiostream.Stats{Tracks: m}
+	// Stamp CapturedAt AFTER loading every atomic. A frame arriving mid-read
+	// then cannot make a track's LastFrameAt newer than CapturedAt (which would
+	// give a negative age when a consumer computes CapturedAt.Sub(LastFrameAt)):
+	// sampling it last guarantees CapturedAt is at least every loaded
+	// LastFrameAt, and it carries a monotonic reading for snapshot-to-snapshot
+	// elapsed time.
+	capturedAt := time.Now()
+	return audiostream.Stats{CapturedAt: capturedAt, Tracks: m}
 }
 
 // SessionInfo returns a snapshot of the negotiated session details known so

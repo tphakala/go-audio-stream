@@ -93,7 +93,7 @@ func TestRunReportAndWAV(t *testing.T) {
 		session: happySession(),
 		result: CaptureResult{
 			Frames:  frames,
-			Stats:   audiostream.TrackStats{Packets: uint64(len(frames)), Bytes: uint64(totalBytes)}, //nolint:gosec // test data, bounded by numFrames above.
+			Stats:   audiostream.TrackStats{Packets: uint64(len(frames)), PayloadBytes: uint64(totalBytes)}, //nolint:gosec // test data, bounded by numFrames above.
 			Window:  10 * time.Second,
 			Elapsed: 10 * time.Second,
 			Reason:  EndCompleted,
@@ -162,7 +162,7 @@ func TestRunListenCreateFailureRedactsPath(t *testing.T) {
 		session: happySession(),
 		result: CaptureResult{
 			Frames:  []CapturedFrame{{Data: []byte{0, 1, 2, 3}}},
-			Stats:   audiostream.TrackStats{Packets: 1, Bytes: 4},
+			Stats:   audiostream.TrackStats{Packets: 1, PayloadBytes: 4},
 			Window:  10 * time.Second,
 			Elapsed: 10 * time.Second,
 			Reason:  EndCompleted,
@@ -214,7 +214,7 @@ func TestRunListenWriteFailureRedactsPath(t *testing.T) {
 		session: happySession(),
 		result: CaptureResult{
 			Frames:  garbage,
-			Stats:   audiostream.TrackStats{Packets: 2, Bytes: 700},
+			Stats:   audiostream.TrackStats{Packets: 2, PayloadBytes: 700},
 			Window:  10 * time.Second,
 			Elapsed: 10 * time.Second,
 			Reason:  EndCompleted,
@@ -266,7 +266,7 @@ func TestRunReportModeSeparation(t *testing.T) {
 		session: happySession(),
 		result: CaptureResult{
 			Frames:  frames500(),
-			Stats:   audiostream.TrackStats{Packets: 500, Bytes: 64000},
+			Stats:   audiostream.TrackStats{Packets: 500, PayloadBytes: 64000},
 			Window:  10 * time.Second,
 			Elapsed: 10 * time.Second,
 			Reason:  EndCompleted,

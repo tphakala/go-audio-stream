@@ -750,8 +750,11 @@ func TestDiscardTrackDropsAllocationFree(t *testing.T) {
 	if tr.packets.Load() == 0 {
 		t.Error("discard track packet counter did not advance")
 	}
-	if tr.bytes.Load() == 0 {
-		t.Error("discard track byte counter did not advance")
+	if tr.wireBytes.Load() == 0 {
+		t.Error("discard track wire-byte counter did not advance")
+	}
+	if tr.payloadBytes.Load() != 0 {
+		t.Error("discard track payload-byte counter advanced, want 0 (a discard track is never parsed)")
 	}
 }
 

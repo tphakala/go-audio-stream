@@ -62,7 +62,7 @@ func TestComputeStatsJitterMultiAUPacket(t *testing.T) {
 // surfaced into CaptureStats unchanged.
 func TestComputeStatsDuplicates(t *testing.T) {
 	t.Parallel()
-	lib := audiostream.TrackStats{Packets: 500, Bytes: 64000, SeqGaps: 3, Duplicates: 2, Malformed: 1}
+	lib := audiostream.TrackStats{Packets: 500, PayloadBytes: 64000, SeqGaps: 3, Duplicates: 2, Malformed: 1}
 	stats := computeStats(nil, lib, 48000, time.Second)
 	if stats.Duplicates != 2 {
 		t.Errorf("Duplicates = %d, want 2", stats.Duplicates)
@@ -71,7 +71,7 @@ func TestComputeStatsDuplicates(t *testing.T) {
 
 func TestComputeStatsLossAndGap(t *testing.T) {
 	t.Parallel()
-	lib := audiostream.TrackStats{Packets: 490, Bytes: 62720, SeqGaps: 10, Malformed: 4, SSRCResets: 2}
+	lib := audiostream.TrackStats{Packets: 490, PayloadBytes: 62720, SeqGaps: 10, Malformed: 4, SSRCResets: 2}
 	frames := []CapturedFrame{
 		{RTPTime: 0, SeqGap: 0},
 		{RTPTime: 1, SeqGap: 3},
@@ -98,7 +98,7 @@ func TestComputeStatsLossAndGap(t *testing.T) {
 
 func TestComputeStatsBitrate(t *testing.T) {
 	t.Parallel()
-	lib := audiostream.TrackStats{Bytes: 64000}
+	lib := audiostream.TrackStats{PayloadBytes: 64000}
 	stats := computeStats(nil, lib, 16000, 10*time.Second)
 	if stats.Bitrate != 51200 {
 		t.Errorf("Bitrate = %v, want 51200", stats.Bitrate)

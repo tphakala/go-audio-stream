@@ -113,12 +113,20 @@ type track struct {
 	hasSeed atomic.Bool
 
 	// Per-track receive counters: reader writes, Stats reads.
-	packets    atomic.Uint64
-	bytes      atomic.Uint64
-	seqGaps    atomic.Uint64
-	duplicates atomic.Uint64
-	malformed  atomic.Uint64
-	ssrcResets atomic.Uint64
+	packets      atomic.Uint64
+	payloadBytes atomic.Uint64
+	wireBytes    atomic.Uint64
+	seqGaps      atomic.Uint64
+	duplicates   atomic.Uint64
+	malformed    atomic.Uint64
+	ssrcResets   atomic.Uint64
+	// lastFrameUnixNano is the wall-clock arrival (UnixNano) of the most recent
+	// frame on this track's RTP channel, parsed or not: the per-track media
+	// clock exposed as TrackStats.LastFrameAt. It is distinct from the Client's
+	// lastFrameAt watchdog, which stamps EVERY interleaved frame on any channel
+	// (RTCP included) to prove the peer is alive; this one stamps only media
+	// arriving on this track's RTP channel.
+	lastFrameUnixNano atomic.Int64
 
 	// RTCP Receiver Report snapshot: reader writes, keepalive timer reads.
 	rrHighestSeq     atomic.Uint32
