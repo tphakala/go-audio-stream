@@ -11,11 +11,28 @@ import (
 	"github.com/tphakala/go-audio-stream/rtsp"
 )
 
-// Prober is the RTSP session surface the doctor drives. The production
-// adapter wraps *rtsp.Client; tests supply a fake so the engine, stats,
-// walkthrough, report, and exit-code paths run without a network or a
-// camera.
+// Prober is the source-agnostic capture surface every source shares: it
+// collects a window of audio and releases its resources. The per-protocol
+// negotiation the runner drives before capture lives on the RTSPProber and
+// HTTPProber extensions; the runner picks one by type assertion. The
+// production adapters wrap *rtsp.Client and *httpsource.Client; tests supply a
+// fake so the engine, stats, walkthrough, report, and exit-code paths run
+// without a network or a camera.
 type Prober interface {
+	// Collect blocks for at most window (or until the stream ends or ctx
+	// is cancelled), returning every captured audio frame for track, the
+	// final Stats counters, and the end reason. It never returns the
+	// internal capture timer's deadline as an error.
+	Collect(ctx context.Context, track rtsp.Track, window time.Duration) (CaptureResult, error)
+	// Close ends the session; idempotent.
+	Close() error
+}
+
+// RTSPProber is the RTSP negotiation surface: the timed DIAL, DESCRIBE, SETUP,
+// PLAY handshake plus its session snapshot. rtspProber and the test fakeProber
+// implement it.
+type RTSPProber interface {
+	Prober
 	// Dial connects and runs OPTIONS. After it returns, SessionInfo
 	// reports the negotiated KeepaliveMethod.
 	Dial(ctx context.Context) error
@@ -28,19 +45,77 @@ type Prober interface {
 	Setup(ctx context.Context, track rtsp.Track, opts rtsp.SetupOptions) error
 	// Play starts the stream.
 	Play(ctx context.Context) error
-	// Collect blocks for at most window (or until the stream ends or ctx
-	// is cancelled), returning every captured audio frame for track, the
-	// final Stats counters, the negotiated SessionInfo, and the end
-	// reason. It never returns the internal capture timer's deadline as
-	// an error.
-	Collect(ctx context.Context, track rtsp.Track, window time.Duration) (CaptureResult, error)
 	// SessionInfo is the negotiated session snapshot known so far.
 	SessionInfo() rtsp.SessionInfo
-	// Close ends the session; idempotent.
-	Close() error
 }
 
-// rtspProber is the production Prober, wrapping *rtsp.Client.
+// HTTPProber is the HTTP progressive-source negotiation surface: a single OPEN
+// that resolves the audio format, exposes the synthesized single-track model,
+// and reports the source identity. httpProber implements it.
+type HTTPProber interface {
+	Prober
+	// Open performs the whole HTTP handshake and starts delivery. After it
+	// returns nil, Track and Info are populated.
+	Open(ctx context.Context) error
+	// Track is the single synthesized L16 audio track (ID 0) the source
+	// delivers, shaped so the shared track, decodable, stats, and listen paths
+	// consume it unchanged.
+	Track() rtsp.Track
+	// Info is the source-neutral identity snapshot (URL and Server header).
+	Info() audiostream.SourceInfo
+}
+
+// frameSink is the mutex-guarded, cap-bounded frame accumulator both adapters
+// share. Its onFrame is the OnFrame callback each source's Config registers;
+// the RTSP adapter wraps it behind an audio-track filter, while the HTTP
+// adapter (single track, always ID 0) registers it directly.
+type frameSink struct {
+	// mu guards the frames accumulated by onFrame.
+	mu        sync.Mutex
+	frames    []CapturedFrame
+	bytes     int
+	truncated bool
+
+	// maxFrames and maxBytes are the capture caps; the constructors set them to
+	// the package defaults, and tests may override them directly.
+	maxFrames int
+	maxBytes  int
+}
+
+// onFrame appends an owned copy of f under the caps. It is non-blocking: a
+// slice append under a short lock, no I/O.
+//
+//nolint:gocritic // f's signature is fixed by the OnFrame callback contract of both sources.
+func (s *frameSink) onFrame(f audiostream.Frame) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	// Once the caps are hit, truncated latches: a later smaller frame must not
+	// slip in past the cap and leave a discontiguous gap in the capture.
+	if !s.truncated && len(s.frames) < s.maxFrames && s.bytes+len(f.Data) <= s.maxBytes {
+		s.frames = append(s.frames, CapturedFrame{
+			Data:       append([]byte(nil), f.Data...),
+			RTPTime:    f.RTPTime,
+			PTS:        f.PTS,
+			ReceivedAt: f.ReceivedAt,
+			SeqGap:     f.SeqGap,
+		})
+		s.bytes += len(f.Data)
+		return
+	}
+	s.truncated = true
+}
+
+// snapshot returns an owned copy of the frames captured so far and the
+// truncation flag.
+func (s *frameSink) snapshot() (frames []CapturedFrame, truncated bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	frames = append([]CapturedFrame(nil), s.frames...)
+	truncated = s.truncated
+	return frames, truncated
+}
+
+// rtspProber is the production RTSPProber, wrapping *rtsp.Client.
 type rtspProber struct {
 	opts   Options
 	client *rtsp.Client
@@ -50,28 +125,22 @@ type rtspProber struct {
 	// goroutine by Setup; an atomic avoids locking mu on every frame.
 	audioTrackID atomic.Int32
 
-	// mu guards the frames accumulated by onFrame.
-	mu        sync.Mutex
-	frames    []CapturedFrame
-	bytes     int
-	truncated bool
-
-	// maxFrames and maxBytes are the capture caps; newRTSPProber sets them
-	// to the package defaults, and tests may override them directly.
-	maxFrames int
-	maxBytes  int
+	// sink accumulates the captured audio frames, shared with the HTTP adapter.
+	sink frameSink
 }
 
-// newRTSPProber builds a production Prober for opts. The *rtsp.Client is
+// compile-time: rtspProber implements RTSPProber.
+var _ RTSPProber = (*rtspProber)(nil)
+
+// newRTSPProber builds a production RTSPProber for opts. The *rtsp.Client is
 // created in Dial, with an OnFrame sink that copies frames for the audio
 // track into a mutex-guarded slice, bounded by the capture caps.
 //
 //nolint:gocritic // Options is the documented constructor signature; hugeParam does not apply to a per-run entry point.
 func newRTSPProber(opts Options) *rtspProber {
 	p := &rtspProber{
-		opts:      opts,
-		maxFrames: maxCaptureFrames,
-		maxBytes:  maxCaptureBytes,
+		opts: opts,
+		sink: frameSink{maxFrames: maxCaptureFrames, maxBytes: maxCaptureBytes},
 	}
 	// audioTrackID defaults to 0, which is a valid track ID, so store an
 	// impossible ID until Setup records the real audio track. Otherwise a
@@ -139,11 +208,11 @@ func (p *rtspProber) Close() error {
 	return p.client.Close()
 }
 
-// onFrame is the OnFrame sink registered on the *rtsp.Client. It is
-// non-blocking: a slice append under a short lock, no I/O. Frames on any
+// onFrame is the OnFrame sink registered on the *rtsp.Client. It filters on
+// the audio target track and forwards to the shared frame sink. Frames on any
 // track other than the audio target are dropped immediately; under
-// --full-stream the discarded tracks never reach here (the library drops
-// them allocation-free), so this check is a cheap backstop.
+// --full-stream the discarded tracks never reach here (the library drops them
+// allocation-free), so this check is a cheap backstop.
 //
 //nolint:gocritic // f's signature is fixed by rtsp.Config.OnFrame's func(audiostream.Frame) callback contract.
 func (p *rtspProber) onFrame(f audiostream.Frame) {
@@ -151,23 +220,7 @@ func (p *rtspProber) onFrame(f audiostream.Frame) {
 	if f.TrackID != int(p.audioTrackID.Load()) {
 		return
 	}
-
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	// Once the caps are hit, truncated latches: a later smaller frame must not
-	// slip in past the cap and leave a discontiguous gap in the capture.
-	if !p.truncated && len(p.frames) < p.maxFrames && p.bytes+len(f.Data) <= p.maxBytes {
-		p.frames = append(p.frames, CapturedFrame{
-			Data:       append([]byte(nil), f.Data...),
-			RTPTime:    f.RTPTime,
-			PTS:        f.PTS,
-			ReceivedAt: f.ReceivedAt,
-			SeqGap:     f.SeqGap,
-		})
-		p.bytes += len(f.Data)
-		return
-	}
-	p.truncated = true
+	p.sink.onFrame(f)
 }
 
 // Collect owns the capture timer so the internal deadline is never
@@ -181,10 +234,7 @@ func (p *rtspProber) Collect(ctx context.Context, track rtsp.Track, window time.
 	waitErr := p.client.Wait(captureCtx)
 	elapsed := time.Since(start)
 
-	p.mu.Lock()
-	frames := append([]CapturedFrame(nil), p.frames...)
-	truncated := p.truncated
-	p.mu.Unlock()
+	frames, truncated := p.sink.snapshot()
 
 	st := p.client.Stats()
 

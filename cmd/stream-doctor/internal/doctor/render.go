@@ -56,6 +56,8 @@ func (r EndReason) String() string {
 		return endReasonCancelledLabel
 	case EndTruncated:
 		return "truncated"
+	case EndStreamEnded:
+		return "stream-end"
 	default:
 		return unknownLabel
 	}
@@ -209,7 +211,11 @@ func renderCapture(b *strings.Builder, r *Report) {
 	}
 	fmt.Fprintf(b, "  %-14s%.2f ms\n", "jitter", c.JitterMS)
 	fmt.Fprintf(b, captureStr, "last frame", lastFrameCell(&c))
-	fmt.Fprintf(b, captureStr, "sender clock", senderClockCell(&c))
+	// The sender clock is an RTCP construct; an HTTP progressive source has no
+	// sender report, so the line is omitted rather than always reading "none".
+	if r.Kind != SourceHTTP {
+		fmt.Fprintf(b, captureStr, "sender clock", senderClockCell(&c))
+	}
 }
 
 // lastFrameCell renders the last-frame value shared by both renderers:
@@ -328,6 +334,17 @@ func dialDetail(si *rtsp.SessionInfo) string {
 	d := fmt.Sprintf("auth %s, keepalive %s", si.AuthScheme, si.KeepaliveMethod)
 	if si.Server != "" {
 		d += ", server " + si.Server
+	}
+	return d
+}
+
+// openDetail summarizes the HTTP OPEN step: the resolved PCM shape and, when
+// the server sent one, the (already scrubbed) Server header. httpsource always
+// delivers little-endian s16le, so the shape reads "s16le <rate> Hz <layout>".
+func openDetail(track rtsp.Track, server string) string {
+	d := fmt.Sprintf("s16le %d Hz %s", track.ClockRate, channelsLabel(track.Channels))
+	if server != "" {
+		d += ", server " + server
 	}
 	return d
 }

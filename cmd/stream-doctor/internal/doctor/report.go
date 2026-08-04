@@ -63,10 +63,15 @@ func reportHandshake(b *strings.Builder, r *Report) {
 	}
 }
 
-// reportSession writes the negotiated session block once DIAL has succeeded.
-// The session timeout and transport are populated by SETUP, so those two lines
-// appear only once SETUP has succeeded, never as misleading zero values.
+// reportSession writes the negotiated session block. For an RTSP run it appears
+// once DIAL has succeeded; the session timeout and transport are populated by
+// SETUP, so those two lines appear only once SETUP has succeeded, never as
+// misleading zero values. An HTTP run renders a minimal block instead.
 func reportSession(b *strings.Builder, r *Report) {
+	if r.Kind == SourceHTTP {
+		reportHTTPSession(b, r)
+		return
+	}
 	if !hasStepOK(r.Steps, stepDial) {
 		return
 	}
@@ -84,6 +89,24 @@ func reportSession(b *strings.Builder, r *Report) {
 	if setupOK {
 		fmt.Fprintf(b, "  transport: TCP interleaved, %s\n", channelStr(&r.Session, r.AudioTrack.ID))
 	}
+}
+
+// reportHTTPSession writes the minimal session block for an HTTP progressive
+// source once OPEN has succeeded: the scrubbed Server header (when present), the
+// auth scheme, and the fixed transport label. There is no SDP, session timeout,
+// interleaved channel, or keepalive to report. Gating on stepOpen keeps the
+// block absent for a run that failed to open, mirroring the RTSP stepDial gate.
+func reportHTTPSession(b *strings.Builder, r *Report) {
+	if !hasStepOK(r.Steps, stepOpen) {
+		return
+	}
+	fmt.Fprintln(b)
+	fmt.Fprintln(b, "session")
+	if r.Source.Server != "" {
+		fmt.Fprintf(b, "  server: %s\n", r.Source.Server)
+	}
+	fmt.Fprintf(b, "  auth: %s\n", r.SourceAuth)
+	fmt.Fprintln(b, "  transport: HTTP progressive")
 }
 
 // reportCapture writes the capture statistics block, or nothing when capture
@@ -113,7 +136,11 @@ func reportCapture(b *strings.Builder, r *Report) {
 	}
 	fmt.Fprintf(b, "  jitter: %.2f ms\n", c.JitterMS)
 	fmt.Fprintf(b, "  last-frame: %s\n", lastFrameCell(&c))
-	fmt.Fprintf(b, "  sender-clock: %s\n", senderClockCell(&c))
+	// The sender clock is an RTCP construct; an HTTP progressive source has no
+	// sender report, so the line is omitted rather than always reading "none".
+	if r.Kind != SourceHTTP {
+		fmt.Fprintf(b, "  sender-clock: %s\n", senderClockCell(&c))
+	}
 }
 
 // endReasonPhrase maps an EndReason to the report's longer prose phrase. It is
@@ -132,6 +159,8 @@ func endReasonPhrase(r EndReason) string {
 		return endReasonCancelledLabel
 	case EndTruncated:
 		return "truncated (capture cap)"
+	case EndStreamEnded:
+		return "stream ended (EOF)"
 	default:
 		return unknownLabel
 	}

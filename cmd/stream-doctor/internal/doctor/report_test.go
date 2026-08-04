@@ -130,7 +130,7 @@ func TestRenderReportSessionDetailsPreSetup(t *testing.T) {
 	// "channels n/a".
 	r := Report{
 		RedactedURL: redactedStreamURL,
-		Result:      "authentication failed",
+		Result:      authFailedPhrase,
 		Steps: []HandshakeStep{
 			{Name: stepDial, OK: true, Elapsed: 5 * time.Millisecond},
 			{Name: stepDescribe, Elapsed: 5 * time.Millisecond, Detail: "auth failed"},

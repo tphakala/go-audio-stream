@@ -56,9 +56,9 @@ func TestRTSPProberOnFrameCopies(t *testing.T) {
 	p.onFrame(audiostream.Frame{TrackID: 1, Data: data, RTPTime: 42})
 	data[0] = 99 // mutate the caller's buffer after delivery
 
-	p.mu.Lock()
-	got := append([]CapturedFrame(nil), p.frames...)
-	p.mu.Unlock()
+	p.sink.mu.Lock()
+	got := append([]CapturedFrame(nil), p.sink.frames...)
+	p.sink.mu.Unlock()
 
 	if len(got) != 1 {
 		t.Fatalf("len(frames) = %d, want 1", len(got))
@@ -69,9 +69,9 @@ func TestRTSPProberOnFrameCopies(t *testing.T) {
 
 	// A frame on a non-audio track must be ignored.
 	p.onFrame(audiostream.Frame{TrackID: 2, Data: []byte{9}})
-	p.mu.Lock()
-	n := len(p.frames)
-	p.mu.Unlock()
+	p.sink.mu.Lock()
+	n := len(p.sink.frames)
+	p.sink.mu.Unlock()
 	if n != 1 {
 		t.Errorf("len(frames) after non-audio frame = %d, want 1 (must be ignored)", n)
 	}
@@ -82,17 +82,17 @@ func TestRTSPProberOnFrameCopies(t *testing.T) {
 // records the truncation.
 func TestRTSPProberCapTruncates(t *testing.T) {
 	t.Parallel()
-	p := &rtspProber{maxFrames: 3, maxBytes: maxCaptureBytes}
+	p := &rtspProber{sink: frameSink{maxFrames: 3, maxBytes: maxCaptureBytes}}
 	p.audioTrackID.Store(0)
 
 	for range 5 {
 		p.onFrame(audiostream.Frame{TrackID: 0, Data: []byte{1}})
 	}
 
-	p.mu.Lock()
-	n := len(p.frames)
-	truncated := p.truncated
-	p.mu.Unlock()
+	p.sink.mu.Lock()
+	n := len(p.sink.frames)
+	truncated := p.sink.truncated
+	p.sink.mu.Unlock()
 
 	if n != 3 {
 		t.Errorf("len(frames) = %d, want 3", n)
@@ -108,18 +108,18 @@ func TestRTSPProberCapTruncates(t *testing.T) {
 // capture stays a contiguous prefix rather than growing a hole.
 func TestRTSPProberByteCapLatches(t *testing.T) {
 	t.Parallel()
-	p := &rtspProber{maxFrames: 1000, maxBytes: 10}
+	p := &rtspProber{sink: frameSink{maxFrames: 1000, maxBytes: 10}}
 	p.audioTrackID.Store(0)
 
 	p.onFrame(audiostream.Frame{TrackID: 0, Data: []byte{1, 2, 3, 4, 5, 6}}) // 6 bytes: fits (0+6 <= 10)
 	p.onFrame(audiostream.Frame{TrackID: 0, Data: []byte{7, 8, 9, 10, 11}})  // 5 bytes: 6+5 > 10, truncates
 	p.onFrame(audiostream.Frame{TrackID: 0, Data: []byte{12}})               // 1 byte: would fit, but must drop
 
-	p.mu.Lock()
-	n := len(p.frames)
-	bytesAcc := p.bytes
-	truncated := p.truncated
-	p.mu.Unlock()
+	p.sink.mu.Lock()
+	n := len(p.sink.frames)
+	bytesAcc := p.sink.bytes
+	truncated := p.sink.truncated
+	p.sink.mu.Unlock()
 
 	if n != 1 {
 		t.Errorf("len(frames) = %d, want 1 (truncation must latch; a later small frame must not fill the gap)", n)
@@ -184,9 +184,9 @@ func TestRTSPProberDropsTrackZeroBeforeSetup(t *testing.T) {
 	t.Parallel()
 	p := newRTSPProber(Options{})
 	p.onFrame(audiostream.Frame{TrackID: 0, Data: []byte{1, 2, 3}})
-	p.mu.Lock()
-	n := len(p.frames)
-	p.mu.Unlock()
+	p.sink.mu.Lock()
+	n := len(p.sink.frames)
+	p.sink.mu.Unlock()
 	if n != 0 {
 		t.Errorf("len(frames) = %d, want 0 (track 0 must not be captured before Setup)", n)
 	}

@@ -5,9 +5,14 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
+	"net/url"
 	"runtime"
+	"strings"
 	"time"
 
+	audiostream "github.com/tphakala/go-audio-stream"
+	"github.com/tphakala/go-audio-stream/httpsource"
 	"github.com/tphakala/go-audio-stream/rtsp"
 )
 
@@ -72,11 +77,35 @@ func ExecuteContext(ctx context.Context, args []string, stdout, stderr io.Writer
 	}
 
 	env := Env{OS: runtime.GOOS, Arch: runtime.GOARCH, Version: Version}
-	prober := newRTSPProber(opts)
+	prober, perr := proberFor(opts)
+	if perr != nil {
+		_, _ = fmt.Fprintln(stderr, perr)
+		_, _ = fmt.Fprint(stderr, usageText)
+		return ExitUsage
+	}
 	defer func() { _ = prober.Close() }()
 
 	res, runErr := Run(ctx, opts, prober, stdout, stderr, env, time.Now)
 	return mapExit(runErr, res)
+}
+
+// proberFor selects the prober for opts.URL by scheme: rtsp/rtsps drive the
+// RTSP handshake, http/https drive an HTTP progressive source. Any other scheme
+// (or an unparseable URL) is a usage error. The error names only the scheme,
+// never the raw URL, which can carry credentials in its userinfo.
+func proberFor(opts Options) (Prober, error) {
+	u, err := url.Parse(opts.URL)
+	if err != nil {
+		return nil, fmt.Errorf("%w: invalid URL", ErrUsage)
+	}
+	switch strings.ToLower(u.Scheme) {
+	case "rtsp", "rtsps":
+		return newRTSPProber(opts), nil
+	case "http", "https":
+		return newHTTPProber(opts), nil
+	default:
+		return nil, fmt.Errorf("%w: unsupported scheme %q", ErrUsage, u.Scheme)
+	}
 }
 
 // mapExit returns the process exit code for a completed run. err is the
@@ -93,30 +122,74 @@ func mapExit(err error, res Result) int {
 	return mapExitClean(res)
 }
 
-// mapExitErr classifies a non-nil terminal error.
+// mapExitErr classifies a non-nil terminal error. Usage failures (including an
+// HTTP source refusing plaintext credentials) and auth failures take priority;
+// an unsupported HTTP media format is ExitUnsupported; any other error during
+// the capture phase is a capture-quality failure and before capture a
+// connectivity failure.
 func mapExitErr(err error, res Result) int {
-	if errors.Is(err, ErrUsage) {
+	switch {
+	case errors.Is(err, ErrUsage):
 		return ExitUsage
-	}
-	if isAuthErr(err) {
+	case errors.Is(err, httpsource.ErrInsecureAuth):
+		return ExitUsage
+	case isAuthErr(err):
 		return ExitAuth
-	}
-	if res.Phase == PhaseCapture {
+	case isUnsupportedErr(err):
+		return ExitUnsupported
+	case res.Phase == PhaseCapture:
 		return ExitCapture
+	default:
+		return ExitConnection
 	}
-	return ExitConnection
 }
 
-// isAuthErr reports whether err is an authentication failure: the client's
-// give-up sentinel, or a 401 challenge that could not be answered. Shared
-// by mapExitErr and failStep so the exit code and the report's result
-// phrase classify the same errors as auth failures.
+// isAuthErr reports whether err is an authentication failure: the RTSP client's
+// give-up sentinel, an RTSP 401 challenge that could not be answered, or an
+// HTTP 401 status. Shared by mapExitErr and failStep so the exit code and the
+// report's result phrase classify the same errors as auth failures. An HTTP 403
+// is deliberately not auth: it is an authorization refusal, not a credential
+// challenge, and stays a connection failure.
 func isAuthErr(err error) bool {
 	if errors.Is(err, rtsp.ErrAuthFailed) {
 		return true
 	}
 	var unauthorized *rtsp.UnauthorizedError
-	return errors.As(err, &unauthorized)
+	if errors.As(err, &unauthorized) {
+		return true
+	}
+	var status *httpsource.StatusError
+	return errors.As(err, &status) && status.Code == http.StatusUnauthorized
+}
+
+// unsupportedFormatPhrase is the OPEN result phrase for an HTTP source that
+// rejects the media format (see isUnsupportedErr).
+const unsupportedFormatPhrase = "unsupported format"
+
+// isUnsupportedErr reports whether err is an HTTP source rejecting a media
+// format it will not decode: an unsupported Content-Type or WAV sample format,
+// an unresolvable raw shape, or a malformed WAV. These map to ExitUnsupported
+// rather than the default ExitConnection.
+func isUnsupportedErr(err error) bool {
+	return errors.Is(err, httpsource.ErrUnsupportedFormat) ||
+		errors.Is(err, httpsource.ErrFormatUnknown) ||
+		errors.Is(err, httpsource.ErrMalformedWAV)
+}
+
+// openPhrase is the report's result phrase for an HTTP OPEN failure, keyed by
+// error class. A 401 is handled by failStep's isAuthErr override ("authentication
+// failed"), so it is not listed here.
+func openPhrase(err error) string {
+	switch {
+	case errors.Is(err, httpsource.ErrInsecureAuth):
+		return "credentials refused over plaintext http (use -insecure-auth)"
+	case isUnsupportedErr(err):
+		return unsupportedFormatPhrase
+	case errors.Is(err, audiostream.ErrRedirect):
+		return "redirected (not followed)"
+	default:
+		return "connection failed"
+	}
 }
 
 // mapExitClean classifies a clean (nil-error) run by how far it got.
