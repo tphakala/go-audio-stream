@@ -170,3 +170,51 @@ func TestActiveTrackRTCPDoesNotStampMediaCounters(t *testing.T) {
 		t.Errorf("payloadBytes = %d, want 42", got)
 	}
 }
+
+// A shape-invalid frame on a discard track's RTP channel is wire traffic and
+// liveness evidence but not an accepted packet: WireBytes and LastFrameAt
+// advance while Packets does not, so a peer cannot inflate the packet count
+// with garbage on a discarded channel. This pins the shape-gated increment.
+func TestDiscardTrackShapeInvalidNotCountedAsPacket(t *testing.T) {
+	t.Parallel()
+	// newChannelTable binds channel 0 as the RTP channel and channel 1 as RTCP.
+	rtpFrame := func(payload []byte) InterleavedFrame {
+		return InterleavedFrame{Channel: 0, Payload: payload}
+	}
+	valid := make([]byte, rtp.HeaderSize)
+	valid[0] = 0x80 // version 2, a full header: shape-valid
+	wrongVersion := make([]byte, rtp.HeaderSize)
+	wrongVersion[0] = 0x00 // full length but version 0
+	cases := []struct {
+		name       string
+		frame      InterleavedFrame
+		wantPacket uint64
+	}{
+		{name: "shape valid counts", frame: rtpFrame(valid), wantPacket: 1},
+		{name: "too short", frame: rtpFrame([]byte{0x80, 0x00}), wantPacket: 0},
+		{name: "wrong version", frame: rtpFrame(wrongVersion), wantPacket: 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c := &Client{}
+			tr := &track{id: 0, discard: true}
+			c.channels.Store(newChannelTable(nil, tr, 0, 1))
+			c.handleInterleaved(tc.frame)
+			if got := tr.packets.Load(); got != tc.wantPacket {
+				t.Errorf("packets = %d, want %d (only a shape-valid frame is an accepted packet)", got, tc.wantPacket)
+			}
+			// Every RTP-channel frame counts as wire traffic and stamps the media
+			// clock, shape-valid or not.
+			wantWire := interleavedHeaderLen + uint64(len(tc.frame.Payload))
+			if got := tr.wireBytes.Load(); got != wantWire {
+				t.Errorf("wireBytes = %d, want %d (every RTP-channel frame is wire traffic)", got, wantWire)
+			}
+			if tr.lastFrameUnixNano.Load() == 0 {
+				t.Error("lastFrameUnixNano is 0, want the frame's arrival stamp")
+			}
+			if got := tr.payloadBytes.Load(); got != 0 {
+				t.Errorf("payloadBytes = %d, want 0 (a discard track is never parsed)", got)
+			}
+		})
+	}
+}

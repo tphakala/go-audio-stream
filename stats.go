@@ -4,10 +4,13 @@ import "time"
 
 // TrackStats are cumulative per-track receive statistics.
 type TrackStats struct {
-	// Packets is the number of frames counted on the track's RTP channel. For
-	// an active (parsed) track it is the number of RTP packets accepted and
-	// delivered. For a discard track it is the number of frames seen on the RTP
-	// channel; it no longer includes RTCP compounds, which are never media.
+	// Packets is the number of accepted frames on the track's RTP channel. On
+	// an active (parsed) track it counts RTP packets that parsed and were
+	// delivered. On a discard track, which is never parsed, it counts frames
+	// that passed the RTP shape check (a full header and version 2); a
+	// shape-invalid frame is wire traffic but not an accepted packet, so a peer
+	// cannot inflate the count with garbage. It never includes RTCP compounds,
+	// which are not media.
 	Packets uint64
 	// PayloadBytes is the total RTP payload bytes accepted with the RTP header
 	// stripped: the compressed-audio figure. It includes any per-codec
@@ -19,11 +22,14 @@ type TrackStats struct {
 	PayloadBytes uint64
 	// WireBytes is the total bytes on the track's RTP channel as framed on the
 	// wire: the 4-byte interleaved header plus the RTP header plus the payload,
-	// summed over every frame routed to the track whether it parsed or not. It
-	// is the network-bandwidth figure. It strictly measures the RTP channel and
-	// excludes RTCP overhead and RTSP control messages. WireBytes grows on a
-	// malformed or rejected frame while PayloadBytes and Packets do not, so the
-	// Malformed count explains any delta between them.
+	// summed over every frame routed to the track whether it was accepted or
+	// not. It is the network-bandwidth figure, and strictly measures the RTP
+	// channel: it excludes RTCP overhead and RTSP control messages. The
+	// WireBytes-minus-Packets gap is the rejected traffic on the channel. On an
+	// active track those are the frames the Malformed count explains (an
+	// unparseable header, or a payload type the track does not carry). On a
+	// discard track, which never parses and so never reports Malformed, they are
+	// the shape-invalid frames.
 	WireBytes uint64
 	// SeqGaps is the total number of packets lost per sequence
 	// number tracking.

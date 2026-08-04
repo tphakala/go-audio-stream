@@ -419,8 +419,11 @@ func (c *Client) Wait(ctx context.Context) error {
 // The counters are read one at a time rather than under a single barrier, so a
 // snapshot taken mid-packet can show a packet counted and its bytes not yet.
 // They are cumulative diagnostics, never a ledger to reconcile. CapturedAt is
-// stamped after every counter is loaded, so it marks when the read completed
-// and is never earlier than any track's LastFrameAt.
+// stamped after every counter is loaded, so a frame arriving mid-read cannot
+// make a track's LastFrameAt outrank CapturedAt and produce a negative age.
+// LastFrameAt is reconstructed from an atomic UnixNano and carries no monotonic
+// reading, so a backward wall-clock step (an NTP correction) can still perturb
+// the pair; that is the same wall-clock caveat TrackStats.LastFrameAt notes.
 func (c *Client) Stats() audiostream.Stats {
 	c.mu.Lock()
 	tracks := c.tracks
@@ -443,12 +446,12 @@ func (c *Client) Stats() audiostream.Stats {
 		}
 		m[tr.id] = ts
 	}
-	// Stamp CapturedAt AFTER loading every atomic. A frame arriving mid-read
-	// then cannot make a track's LastFrameAt newer than CapturedAt (which would
-	// give a negative age when a consumer computes CapturedAt.Sub(LastFrameAt)):
-	// sampling it last guarantees CapturedAt is at least every loaded
-	// LastFrameAt, and it carries a monotonic reading for snapshot-to-snapshot
-	// elapsed time.
+	// Stamp CapturedAt AFTER loading every atomic, so a frame arriving mid-read
+	// cannot make a loaded LastFrameAt outrank CapturedAt and yield a negative
+	// age when a consumer computes CapturedAt.Sub(LastFrameAt). Each loaded
+	// LastFrameAt was stamped before its Load and time.Now runs after, so absent
+	// a backward wall-clock step CapturedAt is at least every loaded LastFrameAt.
+	// It also carries a monotonic reading for snapshot-to-snapshot elapsed time.
 	capturedAt := time.Now()
 	return audiostream.Stats{CapturedAt: capturedAt, Tracks: m}
 }

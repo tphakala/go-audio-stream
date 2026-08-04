@@ -297,10 +297,12 @@ func (c *Client) handleInterleaved(f InterleavedFrame) bool {
 	if bind.isRTCP {
 		if tr.discard {
 			// A discard track's RTCP is not media, is attributed to nothing, and
-			// is not processed. It still returns the media branch's shape check,
-			// because an RTCP compound also passes it (version 2 in the top two
-			// bits), so a run of forged tiny RTCP frames on a discarded channel
-			// cannot clear the resync budget any more easily than real RTP would.
+			// is not processed. It returns the same usable-verdict shape check the
+			// RTP path uses, purely so the resync budget treats the two channels
+			// alike: a small RTCP packet (an 8-byte Receiver Report is shorter
+			// than the 12-byte RTP header) fails the check and is treated as
+			// not-usable, which is harmless here because RTCP is not media and
+			// never clears the budget on its own.
 			return len(f.Payload) >= rtp.HeaderSize && f.Payload[0]>>6 == rtpVersion
 		}
 		return c.handleRTCP(tr, f.Payload, now)
@@ -319,10 +321,16 @@ func (c *Client) handleInterleaved(f InterleavedFrame) bool {
 		// indefinitely, but a full parse would allocate a CSRC slice for a
 		// packet carrying contributing sources (a mixer feeds exactly the kind
 		// of track a caller discards), so this checks the RTP version and length
-		// that a real packet has and nothing more. PayloadBytes stays zero:
-		// with no parse there is no header boundary to strip.
-		tr.packets.Add(1)
-		return len(f.Payload) >= rtp.HeaderSize && f.Payload[0]>>6 == rtpVersion
+		// that a real packet has and nothing more. Packets counts only a
+		// shape-valid frame, so a peer cannot inflate the count with garbage on a
+		// discarded channel; WireBytes above already counted it as wire traffic.
+		// PayloadBytes stays zero: with no parse there is no header boundary to
+		// strip.
+		usable := len(f.Payload) >= rtp.HeaderSize && f.Payload[0]>>6 == rtpVersion
+		if usable {
+			tr.packets.Add(1)
+		}
+		return usable
 	}
 
 	pkt, err := rtp.ParsePacket(f.Payload)

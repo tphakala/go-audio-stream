@@ -53,9 +53,13 @@ func TestActiveByteAccountingPayloadAndWire(t *testing.T) {
 		})
 	defer closeAndWait(t, c)
 
-	// Packets only advances, so the predicate cannot approve a torn snapshot;
-	// once it reaches 3 every byte counter for those packets has settled.
-	st := waitForStats(t, c, 0, func(ts audiostream.TrackStats) bool { return ts.Packets == 3 })
+	// reader.go increments Packets before PayloadBytes, so a predicate keyed on
+	// Packets alone could observe a torn snapshot and then assert a stale byte
+	// total. Requiring the byte counters too waits for the fully settled
+	// snapshot; each of the three counters only advances, so none can be torn.
+	st := waitForStats(t, c, 0, func(ts audiostream.TrackStats) bool {
+		return ts.Packets == 3 && ts.PayloadBytes == wantPayload && ts.WireBytes == wantWire
+	})
 	if st.PayloadBytes != wantPayload {
 		t.Errorf("PayloadBytes = %d, want %d (the CSRC-extended header must be stripped)", st.PayloadBytes, wantPayload)
 	}
@@ -146,9 +150,11 @@ func TestMalformedActiveByteAccounting(t *testing.T) {
 		})
 	defer closeAndWait(t, c)
 
-	// Both predicates only advance, so the snapshot cannot be torn.
+	// Every counter in the predicate only advances, so the snapshot cannot be
+	// torn. The byte totals are required too because Packets is incremented
+	// before PayloadBytes, so keying on Packets alone could assert a stale total.
 	st := waitForStats(t, c, 0, func(ts audiostream.TrackStats) bool {
-		return ts.Packets == 2 && ts.Malformed == 1
+		return ts.Packets == 2 && ts.Malformed == 1 && ts.PayloadBytes == wantPayload && ts.WireBytes == wantWire
 	})
 	if st.PayloadBytes != wantPayload {
 		t.Errorf("PayloadBytes = %d, want %d (the malformed frame contributes no payload)", st.PayloadBytes, wantPayload)
