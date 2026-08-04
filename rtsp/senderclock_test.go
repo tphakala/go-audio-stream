@@ -1,6 +1,7 @@
 package rtsp_test
 
 import (
+	"sync"
 	"testing"
 	"time"
 
@@ -178,4 +179,97 @@ func TestSenderClockForeignSourceStaysInvalid(t *testing.T) {
 	if ts.SenderClock.Valid {
 		t.Errorf("SenderClock.Valid = true, want false when no Sender Report names the media source")
 	}
+}
+
+// A Sender Report that arrives before any RTP packet must not publish a
+// mapping: with no media SSRC learned yet, handleRTCP adopts the first report
+// for the Receiver Report path, but that source is unconfirmed and (for a mixer
+// or translator) may be one the server is not sending us. The mapping must stay
+// absent until an RTP packet identifies the media source and a matching report
+// arrives.
+func TestSenderClockIgnoresSenderReportBeforeRTP(t *testing.T) {
+	const mediaSSRC = 0x0BADF00D
+	const foreignSSRC = 0xDEADBEEF
+	const mediaRTP = 3_000_000
+	const mediaUnixSec = 1_000_000_000
+	wantNTP := time.Unix(mediaUnixSec, 0)
+
+	// injectSR holds back the media source's Sender Report until the test has
+	// confirmed the pre-RTP foreign report published nothing. The deferred
+	// release is a safety net: it runs ahead of the testserver stop cleanup that
+	// waits on the handler goroutine, so a failed assertion cannot leave the
+	// handler parked on the channel and hang the package.
+	injectSR := make(chan struct{})
+	var once sync.Once
+	releaseSR := func() { once.Do(func() { close(injectSR) }) }
+	defer releaseSR()
+
+	c, _ := playAndInject(t, &testserver.HandshakeConfig{SDP: opusSDP}, nil,
+		func(sc *testserver.ServerConn, pairs []testserver.ChannelPair) {
+			// A Sender Report for a foreign source, before any RTP.
+			_ = sc.InjectFrame(pairs[0].RTCP, buildSenderReport(foreignSSRC, ntpFor(2_000_000_000), 111))
+			// The first RTP packet identifies the real media source.
+			_ = sc.InjectFrame(pairs[0].RTP, buildRTPPacket(ptOpus, 7, 960, mediaSSRC, false, []byte{0x78, 0x01}))
+			<-injectSR
+			// A Sender Report for the identified media source now publishes it.
+			_ = sc.InjectFrame(pairs[0].RTCP, buildSenderReport(mediaSSRC, ntpFor(mediaUnixSec), mediaRTP))
+		})
+	defer closeAndWait(t, c)
+
+	// Once the RTP packet is counted, the foreign Sender Report ahead of it in
+	// the stream has been processed, so the mapping must still be absent.
+	ts := waitForStats(t, c, 0, func(s audiostream.TrackStats) bool { return s.Packets >= 1 })
+	if ts.SenderClock.Valid {
+		t.Fatalf("SenderClock.Valid = true after a pre-RTP Sender Report, want false")
+	}
+
+	// A Sender Report for the confirmed media source publishes the mapping.
+	releaseSR()
+	got := waitForStats(t, c, 0, func(s audiostream.TrackStats) bool { return s.SenderClock.Valid })
+	if got.SenderClock.RTPTime != mediaRTP {
+		t.Errorf("SenderClock.RTPTime = %d, want the media source's %d", got.SenderClock.RTPTime, mediaRTP)
+	}
+	if !got.SenderClock.NTPTime.Equal(wantNTP) {
+		t.Errorf("SenderClock.NTPTime = %v, want the media source's %v", got.SenderClock.NTPTime.UTC(), wantNTP.UTC())
+	}
+}
+
+// A sender that first advertises a wall clock and later reports it has none
+// (an all-zero NTP timestamp, RFC 3550 section 6.4.1) must have its prior
+// mapping cleared, not left visible: WallClock would otherwise keep
+// extrapolating a stale pair.
+func TestSenderClockClearedByAllZeroNTP(t *testing.T) {
+	const mediaSSRC = 0x0BADF00D
+	const validRTP = 3_000_000
+	const validUnixSec = 1_000_000_000
+
+	// injectZero holds back the all-zero report until the valid mapping is
+	// observed. The deferred release runs ahead of the testserver stop cleanup
+	// that waits on the handler, so a failed assertion cannot park it.
+	injectZero := make(chan struct{})
+	var once sync.Once
+	releaseZero := func() { once.Do(func() { close(injectZero) }) }
+	defer releaseZero()
+
+	c, _ := playAndInject(t, &testserver.HandshakeConfig{SDP: opusSDP}, nil,
+		func(sc *testserver.ServerConn, pairs []testserver.ChannelPair) {
+			_ = sc.InjectFrame(pairs[0].RTP, buildRTPPacket(ptOpus, 7, 960, mediaSSRC, false, []byte{0x78, 0x01}))
+			_ = sc.InjectFrame(pairs[0].RTCP, buildSenderReport(mediaSSRC, ntpFor(validUnixSec), validRTP))
+			<-injectZero
+			// The same source now reports it has no wall clock.
+			_ = sc.InjectFrame(pairs[0].RTCP, buildSenderReport(mediaSSRC, 0, validRTP))
+			// A second RTP packet is a sync point: once Stats counts it, the
+			// all-zero report ahead of it has been processed.
+			_ = sc.InjectFrame(pairs[0].RTP, buildRTPPacket(ptOpus, 8, 1920, mediaSSRC, false, []byte{0x78, 0x02}))
+		})
+	defer closeAndWait(t, c)
+
+	// A valid mapping is established first; nothing clears it until the gate.
+	waitForStats(t, c, 0, func(s audiostream.TrackStats) bool { return s.SenderClock.Valid })
+
+	// The all-zero NTP report must clear it rather than leave the stale pair.
+	releaseZero()
+	waitForStats(t, c, 0, func(s audiostream.TrackStats) bool {
+		return s.Packets >= 2 && !s.SenderClock.Valid
+	})
 }

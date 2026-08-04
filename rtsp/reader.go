@@ -437,18 +437,33 @@ func (c *Client) handleRTCP(tr *track, payload []byte, now time.Time) bool {
 	tr.senderSSRC.Store(sr.SSRC)
 	tr.lastSR.Store(uint32(sr.NTPTimestamp >> 16))
 	tr.lastSRUnixNano.Store(now.UnixNano())
-	// Publish the RTP-to-NTP correspondence for Stats. An all-zero NTP
-	// timestamp is a sender declaring it has no wall clock (RFC 3550 section
-	// 6.4.1), so it maps nothing; the RR fields above still update, because LSR
-	// and DLSR describe the report itself, not the sender clock.
-	if sr.NTPTimestamp != 0 {
-		tr.srClock.Store(&audiostream.SenderClock{
-			RTPTime:    sr.RTPTimestamp,
-			NTPTime:    ntpTime(sr.NTPTimestamp),
-			ReceivedAt: now,
-			ClockRate:  int(tr.clockRate),
-			Valid:      true,
-		})
+	// Publish the RTP-to-NTP correspondence for Stats, but only once the RTP
+	// stream has identified the media source (tr.baseSet, set on the first
+	// accepted RTP packet on this same reader goroutine). Before that packet
+	// senderSSRC is zero, so the block above adopted reports[0]; in a mixer or
+	// translator compound that can be a contributing source the server is not
+	// sending us, and publishing its wall clock would expose a foreign mapping
+	// until a matching report arrived. Once baseSet is true the RTP path has set
+	// senderSSRC to the media source, so the senderSSRC match above already
+	// reduced the compound to that source's report (or returned on no match), so
+	// a mapping is only ever published for the confirmed media source.
+	if tr.baseSet {
+		if sr.NTPTimestamp == 0 {
+			// A sender declaring it has no wall clock (RFC 3550 section 6.4.1)
+			// maps nothing, so clear any prior correspondence rather than leave a
+			// stale pair that WallClock would keep extrapolating. The RR fields
+			// above still update: LSR and DLSR describe the report itself, not the
+			// sender clock.
+			tr.srClock.Store(nil)
+		} else {
+			tr.srClock.Store(&audiostream.SenderClock{
+				RTPTime:    sr.RTPTimestamp,
+				NTPTime:    ntpTime(sr.NTPTimestamp),
+				ReceivedAt: now,
+				ClockRate:  int(tr.clockRate),
+				Valid:      true,
+			})
+		}
 	}
 	return true
 }
