@@ -65,11 +65,15 @@ long-running soak testing, not core functionality.
   without importing the concrete package. Frame delivery is not part of the
   interface: each source registers `OnFrame` at construction, so delivery is
   race-free no matter how early the peer starts sending.
-- **Frame delivery**: each frame carries its track ID, a presentation time
-  unwrapped from the RTP clock, the raw RTP timestamp, the local receive time,
-  and the count of packets lost immediately before it. Per-track receive
-  statistics are available through `Stats`: accepted packets, payload bytes
-  (compressed audio) and wire bytes (network bandwidth), sequence gaps,
+- **Frame delivery**: each frame carries its track ID, a presentation time, the
+  raw RTP timestamp, the local receive time, and the count of packets lost
+  immediately before it. From the RTSP source the presentation time is unwrapped
+  from the RTP clock, the RTP timestamp is the packet's, and the lost-packet
+  count comes from sequence-number tracking. The HTTP progressive source has no
+  RTP clock: it derives the presentation time from the running delivered-sample
+  count and reports the RTP timestamp and the lost-packet count as 0. Per-track
+  receive statistics are available through `Stats`: accepted packets, payload
+  bytes (compressed audio) and wire bytes (network bandwidth), sequence gaps,
   duplicates, malformed drops, SSRC resets, the wall-clock time of the last
   frame, and, on an RTCP-bearing source, the RTP-to-wall-clock `SenderClock`
   mapping from the most recent Sender Report. The snapshot is stamped with
