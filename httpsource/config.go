@@ -29,13 +29,20 @@ const (
 type Endianness uint8
 
 const (
-	// EndianUnspecified follows the stream's self-description: big-endian for
-	// audio/L16 (RFC 3551, network byte order) and little-endian for unlabeled
-	// embedded PCM (the native order such a stream is almost always written in).
+	// EndianUnspecified takes the raw default, which is little-endian for every
+	// raw PCM stream this source carries. RFC 3551 defines audio/L16 as
+	// big-endian, but real HTTP embedded microphones (for example
+	// esp32-audio-streamer's /stream.pcm) send native little-endian while labeling
+	// the stream audio/L16, so defaulting audio/L16 to little-endian matches the
+	// devices in the field; unlabeled embedded PCM is native little-endian for the
+	// same reason. Set EndianBig for a spec-strict big-endian audio/L16 source.
+	// This applies only to the HTTP source; the RTP/RTSP L16 path (rtsp package)
+	// stays big-endian per RFC 3551.
 	EndianUnspecified Endianness = iota
 	// EndianLittle forces little-endian interpretation of the source samples.
 	EndianLittle
-	// EndianBig forces big-endian interpretation of the source samples.
+	// EndianBig forces big-endian interpretation of the source samples, for a
+	// spec-strict RFC 3551 audio/L16 stream.
 	EndianBig
 )
 
