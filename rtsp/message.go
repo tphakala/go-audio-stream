@@ -40,6 +40,10 @@ const (
 	// MaxInterleavedFrame is the largest interleaved payload the 2-byte
 	// length field can express (research: inherently 65535).
 	MaxInterleavedFrame = 65535
+	// interleavedHeaderLen is the fixed interleaved framing header: '$', a
+	// one-byte channel, and a two-byte big-endian payload length. It is the
+	// per-frame wire overhead the payload byte count does not include.
+	interleavedHeaderLen = 4
 )
 
 // Sentinel errors returned by the message parsers and serializers. A parser
@@ -660,16 +664,16 @@ func ParseInterleaved(buf []byte) (InterleavedFrame, int, error) {
 	if len(buf) == 0 || buf[0] != '$' {
 		return InterleavedFrame{}, 0, ErrNotInterleaved
 	}
-	if len(buf) < 4 {
+	if len(buf) < interleavedHeaderLen {
 		return InterleavedFrame{}, 0, ErrIncomplete
 	}
 	channel := int(buf[1])
 	length := int(binary.BigEndian.Uint16(buf[2:4]))
-	end := 4 + length
+	end := interleavedHeaderLen + length
 	if len(buf) < end {
 		return InterleavedFrame{}, 0, ErrIncomplete
 	}
-	return InterleavedFrame{Channel: channel, Payload: buf[4:end]}, end, nil
+	return InterleavedFrame{Channel: channel, Payload: buf[interleavedHeaderLen:end]}, end, nil
 }
 
 // MarshalInterleaved builds an interleaved frame: '$', a one-byte channel,
@@ -680,10 +684,10 @@ func MarshalInterleaved(channel int, payload []byte) ([]byte, error) {
 	if channel < 0 || channel > 255 || len(payload) > MaxInterleavedFrame {
 		return nil, ErrInterleavedTooLarge
 	}
-	out := make([]byte, 4+len(payload))
+	out := make([]byte, interleavedHeaderLen+len(payload))
 	out[0] = '$'
 	out[1] = byte(channel)
 	binary.BigEndian.PutUint16(out[2:4], uint16(len(payload)))
-	copy(out[4:], payload)
+	copy(out[interleavedHeaderLen:], payload)
 	return out, nil
 }

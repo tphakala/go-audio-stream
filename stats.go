@@ -1,15 +1,36 @@
 package audiostream
 
+import "time"
+
 // TrackStats are cumulative per-track receive statistics.
 type TrackStats struct {
-	// Packets is the number of RTP packets accepted.
+	// Packets is the number of accepted frames on the track's RTP channel. On
+	// an active (parsed) track it counts RTP packets that parsed and were
+	// delivered. On a discard track, which is never parsed, it counts frames
+	// that passed the RTP shape check (a full header and version 2); a
+	// shape-invalid frame is wire traffic but not an accepted packet, so a peer
+	// cannot inflate the count with garbage. It never includes RTCP compounds,
+	// which are not media.
 	Packets uint64
-	// Bytes is the total payload bytes accepted. For an active (parsed)
-	// track this counts the RTP payload only, with the RTP header stripped.
-	// For a discard track it counts the full interleaved payload, RTP
-	// header included, because a discard track is validated but never
-	// depacketized, so its header is not stripped.
-	Bytes uint64
+	// PayloadBytes is the total RTP payload bytes accepted with the RTP header
+	// stripped: the compressed-audio figure. It includes any per-codec
+	// packetization overhead (for AAC, the RFC 3640 AU headers). It stays zero
+	// for a discard track, whose frames are never parsed, so the RTP header
+	// length is unknown and no payload boundary can be established. The
+	// byte-exact codec bitrate is the sum of the delivered Frame.Data lengths,
+	// which a consumer already receives through OnFrame.
+	PayloadBytes uint64
+	// WireBytes is the total bytes on the track's RTP channel as framed on the
+	// wire: the 4-byte interleaved header plus the RTP header plus the payload,
+	// summed over every frame routed to the track whether it was accepted or
+	// not. It is the network-bandwidth figure, and strictly measures the RTP
+	// channel: it excludes RTCP overhead and RTSP control messages. The
+	// WireBytes-minus-Packets gap is the rejected traffic on the channel. On an
+	// active track those are the frames the Malformed count explains (an
+	// unparseable header, or a payload type the track does not carry). On a
+	// discard track, which never parses and so never reports Malformed, they are
+	// the shape-invalid frames.
+	WireBytes uint64
 	// SeqGaps is the total number of packets lost per sequence
 	// number tracking.
 	SeqGaps uint64
@@ -27,10 +48,30 @@ type TrackStats struct {
 	Malformed uint64
 	// SSRCResets is the number of mid-stream SSRC changes tolerated.
 	SSRCResets uint64
+	// LastFrameAt is the wall-clock arrival time of the most recent frame on
+	// the track's RTP channel, parsed or not; it is the zero Time until the
+	// first such frame and is never advanced by RTCP traffic, so it is a media
+	// liveness clock. Subtract it from Stats.CapturedAt for the time since the
+	// last frame:
+	//
+	//	age := stats.CapturedAt.Sub(track.LastFrameAt)
+	//	receiving := !track.LastFrameAt.IsZero() && age < consumerThreshold
+	//
+	// The staleness threshold is consumer policy, so no receiving-data boolean
+	// is exposed. The difference is wall-clock rather than monotonic: an atomic
+	// UnixNano cannot carry Go's monotonic reading, so an NTP step can skew it,
+	// which is acceptable for a diagnostic.
+	LastFrameAt time.Time
 }
 
 // Stats is a point-in-time snapshot of session statistics, keyed by
 // track ID.
 type Stats struct {
-	Tracks map[int]TrackStats
+	// CapturedAt is when the snapshot read completed. It carries a monotonic
+	// reading, so subtracting two snapshots' CapturedAt gives monotonic elapsed
+	// time suitable for a rate computation. It is a diagnostic marker, not a
+	// transactional boundary: the counters are still read one at a time, not
+	// under a single barrier.
+	CapturedAt time.Time
+	Tracks     map[int]TrackStats
 }

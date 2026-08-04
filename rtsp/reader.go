@@ -268,10 +268,10 @@ func (c *Client) resyncOne() bool {
 // handleInterleaved routes one interleaved frame through its track's pipeline
 // and delivers the resulting audiostream.Frame via OnFrame. It runs entirely on
 // the reader goroutine before the next read, because f.Payload aliases the
-// accumulation buffer. Unknown channels are dropped; a discard track's bytes
-// are counted and dropped without per-packet parsing; RTCP is dispatched to
-// handleRTCP; a malformed RTP packet is counted and skipped without ending the
-// session.
+// accumulation buffer. Unknown channels are dropped; RTCP is dispatched to
+// handleRTCP; a discard track's RTP frames are counted and dropped without
+// per-packet parsing; a malformed RTP packet is counted and skipped without
+// ending the session.
 //
 // The watchdog clock is stamped for EVERY interleaved frame, before routing and
 // whatever this function then decides to do with it. audiostream.ErrReadTimeout
@@ -280,6 +280,11 @@ func (c *Client) resyncOne() bool {
 // dead. A caller that needs "no audio for N seconds" has OnFrame to measure it
 // with. A stream that produces frames but never a usable packet is bounded
 // instead by the resync budget, through the usable verdict returned here.
+//
+// isRTCP is tested before tr.discard so the RTP-channel counters mean the same
+// thing for both track types (frames on the track's RTP channel only). An
+// active track's RTCP has always gone to handleRTCP; a discard track's RTCP now
+// does too, rather than being miscounted as media on the discard branch.
 func (c *Client) handleInterleaved(f InterleavedFrame) bool {
 	now := time.Now()
 	c.lastFrameAt.Store(now.UnixNano())
@@ -289,6 +294,26 @@ func (c *Client) handleInterleaved(f InterleavedFrame) bool {
 		return false // unknown or not-yet-published channel.
 	}
 	tr := bind.track
+	if bind.isRTCP {
+		if tr.discard {
+			// A discard track's RTCP is not media, is attributed to nothing, and
+			// is not processed. It returns the same usable-verdict shape check the
+			// RTP path uses, purely so the resync budget treats the two channels
+			// alike: a small RTCP packet (an 8-byte Receiver Report is shorter
+			// than the 12-byte RTP header) fails the check and is treated as
+			// not-usable, which is harmless here because RTCP is not media and
+			// never clears the budget on its own.
+			return len(f.Payload) >= rtp.HeaderSize && f.Payload[0]>>6 == rtpVersion
+		}
+		return c.handleRTCP(tr, f.Payload, now)
+	}
+
+	// Every frame on the RTP channel is wire traffic and liveness evidence,
+	// stamped before any validation: WireBytes and LastFrameAt count the frame
+	// whether or not it parses, so a malformed or rejected frame still registers
+	// as bandwidth and as proof the track is producing.
+	tr.lastFrameUnixNano.Store(now.UnixNano())
+	tr.wireBytes.Add(interleavedHeaderLen + uint64(len(f.Payload)))
 	if tr.discard {
 		// Counted and dropped without delivering or depacketizing. The frame is
 		// validated, not parsed: trusting the channel byte alone would let a run
@@ -296,14 +321,16 @@ func (c *Client) handleInterleaved(f InterleavedFrame) bool {
 		// indefinitely, but a full parse would allocate a CSRC slice for a
 		// packet carrying contributing sources (a mixer feeds exactly the kind
 		// of track a caller discards), so this checks the RTP version and length
-		// that a real packet has and nothing more. Bytes still counts the whole
-		// interleaved payload, RTP header included, as documented.
-		tr.packets.Add(1)
-		tr.bytes.Add(uint64(len(f.Payload)))
-		return len(f.Payload) >= rtp.HeaderSize && f.Payload[0]>>6 == rtpVersion
-	}
-	if bind.isRTCP {
-		return c.handleRTCP(tr, f.Payload, now)
+		// that a real packet has and nothing more. Packets counts only a
+		// shape-valid frame, so a peer cannot inflate the count with garbage on a
+		// discarded channel; WireBytes above already counted it as wire traffic.
+		// PayloadBytes stays zero: with no parse there is no header boundary to
+		// strip.
+		usable := len(f.Payload) >= rtp.HeaderSize && f.Payload[0]>>6 == rtpVersion
+		if usable {
+			tr.packets.Add(1)
+		}
+		return usable
 	}
 
 	pkt, err := rtp.ParsePacket(f.Payload)
@@ -350,7 +377,7 @@ func (c *Client) handleInterleaved(f InterleavedFrame) bool {
 
 	tr.deliver(pkt, up, now, c.cfg.OnFrame)
 	tr.packets.Add(1)
-	tr.bytes.Add(uint64(len(pkt.Payload)))
+	tr.payloadBytes.Add(uint64(len(pkt.Payload)))
 	tr.publishRRSnapshot()
 	return true
 }

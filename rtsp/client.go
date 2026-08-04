@@ -418,23 +418,42 @@ func (c *Client) Wait(ctx context.Context) error {
 //
 // The counters are read one at a time rather than under a single barrier, so a
 // snapshot taken mid-packet can show a packet counted and its bytes not yet.
-// They are cumulative diagnostics, never a ledger to reconcile.
+// They are cumulative diagnostics, never a ledger to reconcile. CapturedAt is
+// stamped after every counter is loaded, so a frame arriving mid-read cannot
+// make a track's LastFrameAt outrank CapturedAt and produce a negative age.
+// LastFrameAt is reconstructed from an atomic UnixNano and carries no monotonic
+// reading, so a backward wall-clock step (an NTP correction) can still perturb
+// the pair; that is the same wall-clock caveat TrackStats.LastFrameAt notes.
 func (c *Client) Stats() audiostream.Stats {
 	c.mu.Lock()
 	tracks := c.tracks
 	c.mu.Unlock()
 	m := make(map[int]audiostream.TrackStats, len(tracks))
 	for _, tr := range tracks {
-		m[tr.id] = audiostream.TrackStats{
-			Packets:    tr.packets.Load(),
-			Bytes:      tr.bytes.Load(),
-			SeqGaps:    tr.seqGaps.Load(),
-			Duplicates: tr.duplicates.Load(),
-			Malformed:  tr.malformed.Load(),
-			SSRCResets: tr.ssrcResets.Load(),
+		ts := audiostream.TrackStats{
+			Packets:      tr.packets.Load(),
+			PayloadBytes: tr.payloadBytes.Load(),
+			WireBytes:    tr.wireBytes.Load(),
+			SeqGaps:      tr.seqGaps.Load(),
+			Duplicates:   tr.duplicates.Load(),
+			Malformed:    tr.malformed.Load(),
+			SSRCResets:   tr.ssrcResets.Load(),
 		}
+		// A zero UnixNano means no frame has arrived yet, so leave LastFrameAt as
+		// the zero Time rather than mapping it to the 1970 epoch.
+		if nanos := tr.lastFrameUnixNano.Load(); nanos != 0 {
+			ts.LastFrameAt = time.Unix(0, nanos)
+		}
+		m[tr.id] = ts
 	}
-	return audiostream.Stats{Tracks: m}
+	// Stamp CapturedAt AFTER loading every atomic, so a frame arriving mid-read
+	// cannot make a loaded LastFrameAt outrank CapturedAt and yield a negative
+	// age when a consumer computes CapturedAt.Sub(LastFrameAt). Each loaded
+	// LastFrameAt was stamped before its Load and time.Now runs after, so absent
+	// a backward wall-clock step CapturedAt is at least every loaded LastFrameAt.
+	// It also carries a monotonic reading for snapshot-to-snapshot elapsed time.
+	capturedAt := time.Now()
+	return audiostream.Stats{CapturedAt: capturedAt, Tracks: m}
 }
 
 // SessionInfo returns a snapshot of the negotiated session details known so
