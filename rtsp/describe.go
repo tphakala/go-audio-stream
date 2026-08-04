@@ -87,6 +87,14 @@ func (c *Client) Describe(ctx context.Context) ([]Track, error) {
 		return nil, rerr
 	}
 
+	// Test-only seam, nil in production: it exists solely to make the guard
+	// below reachable deterministically. A test installs a hook here to trip
+	// termErr in the exact window between the round trip resolving and the
+	// commit lock being taken, which is where a reader-driven shutdown can win.
+	if c.afterDescribeRoundTrip != nil {
+		c.afterDescribeRoundTrip()
+	}
+
 	c.mu.Lock()
 	if c.termErr != nil {
 		terr := c.termErr
