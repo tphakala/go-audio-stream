@@ -14,7 +14,9 @@ type Frame struct {
 	// Data is the frame payload. Ownership stays with the library.
 	Data []byte
 	// RTPTime is the raw 32-bit RTP timestamp of the packet that
-	// completed this frame.
+	// completed this frame. Pass it to TrackStats.SenderClock.WallClock
+	// to map it to the sender's wall clock when the track has a Sender
+	// Report.
 	RTPTime uint32
 	// PTS is the presentation time relative to the first received
 	// frame of the track, computed from the unwrapped RTP timestamp

@@ -62,6 +62,62 @@ type TrackStats struct {
 	// UnixNano cannot carry Go's monotonic reading, so an NTP step can skew it,
 	// which is acceptable for a diagnostic.
 	LastFrameAt time.Time
+	// SenderClock is the RTP-to-wall-clock correspondence from the track's
+	// most recent RTCP Sender Report, invalid until one arrives. Only an
+	// RTCP-bearing source (RTSP) ever populates it; other sources leave it
+	// invalid.
+	SenderClock SenderClock
+}
+
+// SenderClock is the RTP-to-wall-clock correspondence taken from a track's
+// most recent RTCP Sender Report: the sender sampled its media clock
+// (RTPTime) and its wall clock (NTPTime) at the same instant, and WallClock
+// extrapolates any frame's RTP timestamp to the sender's wall clock from
+// that pair.
+//
+// The mapping is best effort and may be absent for the whole session. Valid
+// is false until a Sender Report carrying a usable pair arrives; many
+// cameras send Sender Reports irregularly or not at all, and a sender with
+// no wall clock may send an all-zero NTP timestamp (RFC 3550 section 6.4.1),
+// which never yields a valid mapping. An SSRC reset clears the mapping until
+// the new source's first Sender Report. A discard track is never parsed, so
+// its mapping stays invalid. Absence never affects media delivery.
+//
+// NTPTime is only as trustworthy as the sender's own clock: a camera with an
+// unsynchronized clock reports a correspondence to a wrong wall clock, and
+// the pair ages as the sender's oscillator drifts, so a consumer that cares
+// should check the report's age (Stats.CapturedAt minus ReceivedAt) before
+// relying on it.
+type SenderClock struct {
+	// RTPTime is the Sender Report's RTP timestamp: the sender's media clock
+	// sampled at NTPTime, on the same 32-bit clock as Frame.RTPTime.
+	RTPTime uint32
+	// NTPTime is the report's 64-bit NTP timestamp decoded to a time.Time
+	// (era-1 pivot, correct for sender clocks set between 1968 and 2104).
+	NTPTime time.Time
+	// ReceivedAt is the local wall-clock time the Sender Report was received.
+	ReceivedAt time.Time
+	// ClockRate is the track's RTP clock rate (ticks per second) recorded with
+	// the pair; 0 when the SDP declared no usable rate.
+	ClockRate int
+	// Valid is true once a Sender Report supplied the pair since the track's
+	// last SSRC change; the zero value is invalid.
+	Valid bool
+}
+
+// WallClock extrapolates the sender's wall-clock time of an RTP timestamp
+// (typically Frame.RTPTime) from the Sender Report pair. The 32-bit
+// difference is interpreted signed, so timestamps up to 2^31 ticks either
+// side of the report convert correctly across the 32-bit RTP wrap; at audio
+// clock rates that is hours, far more than the seconds between Sender
+// Reports. It returns the zero time.Time when the mapping is not Valid or
+// ClockRate is 0.
+func (sc SenderClock) WallClock(rtpTime uint32) time.Time {
+	if !sc.Valid || sc.ClockRate <= 0 {
+		return time.Time{}
+	}
+	delta := int64(int32(rtpTime - sc.RTPTime))
+	return sc.NTPTime.Add(time.Duration(delta * int64(time.Second) / int64(sc.ClockRate)))
 }
 
 // Stats is a point-in-time snapshot of session statistics, keyed by

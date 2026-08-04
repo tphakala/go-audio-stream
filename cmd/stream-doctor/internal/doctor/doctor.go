@@ -196,7 +196,7 @@ func (r *runner) play() bool {
 func (r *runner) capture() {
 	audio := r.audio
 	cr, _ := r.prober.Collect(r.ctx, audio, r.opts.Duration)
-	stats := computeStats(cr.Frames, cr.Stats, audio.ClockRate, cr.Elapsed)
+	stats := computeStats(cr.Frames, &cr.Stats, audio.ClockRate, cr.Elapsed)
 
 	r.frames = cr.Frames
 	r.report.Capture = stats

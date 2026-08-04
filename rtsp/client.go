@@ -444,6 +444,13 @@ func (c *Client) Stats() audiostream.Stats {
 		if nanos := tr.lastFrameUnixNano.Load(); nanos != 0 {
 			ts.LastFrameAt = time.Unix(0, nanos)
 		}
+		// nil before the first Sender Report and after each SSRC reset, so the
+		// nil check is load-bearing. Loading before the CapturedAt stamp below
+		// keeps CapturedAt at least every surfaced ReceivedAt, so the report age
+		// CapturedAt.Sub(SenderClock.ReceivedAt) is non-negative.
+		if sc := tr.srClock.Load(); sc != nil {
+			ts.SenderClock = *sc // value copy: the snapshot never aliases internal state.
+		}
 		m[tr.id] = ts
 	}
 	// Stamp CapturedAt AFTER loading every atomic, so a frame arriving mid-read
