@@ -14,8 +14,11 @@
 // TLS) connection, starts a reader goroutine that owns every socket read for
 // the connection's life, and probes OPTIONS to learn the keepalive method. A
 // Client therefore holds a socket and a goroutine, and must be released with
-// Close; Wait reports the terminal cause. Close, Wait, Stats and SessionInfo
-// are safe from any goroutine. Describe and Setup discover the tracks and
+// Close; Wait reports the terminal cause. Close, Wait, Stats, SessionInfo and
+// Info are safe from any goroutine. A Client satisfies audiostream.Source, the
+// root package's source-agnostic capture contract, so a supervisor can drive
+// its lifecycle, delivery and introspection without importing this package.
+// Describe and Setup discover the tracks and
 // negotiate their interleaved channels. Routing begins with the first
 // successful Setup, not with Play: from then on the reader routes each
 // interleaved frame to its track, depacketizes it, and calls Config.OnFrame on
