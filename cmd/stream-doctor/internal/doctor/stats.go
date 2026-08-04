@@ -46,7 +46,7 @@ type CaptureStats struct {
 
 // computeStats derives CaptureStats from the captured frames, the library's
 // TrackStats counters, the track clock rate, and the elapsed capture time.
-func computeStats(frames []CapturedFrame, lib audiostream.TrackStats, clockRate int, elapsed time.Duration) CaptureStats {
+func computeStats(frames []CapturedFrame, lib *audiostream.TrackStats, clockRate int, elapsed time.Duration) CaptureStats {
 	stats := CaptureStats{
 		Packets:    lib.Packets,
 		Bytes:      lib.PayloadBytes,

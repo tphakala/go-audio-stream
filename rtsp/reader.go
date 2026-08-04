@@ -357,6 +357,9 @@ func (c *Client) handleInterleaved(f InterleavedFrame) bool {
 		tr.ssrcResets.Add(1)
 		tr.baseSet = false
 		tr.resetDepacketizer()
+		// The RTP-to-NTP correspondence is per SSRC: the previous source's
+		// pair must not convert the new source's timestamps.
+		tr.srClock.Store(nil)
 	}
 	if !tr.baseSet {
 		// Also the first packet of the session, where Observe reports no reset
@@ -434,7 +437,53 @@ func (c *Client) handleRTCP(tr *track, payload []byte, now time.Time) bool {
 	tr.senderSSRC.Store(sr.SSRC)
 	tr.lastSR.Store(uint32(sr.NTPTimestamp >> 16))
 	tr.lastSRUnixNano.Store(now.UnixNano())
+	// Publish the RTP-to-NTP correspondence for Stats, but only once the RTP
+	// stream has identified the media source (tr.baseSet, set on the first
+	// accepted RTP packet on this same reader goroutine). Before that packet
+	// senderSSRC is zero, so the block above adopted reports[0]; in a mixer or
+	// translator compound that can be a contributing source the server is not
+	// sending us, and publishing its wall clock would expose a foreign mapping
+	// until a matching report arrived. Once baseSet is true the RTP path has set
+	// senderSSRC to the media source, so the senderSSRC match above already
+	// reduced the compound to that source's report (or returned on no match), so
+	// a mapping is only ever published for the confirmed media source.
+	if tr.baseSet {
+		if sr.NTPTimestamp == 0 {
+			// A sender declaring it has no wall clock (RFC 3550 section 6.4.1)
+			// maps nothing, so clear any prior correspondence rather than leave a
+			// stale pair that WallClock would keep extrapolating. The RR fields
+			// above still update: LSR and DLSR describe the report itself, not the
+			// sender clock.
+			tr.srClock.Store(nil)
+		} else {
+			tr.srClock.Store(&audiostream.SenderClock{
+				RTPTime:    sr.RTPTimestamp,
+				NTPTime:    ntpTime(sr.NTPTimestamp),
+				ReceivedAt: now,
+				ClockRate:  int(tr.clockRate),
+				Valid:      true,
+			})
+		}
+	}
 	return true
+}
+
+// ntpUnixOffset is the seconds from the NTP epoch (1900-01-01) to the Unix
+// epoch (1970-01-01).
+const ntpUnixOffset = 2208988800
+
+// ntpTime decodes a 64-bit NTP timestamp (RFC 5905: upper 32 bits whole
+// seconds since 1900, lower 32 bits binary fraction) into a time.Time. A
+// seconds field with the high bit clear is read as NTP era 1 (2036 to 2104),
+// the RFC 5905 pivot, so the decode is correct for any sender clock set
+// between 1968 and 2104. The caller filters the all-zero timestamp first.
+func ntpTime(ts uint64) time.Time {
+	sec := int64(ts >> 32)
+	if sec < 0x80000000 {
+		sec += 1 << 32
+	}
+	nsec := ((ts & 0xFFFFFFFF) * uint64(time.Second)) >> 32
+	return time.Unix(sec-ntpUnixOffset, int64(nsec))
 }
 
 // dispatchResponse routes a response to the caller waiting on its CSeq. An

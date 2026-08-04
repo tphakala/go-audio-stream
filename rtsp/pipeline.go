@@ -134,6 +134,12 @@ type track struct {
 	senderSSRC       atomic.Uint32
 	lastSR           atomic.Uint32
 	lastSRUnixNano   atomic.Int64
+
+	// srClock is the published RTP-to-NTP correspondence from the most recent
+	// Sender Report, stored whole behind one pointer so its fields can never
+	// tear across an update. handleRTCP writes it, the SSRC-reset path clears
+	// it, Stats loads it; the pointed-to value is immutable.
+	srClock atomic.Pointer[audiostream.SenderClock]
 }
 
 // newTrack builds a track's depacketization pipeline from its resolved
