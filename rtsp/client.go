@@ -121,6 +121,16 @@ type Client struct {
 	// lifecycleMu then mu, never the reverse.
 	lifecycleMu sync.Mutex
 
+	// afterDescribeRoundTrip is a test-only seam, nil in production and never
+	// set outside tests. Describe invokes it, when non-nil, in the exact window
+	// between the DESCRIBE round trip resolving and mu being re-acquired to
+	// commit the described state. That window is where a reader-driven terminal
+	// error (a server TEARDOWN or a dropped connection) can land, and the guard
+	// that rejects a Describe caught there is otherwise unreachable
+	// deterministically; the hook lets a test record termErr at that instant.
+	// The nil check is the only production-path cost.
+	afterDescribeRoundTrip func()
+
 	// mu guards the state machine and negotiated session fields below.
 	mu              sync.Mutex
 	state           state
