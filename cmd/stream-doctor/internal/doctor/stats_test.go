@@ -246,4 +246,19 @@ func TestComputeStatsSenderClock(t *testing.T) {
 	if noFrames.SenderOffset != 40*time.Millisecond {
 		t.Errorf("SenderOffset = %v, want 40ms (NTP time minus report receive time)", noFrames.SenderOffset)
 	}
+
+	// A valid report on a track that declared no clock rate carries no usable
+	// mapping: WallClock returns the zero time, so the derived fields must stay
+	// zero (not a garbage negative offset) whether or not frames were captured.
+	// The NTPTime is deliberately non-zero to prove the fallback does not use
+	// it when the rate is missing.
+	rateless := audiostream.SenderClock{RTPTime: 0, NTPTime: anchor, ReceivedAt: srRecv, ClockRate: 0, Valid: true}
+	ratelessFrames := computeStats(frames, &audiostream.TrackStats{SenderClock: rateless}, clockRate, time.Second, time.Time{})
+	if !ratelessFrames.SenderWall.IsZero() || ratelessFrames.SenderOffset != 0 {
+		t.Errorf("rate-less report with frames: SenderWall = %v, SenderOffset = %v, want both zero", ratelessFrames.SenderWall, ratelessFrames.SenderOffset)
+	}
+	ratelessNoFrames := computeStats(nil, &audiostream.TrackStats{SenderClock: rateless}, clockRate, time.Second, time.Time{})
+	if !ratelessNoFrames.SenderWall.IsZero() || ratelessNoFrames.SenderOffset != 0 {
+		t.Errorf("rate-less report with no frames: SenderWall = %v, SenderOffset = %v, want both zero", ratelessNoFrames.SenderWall, ratelessNoFrames.SenderOffset)
+	}
 }

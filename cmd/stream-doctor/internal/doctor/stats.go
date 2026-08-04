@@ -116,9 +116,13 @@ func computeStats(frames []CapturedFrame, lib *audiostream.TrackStats, clockRate
 
 	// Sender clock: extrapolate the last captured frame's RTP timestamp to
 	// the sender's wall clock and record its offset from the local receive
-	// time. With no frames but a valid report, fall back to the report's own
-	// NTP time.
-	if lib.SenderClock.Valid {
+	// time. With no frames but a usable report, fall back to the report's own
+	// NTP time. A nonzero clock rate is required either way: WallClock needs
+	// it to extrapolate, and a rate-less report (a valid Sender Report on a
+	// track whose SDP declared no clock rate) carries no usable mapping at
+	// all, so the derived fields stay zero and render as the no-clock-rate
+	// none form rather than a timestamp for an unusable mapping.
+	if lib.SenderClock.Valid && lib.SenderClock.ClockRate > 0 {
 		switch {
 		case len(frames) > 0:
 			last := frames[len(frames)-1]

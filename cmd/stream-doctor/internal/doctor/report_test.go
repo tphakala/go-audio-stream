@@ -176,6 +176,38 @@ func TestRenderReportCaptureNoneForms(t *testing.T) {
 	}
 }
 
+// TestRenderReportSenderClockRateless pins the full computeStats-to-report
+// flow for a valid RTCP sender report on a track that declared no clock rate
+// with no captured frames: the mapping is unusable (WallClock cannot
+// extrapolate without a rate), so the report must show the no-clock-rate none
+// form, never a timestamp for a mapping that does not exist.
+func TestRenderReportSenderClockRateless(t *testing.T) {
+	t.Parallel()
+	ntp := time.Date(2026, 8, 4, 9, 12, 33, 0, time.UTC)
+	lib := audiostream.TrackStats{SenderClock: audiostream.SenderClock{NTPTime: ntp, ReceivedAt: ntp, ClockRate: 0, Valid: true}}
+	c := computeStats(nil, &lib, 0, time.Second, time.Time{})
+	if !c.SenderWall.IsZero() || c.SenderOffset != 0 {
+		t.Fatalf("computeStats derived a mapping for a rate-less report: SenderWall = %v, SenderOffset = %v", c.SenderWall, c.SenderOffset)
+	}
+
+	r := Report{
+		RedactedURL:  redactedStreamURL,
+		AudioTrack:   rtsp.Track{ID: 0, Media: audiostream.MediaAudio, Codec: audiostream.CodecOpus{}},
+		HaveAudio:    true,
+		Capture:      c,
+		CaptureShown: true,
+		Window:       10 * time.Second,
+		Reason:       EndCompleted,
+	}
+	got := renderReport(r, testEnv())
+	if !strings.Contains(got, "  sender-clock: none (sender report, no clock rate)\n") {
+		t.Errorf("report missing the rate-less sender-clock none form:\n%s", got)
+	}
+	if strings.Contains(got, "sender-clock: 20") || strings.Contains(got, "0001-01-01") {
+		t.Errorf("report rendered a timestamp for an unusable sender clock:\n%s", got)
+	}
+}
+
 func TestRenderReportEndReasons(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
