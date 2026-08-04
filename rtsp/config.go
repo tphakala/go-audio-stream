@@ -64,8 +64,8 @@ type Config struct {
 	// UserAgent is sent on every request. Zero uses DefaultUserAgent.
 	UserAgent string
 	// OnFrame receives every delivered frame on the reader goroutine. It must
-	// not block and must not call Describe, Setup, Play, or Wait (Close, Stats
-	// and SessionInfo are the callback-safe ones). Frame.Data is valid only
+	// not block and must not call Describe, Setup, Play, or Wait (Close, Stats,
+	// SessionInfo and Info are the callback-safe ones). Frame.Data is valid only
 	// for the duration of the call.
 	//
 	// Nil is allowed: packets are still parsed and counted in Stats, they are

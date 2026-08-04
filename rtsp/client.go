@@ -92,12 +92,12 @@ type SessionInfo struct {
 	Channels []ChannelPair
 }
 
-// Client is a single RTSP session. Close, Wait, Stats and SessionInfo are safe
-// from any goroutine; of those, only Close, Stats and SessionInfo may be
-// called from inside OnFrame, because Wait blocks until the reader goroutine
-// has finished and would deadlock it. The lifecycle calls (Describe, Setup,
-// Play) are not safe for concurrent use and must be made in order from one
-// goroutine.
+// Client is a single RTSP session. Close, Wait, Stats, SessionInfo and Info are
+// safe from any goroutine; of those, only Close, Stats, SessionInfo and Info
+// may be called from inside OnFrame, because Wait blocks until the reader
+// goroutine has finished and would deadlock it. The lifecycle calls (Describe,
+// Setup, Play) are not safe for concurrent use and must be made in order from
+// one goroutine.
 type Client struct {
 	cfg  Config
 	conn net.Conn
@@ -138,9 +138,14 @@ type Client struct {
 	sessionTimeout  time.Duration
 	keepaliveMethod string
 	serverHeader    string
-	baseURL         string
-	channelPairs    []ChannelPair
-	termErr         error
+	// dialURL is the credential-stripped target the session was opened
+	// against. Unlike baseURL, which Describe rewrites from Content-Base, it
+	// is set once by newClient and never changes, so it backs SourceInfo.URL
+	// with a value that stays stable for the life of the session.
+	dialURL      string
+	baseURL      string
+	channelPairs []ChannelPair
+	termErr      error
 	// auth is the active authentication state. Once a 401 has been answered,
 	// every outgoing request carries an Authorization header computed from it,
 	// with the nonce count incremented per request under the same server nonce.
@@ -204,6 +209,9 @@ type Client struct {
 	rscratch [readChunk]byte
 }
 
+// Client satisfies the root package's source-agnostic capture contract.
+var _ audiostream.Source = (*Client)(nil)
+
 // Dial connects to cfg.URL, starts the reader goroutine, and sends an OPTIONS
 // probe to learn the keepalive method from the Public header. For rtsps it
 // performs the TLS handshake first. It returns a Client in the idle state
@@ -242,6 +250,7 @@ func newClient(cfg *Config, conn net.Conn, tgt *target) *Client {
 		cfg:          *cfg,
 		conn:         conn,
 		pending:      make(map[int]chan *Response),
+		dialURL:      tgt.requestURL,
 		baseURL:      tgt.requestURL,
 		username:     tgt.username,
 		password:     tgt.password,
@@ -449,6 +458,18 @@ func (c *Client) SessionInfo() SessionInfo {
 		Server:          c.serverHeader,
 		Channels:        chans,
 	}
+}
+
+// Info returns the source-neutral snapshot required by
+// audiostream.Source. URL is the dial target with credentials stripped,
+// stable even after a Content-Base rewrite moves the session base;
+// Server is the RTSP Server header captured at Dial, "" when the server
+// omitted it (the same value SessionInfo reports). Safe from any
+// goroutine, including from inside OnFrame.
+func (c *Client) Info() audiostream.SourceInfo {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return audiostream.SourceInfo{URL: c.dialURL, Server: c.serverHeader}
 }
 
 // requireState returns a *StateError (matching ErrInvalidState) when method is
