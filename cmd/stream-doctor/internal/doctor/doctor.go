@@ -20,7 +20,15 @@ const (
 	stepSetup    = "SETUP"
 	stepPlay     = "PLAY"
 	stepCapture  = "CAPTURE"
+	// stepOpen is the single pre-capture step for an HTTP progressive source,
+	// replacing the RTSP DIAL/DESCRIBE/SETUP/PLAY group.
+	stepOpen = "OPEN"
 )
+
+// authFailedPhrase is the result phrase for an authentication failure, shared
+// by failStep (which overrides any per-step phrase with it) so the report's
+// result line always matches mapExit's ExitAuth classification.
+const authFailedPhrase = "authentication failed"
 
 // Run executes one diagnostic session: it drives prober through Dial, Describe,
 // Setup (the target audio track, plus every other track discarded when
@@ -50,7 +58,11 @@ func Run(ctx context.Context, opts Options, prober Prober, out io.Writer, errOut
 type runner struct {
 	ctx    context.Context
 	opts   Options
-	prober Prober
+	prober Prober // source-agnostic capture surface (Collect/Close)
+	// rtsp and http are the negotiation surfaces, set by run() from prober's
+	// dynamic type; exactly one is non-nil per run.
+	rtsp   RTSPProber
+	http   HTTPProber
 	out    io.Writer
 	errOut io.Writer
 	env    Env
@@ -66,9 +78,28 @@ type runner struct {
 }
 
 // run drives the pre-capture steps in order, stopping at the first that fails,
-// then captures, renders once, and returns.
+// then captures, renders once, and returns. The pre-capture step list is chosen
+// by the prober's negotiation surface: the RTSP handshake group, or a single
+// HTTP OPEN. The shared capture, finish, listen, and render steps run for both.
 func (r *runner) run() (Result, error) {
-	for _, step := range []func() bool{r.dial, r.describe, r.selectAudio, r.setup, r.play} {
+	var pre []func() bool
+	switch p := r.prober.(type) {
+	case HTTPProber:
+		r.http = p
+		pre = []func() bool{r.open}
+	case RTSPProber:
+		r.rtsp = p
+		pre = []func() bool{r.dial, r.describe, r.selectAudio, r.setup, r.play}
+	default:
+		// proberFor only builds an RTSP or HTTP prober, so this is unreachable
+		// in production; a test passing a bare Prober lands here rather than
+		// panicking on a failed assertion.
+		r.report.Result = "unsupported source"
+		r.render()
+		return r.res, r.termErr
+	}
+
+	for _, step := range pre {
 		if !step() {
 			r.render()
 			return r.res, r.termErr
@@ -81,9 +112,42 @@ func (r *runner) run() (Result, error) {
 	return r.res, r.termErr
 }
 
+// open times the HTTP handshake as a single OPEN step. On success it populates
+// the synthesized single track and the source identity, mirroring what the RTSP
+// DESCRIBE and SETUP steps populate for the shared capture, render, and listen
+// paths. On failure it classifies the phrase by error class (openPhrase), with
+// an HTTP 401 folded into the auth phrase by failStep.
+func (r *runner) open() bool {
+	hp := r.http
+	elapsed, err := timed(r.now, func() error { return hp.Open(r.ctx) })
+	if err != nil {
+		r.failStep(stepOpen, elapsed, PhaseDial, openPhrase(err), err)
+		return false
+	}
+
+	track := hp.Track()
+	r.audio = track
+	r.report.Kind = SourceHTTP
+	r.report.AudioTrack = track
+	r.report.Tracks = []rtsp.Track{track}
+	r.report.HaveAudio = true
+
+	// The Server header is peer-controlled text both the report and the OPEN
+	// detail display, so scrub it once here at the boundary. The identity URL
+	// is never rendered (the target line uses the redacted URL), so it is
+	// retained raw for completeness.
+	info := hp.Info()
+	info.Server = r.scrubber.scrubString(info.Server)
+	r.report.Source = info
+	r.report.SourceAuth = httpAuthScheme(r.opts)
+
+	r.okStep(stepOpen, elapsed, openDetail(track, info.Server))
+	return true
+}
+
 // dial times the connect and OPTIONS exchange.
 func (r *runner) dial() bool {
-	elapsed, err := timed(r.now, func() error { return r.prober.Dial(r.ctx) })
+	elapsed, err := timed(r.now, func() error { return r.rtsp.Dial(r.ctx) })
 	if err != nil {
 		r.failStep(stepDial, elapsed, PhaseDial, "connection failed", err)
 		return false
@@ -98,7 +162,7 @@ func (r *runner) describe() bool {
 	var tracks []rtsp.Track
 	elapsed, err := timed(r.now, func() error {
 		var e error
-		tracks, e = r.prober.Describe(r.ctx)
+		tracks, e = r.rtsp.Describe(r.ctx)
 		return e
 	})
 	if err != nil {
@@ -151,7 +215,7 @@ func (r *runner) selectAudio() bool {
 func (r *runner) setup() bool {
 	audio := r.audio
 	elapsed, err := timed(r.now, func() error {
-		if e := r.prober.Setup(r.ctx, audio, rtsp.SetupOptions{}); e != nil {
+		if e := r.rtsp.Setup(r.ctx, audio, rtsp.SetupOptions{}); e != nil {
 			return e
 		}
 		if !r.opts.FullStream {
@@ -162,7 +226,7 @@ func (r *runner) setup() bool {
 			if t.ID == audio.ID {
 				continue
 			}
-			if e := r.prober.Setup(r.ctx, t, rtsp.SetupOptions{Discard: true}); e != nil {
+			if e := r.rtsp.Setup(r.ctx, t, rtsp.SetupOptions{Discard: true}); e != nil {
 				return e
 			}
 			r.discarded++
@@ -180,7 +244,7 @@ func (r *runner) setup() bool {
 
 // play times PLAY and records the negotiated session timeout.
 func (r *runner) play() bool {
-	elapsed, err := timed(r.now, func() error { return r.prober.Play(r.ctx) })
+	elapsed, err := timed(r.now, func() error { return r.rtsp.Play(r.ctx) })
 	if err != nil {
 		r.failStep(stepPlay, elapsed, PhasePlay, "play failed", err)
 		return false
@@ -326,7 +390,7 @@ func (r *runner) render() {
 // both renderers display, so it must not leak PII or break the report's code
 // fence. Called after each step that can advance the negotiated details.
 func (r *runner) refreshSession() {
-	r.report.Session = r.prober.SessionInfo()
+	r.report.Session = r.rtsp.SessionInfo()
 	r.report.Session.Server = r.scrubber.scrubString(r.report.Session.Server)
 }
 
@@ -342,7 +406,7 @@ func (r *runner) okStep(name string, elapsed time.Duration, detail string) {
 // surfaced on.
 func (r *runner) failStep(name string, elapsed time.Duration, phase Phase, phrase string, err error) {
 	if isAuthErr(err) {
-		phrase = "authentication failed"
+		phrase = authFailedPhrase
 	}
 	r.report.Steps = append(r.report.Steps, HandshakeStep{Name: name, Elapsed: elapsed, Detail: r.scrubber.scrubError(err)})
 	r.report.Result = phrase

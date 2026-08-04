@@ -43,6 +43,25 @@ const (
 	// EndTruncated means the capture cap was hit before the window
 	// elapsed.
 	EndTruncated
+	// EndStreamEnded means the source reached an orderly end of stream: an
+	// HTTP body EOF, or a WAV data chunk whose declared bytes were fully
+	// consumed. It is distinct from EndCompleted, which is the capture window
+	// elapsing while the stream was still live.
+	EndStreamEnded
+)
+
+// SourceKind identifies the transport a run probed, so the renderers can pick
+// an RTSP or HTTP session block. The zero value is SourceRTSP, so a Report the
+// RTSP path builds needs no explicit Kind and every existing RTSP test is
+// unaffected.
+type SourceKind int
+
+const (
+	// SourceRTSP is an RTSP/RTSPS session driven through the DIAL, DESCRIBE,
+	// SETUP, PLAY walkthrough.
+	SourceRTSP SourceKind = iota
+	// SourceHTTP is an HTTP(S) progressive source opened in one OPEN step.
+	SourceHTTP
 )
 
 // CaptureResult is everything one capture produced.
@@ -101,10 +120,20 @@ type ListenResult struct {
 
 // Report is the fully-populated result of a run, consumed by both renderers.
 type Report struct {
-	RedactedURL  string
-	Result       string // human phrase: "capture OK", "no audio track", "connection failed", ...
-	Steps        []HandshakeStep
-	Session      rtsp.SessionInfo
+	// Kind is the probed transport; SourceRTSP is the zero value, so the RTSP
+	// path leaves it and reportSession renders the RTSP session block.
+	Kind        SourceKind
+	RedactedURL string
+	Result      string // human phrase: "capture OK", "no audio track", "connection failed", ...
+	Steps       []HandshakeStep
+	Session     rtsp.SessionInfo
+	// Source is the source-neutral identity snapshot for an HTTP run (URL and
+	// Server), scrubbed at the orchestration boundary. It is the zero value for
+	// an RTSP run, whose identity lives on Session.
+	Source audiostream.SourceInfo
+	// SourceAuth is the HTTP auth label the report's session block shows
+	// ("basic" or "none"), "" for an RTSP run, which shows Session.AuthScheme.
+	SourceAuth   string
 	Tracks       []rtsp.Track
 	AudioTrack   rtsp.Track
 	HaveAudio    bool

@@ -2,6 +2,7 @@ package doctor
 
 import (
 	"errors"
+	"strings"
 	"testing"
 	"time"
 )
@@ -49,6 +50,7 @@ func TestParseArgsAllFlags(t *testing.T) {
 		"--wav", testWAVName,
 		"--report",
 		"--insecure-tls",
+		"--insecure-auth",
 		"--full-stream",
 		"--user", "u",
 		"--password", "p",
@@ -59,19 +61,40 @@ func TestParseArgsAllFlags(t *testing.T) {
 		t.Fatalf("parseArgs() error = %v, want nil", err)
 	}
 	want := Options{
-		URL:         testStreamURL,
-		Duration:    5 * time.Second,
-		Timeout:     3 * time.Second,
-		ReadIdle:    7 * time.Second,
-		WAVPath:     testWAVName,
-		Report:      true,
-		InsecureTLS: true,
-		FullStream:  true,
-		Username:    "u",
-		Password:    "p",
+		URL:          testStreamURL,
+		Duration:     5 * time.Second,
+		Timeout:      3 * time.Second,
+		ReadIdle:     7 * time.Second,
+		WAVPath:      testWAVName,
+		Report:       true,
+		InsecureTLS:  true,
+		InsecureAuth: true,
+		FullStream:   true,
+		Username:     "u",
+		Password:     "p",
 	}
 	if opts != want {
 		t.Errorf("parseArgs() = %+v, want %+v", opts, want)
+	}
+}
+
+func TestParseArgsInsecureAuthDefaultsOff(t *testing.T) {
+	t.Parallel()
+	opts, err := parseArgs([]string{testStreamURL})
+	if err != nil {
+		t.Fatalf("parseArgs() error = %v, want nil", err)
+	}
+	if opts.InsecureAuth {
+		t.Error("InsecureAuth = true by default, want false (plaintext credentials must be opt-in)")
+	}
+}
+
+func TestUsageTextCoversHTTP(t *testing.T) {
+	t.Parallel()
+	for _, want := range []string{"rtsp-or-http-url", "-insecure-auth", "WAV or raw PCM/L16"} {
+		if !strings.Contains(usageText, want) {
+			t.Errorf("usageText missing %q:\n%s", want, usageText)
+		}
 	}
 }
 

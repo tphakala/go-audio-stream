@@ -10,16 +10,17 @@ import (
 
 // Options is the fully-parsed CLI configuration for one run.
 type Options struct {
-	URL         string
-	Duration    time.Duration
-	Timeout     time.Duration
-	ReadIdle    time.Duration
-	WAVPath     string // "" disables the listen check
-	Report      bool
-	InsecureTLS bool
-	FullStream  bool // set up all tracks (discarding non-target ones) for cameras that reject audio-only SETUP
-	Username    string
-	Password    string
+	URL          string
+	Duration     time.Duration
+	Timeout      time.Duration
+	ReadIdle     time.Duration
+	WAVPath      string // "" disables the listen check
+	Report       bool
+	InsecureTLS  bool
+	InsecureAuth bool // permit HTTP Basic credentials over a plaintext http connection (mirrors httpsource.Config.AllowInsecureAuth)
+	FullStream   bool // set up all tracks (discarding non-target ones) for cameras that reject audio-only SETUP
+	Username     string
+	Password     string
 }
 
 // Defaults.
@@ -43,7 +44,10 @@ var ErrUsage = errors.New("stream-doctor: usage error")
 var errVersionRequested = errors.New("stream-doctor: version requested")
 
 // usageText is printed to stderr by Execute on a usage error.
-const usageText = `Usage: stream-doctor [flags] <rtsp-url>
+const usageText = `Usage: stream-doctor [flags] <rtsp-or-http-url>
+
+Probes an rtsp/rtsps camera stream or an http/https progressive source. An
+http(s) target must serve WAV or raw PCM/L16.
 
 Flags:
   -duration duration    capture window (default 10s)
@@ -51,11 +55,12 @@ Flags:
   -read-idle duration   watchdog: no frames within this window ends capture (default 15s)
   -wav path             write captured audio to a WAV file
   -report               print a full diagnostic report
-  -insecure-tls         skip certificate verification for rtsps
+  -insecure-tls         skip certificate verification for rtsps and https
+  -insecure-auth        permit HTTP Basic credentials over a plaintext http connection
   -full-stream          set up all tracks, not just audio, for cameras that
-                        reject audio-only SETUP
-  -user username        RTSP username (overridden by URL userinfo)
-  -password password    RTSP password (overridden by URL userinfo)
+                        reject audio-only SETUP (RTSP only; ignored for http)
+  -user username        stream username (overridden by URL userinfo)
+  -password password    stream password (overridden by URL userinfo)
   -version               print the version and exit
 `
 
@@ -77,10 +82,11 @@ func parseArgs(args []string) (Options, error) {
 	fs.DurationVar(&opts.ReadIdle, "read-idle", DefaultReadIdle, "watchdog idle window")
 	fs.StringVar(&opts.WAVPath, "wav", "", "write captured audio to a WAV file")
 	fs.BoolVar(&opts.Report, "report", false, "print a full diagnostic report")
-	fs.BoolVar(&opts.InsecureTLS, "insecure-tls", false, "skip certificate verification for rtsps")
+	fs.BoolVar(&opts.InsecureTLS, "insecure-tls", false, "skip certificate verification for rtsps and https")
+	fs.BoolVar(&opts.InsecureAuth, "insecure-auth", false, "permit HTTP Basic credentials over a plaintext http connection")
 	fs.BoolVar(&opts.FullStream, "full-stream", false, "set up all tracks, not just audio")
-	fs.StringVar(&opts.Username, "user", "", "RTSP username")
-	fs.StringVar(&opts.Password, "password", "", "RTSP password")
+	fs.StringVar(&opts.Username, "user", "", "stream username")
+	fs.StringVar(&opts.Password, "password", "", "stream password")
 	fs.BoolVar(&version, "version", false, "print the version and exit")
 
 	if err := fs.Parse(args); err != nil {
@@ -94,7 +100,7 @@ func parseArgs(args []string) (Options, error) {
 	rest := fs.Args()
 	switch len(rest) {
 	case 0:
-		return Options{}, fmt.Errorf("%w: missing RTSP URL", ErrUsage)
+		return Options{}, fmt.Errorf("%w: missing stream URL", ErrUsage)
 	case 1:
 		opts.URL = rest[0]
 	default:

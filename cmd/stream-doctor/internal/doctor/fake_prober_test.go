@@ -28,8 +28,9 @@ type setupCall struct {
 	Discard bool
 }
 
-// compile-time: fakeProber implements Prober.
-var _ Prober = (*fakeProber)(nil)
+// compile-time: fakeProber implements RTSPProber (and thus the narrower
+// Prober), so Run's type switch drives it through the RTSP step list.
+var _ RTSPProber = (*fakeProber)(nil)
 
 func (f *fakeProber) Dial(_ context.Context) error {
 	f.calls = append(f.calls, "Dial")

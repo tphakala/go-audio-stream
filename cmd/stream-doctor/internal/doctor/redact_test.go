@@ -17,6 +17,8 @@ func TestRedactTarget(t *testing.T) {
 		{"credentials and host stripped", "rtsp://admin:hunter2@cam.example:554/stream", "rtsp://[redacted]/stream"},
 		{"ip host stripped", "rtsp://user:pass@192.168.1.50:554/live", "rtsp://[redacted]/live"},
 		{"no userinfo, host still stripped", "rtsp://cam.local/stream", "rtsp://[redacted]/stream"},
+		{"http target host stripped", "http://user:pass@mic.local:8080/stream.wav", "http://[redacted]/stream.wav"},
+		{"https target host stripped", "https://mic.local/audio/l16", "https://[redacted]/audio/l16"},
 		{"query dropped", "rtsps://u:p@host:322/s?token=secret", "rtsps://[redacted]/s"},
 		{"no path keeps only scheme", "rtsp://u:p@host", "rtsp://[redacted]"},
 		{"unparseable collapses to token", "://not a url", "[redacted]"},
