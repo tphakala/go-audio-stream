@@ -104,7 +104,7 @@ func TestWriteWAVL16(t *testing.T) {
 	// A known s16le ramp, as the library delivers for L16: the RTP payload
 	// arrives big-endian and the library byte-swaps it to little-endian
 	// before Frame.Data reaches the doctor, so this is already the shape
-	// writeWAVG711's pass-through expects.
+	// writeWAVPCM's pass-through expects.
 	ramp := make([]int16, 300)
 	for i := range ramp {
 		ramp[i] = int16(i*100 - 15000)

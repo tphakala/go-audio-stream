@@ -39,7 +39,7 @@ const opusMaxFrameSamples = 5760
 func writeWAV(w io.Writer, track rtsp.Track, frames []CapturedFrame) (ListenResult, error) {
 	switch track.Codec.(type) {
 	case audiostream.CodecG711, audiostream.CodecL16:
-		return writeWAVG711(w, track, frames)
+		return writeWAVPCM(w, track, frames)
 	case audiostream.CodecOpus:
 		return writeWAVOpus(w, track, frames)
 	case audiostream.CodecAAC:
@@ -49,12 +49,12 @@ func writeWAV(w io.Writer, track rtsp.Track, frames []CapturedFrame) (ListenResu
 	}
 }
 
-// writeWAVG711 concatenates the already-linear s16le PCM the library
+// writeWAVPCM concatenates the already-linear s16le PCM the library
 // delivers for G.711 (Frame.Data is decompanded on arrival) and for L16
 // (Frame.Data is byte-swapped to little-endian on arrival), and writes it
 // once with go-wav. Both codecs hand the doctor PCM in the same shape, so
-// they share this one pass-through path.
-func writeWAVG711(w io.Writer, track rtsp.Track, frames []CapturedFrame) (ListenResult, error) {
+// they share this one codec-agnostic pass-through path.
+func writeWAVPCM(w io.Writer, track rtsp.Track, frames []CapturedFrame) (ListenResult, error) {
 	channels := max(track.Channels, 1)
 
 	total := 0
