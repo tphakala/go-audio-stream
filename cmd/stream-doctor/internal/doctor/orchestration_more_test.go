@@ -79,7 +79,7 @@ func TestRunRedactsFailureDetail(t *testing.T) {
 // clobbered file.
 func TestRunListenSkipLeavesNoFile(t *testing.T) {
 	t.Parallel()
-	unsupported := rtsp.Track{ID: 0, Media: audiostream.MediaAudio, Codec: audiostream.CodecUnknown{RTPMap: testL16RTPMap}, ClockRate: 8000, Channels: 1}
+	unsupported := rtsp.Track{ID: 0, Media: audiostream.MediaAudio, Codec: audiostream.CodecUnknown{RTPMap: testUnknownRTPMap}, ClockRate: 8000, Channels: 1}
 	f := &fakeProber{
 		tracks:  []rtsp.Track{unsupported},
 		session: happySession(),

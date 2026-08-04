@@ -25,7 +25,12 @@ const testHost = "cam.example"
 const testH264 = "H264/90000"
 const testDigestAuth = rtsp.AuthDigest
 const testGetParameter = "GET_PARAMETER"
-const testL16RTPMap = "L16/8000"
+
+// testUnknownRTPMap is an rtpmap encoding this library does not recognize,
+// used as the fixture for CodecUnknown across the doctor tests. L16 no
+// longer qualifies (it is CodecL16, a decodable codec), so this uses
+// Speex, a real RTP audio encoding this library has no codec for.
+const testUnknownRTPMap = "SPEEX/8000"
 const redactedStreamURL = "rtsp://[redacted]/stream"
 const testWAVName = "out.wav"
 const testAACFmtp = "mode=AAC-hbr;sizelength=13;indexlength=3;indexdeltalength=3;config=1408"
@@ -242,7 +247,7 @@ func TestRunCaptureSilent(t *testing.T) {
 
 func TestRunUnsupportedCodec(t *testing.T) {
 	t.Parallel()
-	unknownAudio := rtsp.Track{ID: 0, Media: audiostream.MediaAudio, Codec: audiostream.CodecUnknown{RTPMap: testL16RTPMap}, ClockRate: 8000, Channels: 1}
+	unknownAudio := rtsp.Track{ID: 0, Media: audiostream.MediaAudio, Codec: audiostream.CodecUnknown{RTPMap: testUnknownRTPMap}, ClockRate: 8000, Channels: 1}
 	f := &fakeProber{
 		tracks:  []rtsp.Track{unknownAudio},
 		session: happySession(),
