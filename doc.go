@@ -4,6 +4,7 @@
 // subpackages (rtsp) and deliver these types; RTP payload depacketizers
 // live under depacket. It also defines Source, the source-agnostic capture
 // contract every protocol client satisfies, and SourceInfo, its identity
-// snapshot, so a supervisor can drive any source through one lifecycle,
-// delivery and introspection interface.
+// snapshot. Source covers lifecycle (Wait, Close), statistics (Stats) and
+// identity (Info); frame delivery is not part of it, each concrete source
+// configures delivery through its own Config.OnFrame.
 package audiostream

@@ -3,6 +3,7 @@ package audiostream_test
 import (
 	"context"
 	"errors"
+	"maps"
 	"testing"
 
 	audiostream "github.com/tphakala/go-audio-stream"
@@ -19,8 +20,9 @@ type fakeSource struct {
 	info    audiostream.SourceInfo
 }
 
-// Compile-time: the fake satisfies the sealed capture contract, the same way
-// audiostream_test pins the codec variants against Codec.
+// Compile-time: the fake satisfies audiostream.Source. The contract is a plain
+// interface, intentionally implementable by any package without importing rtsp,
+// which is exactly what this test demonstrates.
 var _ audiostream.Source = (*fakeSource)(nil)
 
 func (f *fakeSource) Wait(ctx context.Context) error {
@@ -34,7 +36,13 @@ func (f *fakeSource) Wait(ctx context.Context) error {
 
 func (f *fakeSource) Close() error { return nil }
 
-func (f *fakeSource) Stats() audiostream.Stats { return f.stats }
+func (f *fakeSource) Stats() audiostream.Stats {
+	// Honour the Source.Stats contract that the returned counters are freshly
+	// allocated and never alias internal state, so a caller mutating the
+	// returned map cannot corrupt a later call. maps.Clone returns nil for a
+	// nil map, which is the right zero snapshot.
+	return audiostream.Stats{Tracks: maps.Clone(f.stats.Tracks)}
+}
 
 func (f *fakeSource) Info() audiostream.SourceInfo { return f.info }
 
@@ -55,8 +63,15 @@ func TestSourceContractImplementable(t *testing.T) {
 	if err := src.Close(); err != nil {
 		t.Errorf("Close = %v, want nil", err)
 	}
-	if got := src.Stats().Tracks[0].Packets; got != 3 {
+	stats := src.Stats()
+	if got := stats.Tracks[0].Packets; got != 3 {
 		t.Errorf("Stats track 0 Packets = %d, want 3", got)
+	}
+	// The snapshot must not alias internal state: mutating what a call returned
+	// cannot change what a later call reports.
+	delete(stats.Tracks, 0)
+	if got := src.Stats().Tracks[0].Packets; got != 3 {
+		t.Errorf("Stats after mutating a prior snapshot = %d, want 3 (snapshot must be independent)", got)
 	}
 	info := src.Info()
 	if info.URL != "rtsp://host/stream" {
