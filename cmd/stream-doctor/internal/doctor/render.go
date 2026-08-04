@@ -17,9 +17,17 @@ import (
 const (
 	stepRowFmt = "  %-11s%s%8s   %s\n" // name, status, elapsed, detail
 	// captureInt's label column is wide enough for the longest capture label
-	// ("ssrc-resets") plus a separating space.
-	captureInt = "  %-12s%d\n" // label, integer value
+	// ("wire bitrate", "sender clock") plus a separating space.
+	captureInt = "  %-14s%d\n" // label, integer value
+	// captureStr renders a capture row whose value is a preformatted string
+	// (the last-frame age and sender-clock lines), sharing captureInt's label
+	// column width.
+	captureStr = "  %-14s%s\n" // label, string value
 )
+
+// senderClockTimeFormat renders a sender wall-clock time as a UTC ISO 8601
+// timestamp with millisecond precision and a literal Z suffix.
+const senderClockTimeFormat = "2006-01-02T15:04:05.000Z"
 
 // unknownLabel is the codec/reason fallback label.
 const unknownLabel = "unknown"
@@ -183,16 +191,50 @@ func renderCapture(b *strings.Builder, r *Report) {
 		return
 	}
 	fmt.Fprintln(b)
+	c := r.Capture
 	fmt.Fprintf(b, "capture (%s, track %d, ended: %s)\n", r.Window, r.AudioTrack.ID, r.Reason)
-	fmt.Fprintf(b, captureInt, "packets", r.Capture.Packets)
-	fmt.Fprintf(b, captureInt, "bytes", r.Capture.Bytes)
-	fmt.Fprintf(b, "  %-12s%d (%.2f%%)\n", "lost", r.Capture.Lost, r.Capture.LossRatio*100)
-	fmt.Fprintf(b, captureInt, "duplicates", r.Capture.Duplicates)
-	fmt.Fprintf(b, captureInt, "malformed", r.Capture.Malformed)
-	fmt.Fprintf(b, captureInt, "ssrc-resets", r.Capture.SSRCResets)
-	fmt.Fprintf(b, captureInt, "max gap", r.Capture.MaxGap)
-	fmt.Fprintf(b, "  %-12s%.1f kbit/s\n", "bitrate", r.Capture.Bitrate/1000)
-	fmt.Fprintf(b, "  %-12s%.2f ms\n", "jitter", r.Capture.JitterMS)
+	fmt.Fprintf(b, captureInt, "packets", c.Packets)
+	fmt.Fprintf(b, captureInt, "bytes", c.Bytes)
+	if c.WireBytes > 0 {
+		fmt.Fprintf(b, captureInt, "wire bytes", c.WireBytes)
+	}
+	fmt.Fprintf(b, "  %-14s%d (%.2f%%)\n", "lost", c.Lost, c.LossRatio*100)
+	fmt.Fprintf(b, captureInt, "duplicates", c.Duplicates)
+	fmt.Fprintf(b, captureInt, "malformed", c.Malformed)
+	fmt.Fprintf(b, captureInt, "ssrc-resets", c.SSRCResets)
+	fmt.Fprintf(b, captureInt, "max gap", c.MaxGap)
+	fmt.Fprintf(b, "  %-14s%.1f kbit/s\n", "bitrate", c.Bitrate/1000)
+	if c.WireBytes > 0 {
+		fmt.Fprintf(b, "  %-14s%.1f kbit/s\n", "wire bitrate", c.WireBitrate/1000)
+	}
+	fmt.Fprintf(b, "  %-14s%.2f ms\n", "jitter", c.JitterMS)
+	fmt.Fprintf(b, captureStr, "last frame", lastFrameCell(&c))
+	fmt.Fprintf(b, captureStr, "sender clock", senderClockCell(&c))
+}
+
+// lastFrameCell renders the last-frame value shared by both renderers:
+// "0.4s ago" when a frame has arrived, "none" otherwise.
+func lastFrameCell(c *CaptureStats) string {
+	if !c.HaveLastFrame {
+		return "none"
+	}
+	return fmt.Sprintf("%.1fs ago", c.LastFrameAge.Seconds())
+}
+
+// senderClockCell renders the sender-clock value shared by both renderers: the
+// last frame's extrapolated sender wall clock and its offset from local time,
+// or a "none" form when the sender clock is unusable. The two none forms are
+// distinct: no RTCP sender report arrived at all, versus a report that arrived
+// but whose track declared no clock rate, so WallClock cannot extrapolate a
+// wall time (a zero SenderWall) and a year-one timestamp is suppressed.
+func senderClockCell(c *CaptureStats) string {
+	switch {
+	case !c.SenderClock.Valid:
+		return "none (no RTCP sender report)"
+	case c.SenderWall.IsZero():
+		return "none (sender report, no clock rate)"
+	}
+	return fmt.Sprintf("%s (offset %+.2fs)", c.SenderWall.UTC().Format(senderClockTimeFormat), c.SenderOffset.Seconds())
 }
 
 // listenSeconds returns the decoded audio duration for l in seconds, or 0
@@ -215,7 +257,11 @@ func writeListenSection(b *strings.Builder, r *Report) {
 	case r.Listen.Written:
 		seconds := listenSeconds(r.Listen)
 		fmt.Fprintln(b)
-		fmt.Fprintf(b, "listen: wrote %.1fs of %d Hz %s s16 PCM\n", seconds, r.Listen.SampleRate, channelsLabel(r.Listen.Channels))
+		line := fmt.Sprintf("listen: wrote %.1fs of %d Hz %s s16 PCM", seconds, r.Listen.SampleRate, channelsLabel(r.Listen.Channels))
+		if !r.Listen.SenderStart.IsZero() {
+			line += ", sender clock start " + r.Listen.SenderStart.UTC().Format(senderClockTimeFormat)
+		}
+		fmt.Fprintln(b, line)
 	case r.Listen.Skipped:
 		fmt.Fprintln(b)
 		fmt.Fprintf(b, "listen: skipped: %s\n", sanitizeLine(r.Listen.SkipReason))

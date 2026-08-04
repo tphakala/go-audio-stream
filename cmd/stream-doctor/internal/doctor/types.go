@@ -56,6 +56,10 @@ type CaptureResult struct {
 	Frames []CapturedFrame
 	// Stats are the library's final receive counters for the audio track.
 	Stats audiostream.TrackStats
+	// CapturedAt is when the library's Stats snapshot read completed. It
+	// carries a monotonic reading and is the reference the last-frame age is
+	// measured against.
+	CapturedAt time.Time
 	// Window is the requested capture window.
 	Window time.Duration
 	// Elapsed is the wall-clock time actually spent capturing.
@@ -88,6 +92,11 @@ type ListenResult struct {
 	Frames     int // samples per channel
 	Skipped    bool
 	SkipReason string
+	// SenderStart is the sender's wall-clock time of the first captured
+	// frame, extrapolated from the RTCP sender clock; the zero Time when no
+	// sender clock was available. It anchors the written WAV to absolute
+	// time.
+	SenderStart time.Time
 }
 
 // Report is the fully-populated result of a run, consumed by both renderers.

@@ -33,13 +33,24 @@ func goldenReport() Report {
 			{ID: 0, Media: audiostream.MediaAudio, Codec: audiostream.CodecAAC{AudioSpecificConfig: []byte{0x14, 0x08}}, ClockRate: 16000, Channels: 1, PayloadType: 97, FMTP: testAACFmtp},
 			{ID: 1, Media: audiostream.MediaVideo, Codec: audiostream.CodecUnknown{RTPMap: testH264}, ClockRate: 90000, Channels: 0, PayloadType: 96},
 		},
-		AudioTrack:   rtsp.Track{ID: 0, Media: audiostream.MediaAudio, Codec: audiostream.CodecAAC{AudioSpecificConfig: []byte{0x14, 0x08}}, ClockRate: 16000, Channels: 1, PayloadType: 97, FMTP: testAACFmtp},
-		HaveAudio:    true,
-		Capture:      CaptureStats{Packets: 500, Bytes: 64000, Lost: 0, LossRatio: 0, Duplicates: 0, Malformed: 2, SSRCResets: 1, MaxGap: 0, Bitrate: 51200, JitterMS: 0.586},
+		AudioTrack: rtsp.Track{ID: 0, Media: audiostream.MediaAudio, Codec: audiostream.CodecAAC{AudioSpecificConfig: []byte{0x14, 0x08}}, ClockRate: 16000, Channels: 1, PayloadType: 97, FMTP: testAACFmtp},
+		HaveAudio:  true,
+		Capture: CaptureStats{
+			Packets: 500, Bytes: 64000, WireBytes: 70000, Lost: 0, LossRatio: 0,
+			Duplicates: 0, Malformed: 2, SSRCResets: 1, MaxGap: 0,
+			Bitrate: 51200, WireBitrate: 56000, JitterMS: 0.586,
+			HaveLastFrame: true, LastFrameAge: 400 * time.Millisecond,
+			SenderClock:  audiostream.SenderClock{Valid: true},
+			SenderWall:   time.Date(2026, 8, 4, 9, 12, 33, 512_000_000, time.UTC),
+			SenderOffset: 120 * time.Millisecond,
+		},
 		CaptureShown: true,
 		Window:       10 * time.Second,
 		Reason:       EndCompleted,
-		Listen:       ListenResult{Written: true, SampleRate: 16000, Channels: 1, Frames: 160000},
+		Listen: ListenResult{
+			Written: true, SampleRate: 16000, Channels: 1, Frames: 160000,
+			SenderStart: time.Date(2026, 8, 4, 9, 12, 23, 512_000_000, time.UTC),
+		},
 	}
 }
 
@@ -133,6 +144,35 @@ func TestRenderReportSessionDetailsPreSetup(t *testing.T) {
 	}
 	if strings.Contains(got, "session-timeout") || strings.Contains(got, "transport") {
 		t.Errorf("report shows SETUP-scoped session lines before SETUP succeeded:\n%s", got)
+	}
+}
+
+// TestRenderReportCaptureNoneForms covers the report's telemetry degradation:
+// a capture with no wire bytes, no frame seen, and no RTCP sender report omits
+// the wire lines and renders the "none" forms for the last-frame and
+// sender-clock lines.
+func TestRenderReportCaptureNoneForms(t *testing.T) {
+	t.Parallel()
+	r := Report{
+		RedactedURL:  redactedStreamURL,
+		Steps:        []HandshakeStep{{Name: stepDial, OK: true, Elapsed: 5 * time.Millisecond}},
+		Session:      rtsp.SessionInfo{AuthScheme: rtsp.AuthNone, KeepaliveMethod: testGetParameter},
+		AudioTrack:   rtsp.Track{ID: 0, Media: audiostream.MediaAudio, Codec: audiostream.CodecOpus{}},
+		HaveAudio:    true,
+		Capture:      CaptureStats{Packets: 10, Bytes: 320},
+		CaptureShown: true,
+		Window:       10 * time.Second,
+		Reason:       EndCompleted,
+	}
+	got := renderReport(r, testEnv())
+	if strings.Contains(got, "wire-bytes:") || strings.Contains(got, "wire-bitrate:") {
+		t.Errorf("wire lines must be omitted when WireBytes is zero:\n%s", got)
+	}
+	if !strings.Contains(got, "  last-frame: none\n") {
+		t.Errorf("report missing the last-frame none form:\n%s", got)
+	}
+	if !strings.Contains(got, "  sender-clock: none (no RTCP sender report)\n") {
+		t.Errorf("report missing the sender-clock none form:\n%s", got)
 	}
 }
 

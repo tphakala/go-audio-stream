@@ -25,13 +25,17 @@ tracks
 capture: track 0, window 10s, ended completed
   packets: 500
   bytes: 64000
+  wire-bytes: 70000
   lost: 0 (0.00%)
   duplicates: 0
   malformed: 2
   ssrc-resets: 1
   max-gap: 0
   bitrate: 51.2 kbit/s
+  wire-bitrate: 56.0 kbit/s
   jitter: 0.59 ms
+  last-frame: 0.4s ago
+  sender-clock: 2026-08-04T09:12:33.512Z (offset +0.12s)
 
-listen: wrote 10.0s of 16000 Hz mono s16 PCM
+listen: wrote 10.0s of 16000 Hz mono s16 PCM, sender clock start 2026-08-04T09:12:23.512Z
 ```

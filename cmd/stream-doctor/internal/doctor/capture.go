@@ -186,16 +186,17 @@ func (p *rtspProber) Collect(ctx context.Context, track rtsp.Track, window time.
 	truncated := p.truncated
 	p.mu.Unlock()
 
-	stats := p.client.Stats().Tracks[track.ID]
+	st := p.client.Stats()
 
 	return CaptureResult{
-		Session: p.client.SessionInfo(),
-		Track:   track,
-		Frames:  frames,
-		Stats:   stats,
-		Window:  window,
-		Elapsed: elapsed,
-		Reason:  classifyEndReason(ctx, waitErr, truncated, len(frames)),
+		Session:    p.client.SessionInfo(),
+		Track:      track,
+		Frames:     frames,
+		Stats:      st.Tracks[track.ID],
+		CapturedAt: st.CapturedAt,
+		Window:     window,
+		Elapsed:    elapsed,
+		Reason:     classifyEndReason(ctx, waitErr, truncated, len(frames)),
 	}, nil
 }
 

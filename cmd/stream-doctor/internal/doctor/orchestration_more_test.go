@@ -125,6 +125,39 @@ func TestRunListenWritesWAV(t *testing.T) {
 	}
 }
 
+// TestRunListenSenderClockStart drives the listen check with a valid RTCP
+// sender clock and asserts runner.listen anchors the written WAV to absolute
+// time: the listen line gains a "sender clock start <ts>" suffix, the wall
+// clock of the first captured frame's RTP timestamp.
+func TestRunListenSenderClockStart(t *testing.T) {
+	t.Parallel()
+	anchor := time.Date(2026, 8, 4, 9, 12, 0, 0, time.UTC)
+	g711 := rtsp.Track{ID: 0, Media: audiostream.MediaAudio, Codec: audiostream.CodecG711{Law: audiostream.MuLaw}, ClockRate: 8000, Channels: 1}
+	f := &fakeProber{
+		tracks:  []rtsp.Track{g711},
+		session: happySession(),
+		result: CaptureResult{
+			// frames[0].RTPTime 0 maps to the sender-report anchor, so the
+			// derived start is exactly anchor.
+			Frames: []CapturedFrame{{Data: make([]byte, 320), RTPTime: 0}},
+			Stats:  audiostream.TrackStats{SenderClock: audiostream.SenderClock{RTPTime: 0, NTPTime: anchor, ClockRate: 8000, Valid: true}},
+			Reason: EndCompleted,
+		},
+	}
+	wavPath := filepath.Join(t.TempDir(), testWAVName)
+	opts := Options{URL: testTargetURL, Duration: time.Second, WAVPath: wavPath, Report: true}
+
+	var out, errOut strings.Builder
+	_, _ = Run(context.Background(), opts, f, &out, &errOut, testEnv(), fixedClock(time.Millisecond))
+
+	if _, err := os.Stat(wavPath); err != nil {
+		t.Fatalf("--wav file not written: %v", err)
+	}
+	if !strings.Contains(out.String(), "sender clock start 2026-08-04T09:12:00.000Z") {
+		t.Errorf("report listen line missing the sender-clock start suffix:\n%s", out.String())
+	}
+}
+
 // TestRunListenRenameFailurePIIFree makes the final rename fail (the --wav path
 // is an existing directory) and asserts the skip reason discloses no filesystem
 // path: os.Rename returns an *os.LinkError carrying both the temp and
