@@ -10,14 +10,21 @@
 // a body sniffed to begin with a RIFF/WAVE signature) is parsed by a minimal
 // streaming RIFF parser that requires 16-bit integer PCM; its fmt chunk is
 // authoritative for the rate and channel count, and a bounded data chunk ends
-// the stream when its declared bytes are consumed. A raw response (audio/L16,
-// or an unlabeled application/octet-stream or audio/pcm) carries no header, so
-// its shape comes from the Content-Type parameters and Config.Format. Raw PCM
-// defaults to little-endian and is delivered verbatim. RFC 3551 defines
-// audio/L16 as big-endian, but real HTTP embedded microphones (for example
-// esp32-audio-streamer's /stream.pcm) send native little-endian while labeling
-// the stream audio/L16, so this source defaults audio/L16 to little-endian to
-// match the devices in the field; unlabeled embedded PCM is native
+// the stream when its declared bytes are consumed. The fmt chunk may declare
+// classic PCM (audioFormat 1) or WAVE_FORMAT_EXTENSIBLE, accepted only when its
+// cbSize is at least 22 (carrying the SubFormat GUID), its SubFormat GUID is
+// KSDATAFORMAT_SUBTYPE_PCM, and both the container and valid bits per sample
+// are 16, so an EXTENSIBLE chunk is admitted only when it is byte-identical
+// 16-bit integer PCM; every other EXTENSIBLE subformat is rejected the same
+// as any other non-PCM audioFormat, and a chunk whose cbSize overruns the
+// chunk size, or that is smaller than 40 bytes, is ErrMalformedWAV. A raw
+// response (audio/L16, or an unlabeled application/octet-stream or audio/pcm)
+// carries no header, so its shape comes from the Content-Type parameters and
+// Config.Format. Raw PCM defaults to little-endian and is delivered verbatim.
+// RFC 3551 defines audio/L16 as big-endian, but real HTTP embedded microphones
+// (for example esp32-audio-streamer's /stream.pcm) send native little-endian
+// while labeling the stream audio/L16, so this source defaults audio/L16 to
+// little-endian to match the devices in the field; unlabeled embedded PCM is native
 // little-endian for the same reason. Set Config.Format.Endian = EndianBig for a
 // spec-strict big-endian audio/L16 source, which is byte-swapped to
 // little-endian on delivery. The precedence for rate and channels is WAV header,

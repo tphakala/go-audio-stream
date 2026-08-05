@@ -36,8 +36,11 @@ var (
 	ErrBadStatus = errors.New("httpsource: non-success response status")
 	// ErrUnsupportedFormat reports a response this source will not decode: a
 	// Content-Type it does not carry (audio/mpeg, audio/aac, audio/ogg and the
-	// rest), a WAV audio format other than 16-bit integer PCM, or an RF64/BW64
-	// container. It fails Open fast rather than delivering garbage.
+	// rest), a WAV audio format other than 16-bit integer PCM (including a
+	// WAVE_FORMAT_EXTENSIBLE chunk whose cbSize is smaller than 22, whose
+	// SubFormat is not PCM, or whose valid or container bits per sample is not
+	// 16), or an RF64/BW64 container. It fails Open fast rather than delivering
+	// garbage.
 	ErrUnsupportedFormat = errors.New("httpsource: unsupported media format")
 	// ErrFormatUnknown reports raw audio whose sample rate and channel count
 	// could not be resolved from the Content-Type parameters or Config.Format,
@@ -46,8 +49,9 @@ var (
 	ErrFormatUnknown = errors.New("httpsource: audio format could not be determined")
 	// ErrMalformedWAV reports a WAV stream whose RIFF structure could not be
 	// parsed: a missing RIFF/WAVE signature, a data chunk before fmt, a fmt
-	// chunk that is too small, a header that exceeds the pre-data budget, or a
-	// truncation (which wraps io.ErrUnexpectedEOF).
+	// chunk that is too small or whose WAVE_FORMAT_EXTENSIBLE cbSize overruns
+	// the chunk, a header that exceeds the pre-data budget, or a truncation
+	// (which wraps io.ErrUnexpectedEOF).
 	ErrMalformedWAV = errors.New("httpsource: malformed WAV stream")
 	// ErrInsecureAuth reports that Open refused to send Basic credentials over a
 	// plaintext http connection. Credentials on a plaintext connection travel in
