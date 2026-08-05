@@ -431,3 +431,80 @@ func TestParseWAVHeaderTruncations(t *testing.T) {
 		}
 	}
 }
+
+// TestParseWAVHeaderFmtTrailingBudgetIsGlobal pins the pre-data budget across
+// the whole header, not just within readFmtChunk. A JUNK chunk spends a visible
+// slice of the 1 MiB budget, then a fmt chunk declares a trailing region that,
+// measured on its own, fits under the cap, yet whose true cost once the RIFF
+// header and the JUNK chunk are counted exceeds it. The parser must reject it
+// with the budget error before it ever tries to read the (deliberately absent)
+// trailing bytes. The earlier gap measured the trailing skip against a counter
+// local to readFmtChunk, so it waved the skip through and then tripped on EOF
+// reading a region the budget should have forbidden.
+func TestParseWAVHeaderFmtTrailingBudgetIsGlobal(t *testing.T) {
+	const junkPayload = 16 << 10 // 16 KiB of JUNK ahead of fmt.
+
+	// Leave readFmtChunk's own counter (16-byte body + trailing) just under the
+	// cap, so its local accounting alone would accept the skip.
+	declaredFmtSize := uint32(wavMaxPreData - 4096)
+
+	body := []byte(riffMagic)
+	body = le32(body, 0xFFFFFFFF)
+	body = append(body, waveMagic...)
+	// A JUNK chunk consuming part of the budget before fmt.
+	body = append(body, "JUNK"...)
+	body = le32(body, junkPayload)
+	body = append(body, make([]byte, junkPayload)...)
+	// A fmt header declaring a large trailing region, followed by only the
+	// 16-byte PCM body: the declared trailing bytes are intentionally absent, so
+	// a parser that respects the global budget never reaches for them.
+	body = append(body, fmtChunkID...)
+	body = le32(body, declaredFmtSize)
+	body = le16(body, wavFormatPCM)
+	body = le16(body, 1)     // channels
+	body = le32(body, 8000)  // sample rate
+	body = le32(body, 16000) // byte rate
+	body = le16(body, 2)     // block align
+	body = le16(body, wavBitsPerSample)
+
+	_, err := parseWAVHeader(wavReader(body))
+	if !errors.Is(err, ErrMalformedWAV) {
+		t.Fatalf("parseWAVHeader error = %v, want ErrMalformedWAV", err)
+	}
+	if errors.Is(err, io.ErrUnexpectedEOF) {
+		t.Fatalf("parseWAVHeader reached for the oversized trailing region (got %v); the "+
+			"budget must be enforced globally, before the skip", err)
+	}
+}
+
+// TestParseWAVHeaderSampleRateUpperBound refuses a sample rate above the
+// portable maximum, math.MaxInt32. Such a rate narrows to a negative int on a
+// 32-bit build (where int is 32-bit) and would flow into buffer-sizing and
+// resample math; the exact maximum stays accepted, so the boundary is pinned
+// on both sides. The literals below independently encode math.MaxInt32 rather
+// than referencing the parser's own constant, so a wrong bound is caught.
+func TestParseWAVHeaderSampleRateUpperBound(t *testing.T) {
+	tests := []struct {
+		name    string
+		rate    uint32
+		wantErr bool
+	}{
+		{"max int32 accepted", 1<<31 - 1, false},
+		{"one past max int32", 1 << 31, true},
+		{"all ones", 0xFFFFFFFF, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			header := stdWAVHeader(wavFormatPCM, 1, tt.rate, 16, 0, 0xFFFFFFFF)
+			info, err := parseWAVHeader(wavReader(header))
+			switch {
+			case tt.wantErr && !errors.Is(err, ErrMalformedWAV):
+				t.Fatalf("rate %d: error = %v, want ErrMalformedWAV", tt.rate, err)
+			case !tt.wantErr && err != nil:
+				t.Fatalf("rate %d: unexpected error %v", tt.rate, err)
+			case !tt.wantErr && info.rate != int(tt.rate):
+				t.Fatalf("rate %d: info.rate = %d, want %d", tt.rate, info.rate, tt.rate)
+			}
+		})
+	}
+}
