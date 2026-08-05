@@ -34,10 +34,13 @@ const (
 	// wavFormatExtensible is the fmt audioFormat code for WAVE_FORMAT_EXTENSIBLE,
 	// the container some devices use to wrap plain integer PCM behind a
 	// SubFormat GUID instead of declaring audioFormat 1 directly. It is accepted
-	// only when the SubFormat GUID is KSDATAFORMAT_SUBTYPE_PCM and both the
-	// container bits per sample and the valid bits per sample are 16, so this
-	// stays byte-identical 16-bit integer PCM once past the header; every other
+	// only when cbSize is at least 22 (carrying the SubFormat GUID), the
+	// SubFormat GUID is KSDATAFORMAT_SUBTYPE_PCM, and both the container bits
+	// per sample and the valid bits per sample are 16, so this stays
+	// byte-identical 16-bit integer PCM once past the header; every other
 	// EXTENSIBLE subformat (float, A-law, a compressed codec, ...) is rejected.
+	// A chunk smaller than 40 bytes, or whose cbSize overruns the declared
+	// chunk size, is ErrMalformedWAV rather than an unsupported format.
 	wavFormatExtensible = 0xFFFE
 	// wavBitsPerSample is the only sample width this source delivers.
 	wavBitsPerSample = 16
@@ -210,6 +213,15 @@ func readFmtChunk(br *bufio.Reader, size uint32, info *wavInfo) (int64, error) {
 		consumed += int64(len(ext))
 
 		cbSize := binary.LittleEndian.Uint16(ext[0:2])
+
+		// The declared extension (cbSize bytes, starting after the 16-byte base and
+		// the 2-byte cbSize field) must fit within the declared chunk size. A cbSize
+		// that overruns the chunk is a malformed header, not merely an unsupported
+		// one, so it is ErrMalformedWAV like the size < 40 case above.
+		if int64(fmtChunkMinSize)+2+int64(cbSize) > int64(size) {
+			return 0, fmt.Errorf("%w: WAVE_FORMAT_EXTENSIBLE cbSize %d overruns the %d-byte fmt chunk", ErrMalformedWAV, cbSize, size)
+		}
+
 		validBits := binary.LittleEndian.Uint16(ext[2:4])
 		// ext[4:8] is dwChannelMask, not needed to deliver PCM and not validated.
 		var subFormat [16]byte

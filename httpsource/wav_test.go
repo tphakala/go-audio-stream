@@ -223,6 +223,31 @@ func TestParseWAVHeaderExtensiblePCM16(t *testing.T) {
 	}
 }
 
+func TestParseWAVHeaderExtensibleMultichannel(t *testing.T) {
+	// WAVE_FORMAT_EXTENSIBLE PCM16 with a channel count above the mono/stereo
+	// cases already covered must still parse correctly. maxChannels (8) is
+	// used, since it is both within range and the parser's ceiling.
+	const channels = maxChannels
+	payload := []byte("PCMDATA!")
+	fmtBody := extensibleFmtBody(channels, 48000, 16, 16, pcmSubFormatGUID)
+	body := wavWithFmtBody(fmtBody, uint32(len(fmtBody)), payload)
+	br := wavReader(body)
+	info, err := parseWAVHeader(br)
+	if err != nil {
+		t.Fatalf("parseWAVHeader: %v", err)
+	}
+	if info.rate != 48000 || info.channels != channels {
+		t.Fatalf("got rate=%d channels=%d, want 48000/%d", info.rate, info.channels, channels)
+	}
+	got, err := io.ReadAll(br)
+	if err != nil {
+		t.Fatalf("read after header: %v", err)
+	}
+	if !bytes.Equal(got, payload) {
+		t.Fatalf("reader left at %q, want it positioned at %q", got, payload)
+	}
+}
+
 func TestParseWAVHeaderExtensibleTrailingBytesAndPad(t *testing.T) {
 	// A fmt chunk larger than the required 40 bytes (trailing bytes past the
 	// GUID, plus the pad byte an odd declared size requires) must still be
@@ -250,6 +275,24 @@ func TestParseWAVHeaderExtensibleTrailingBytesAndPad(t *testing.T) {
 	}
 }
 
+func TestParseWAVHeaderExtensibleTrailingBytesTruncated(t *testing.T) {
+	// A fmt chunk declaring more than the required 40 bytes (trailing bytes
+	// past the 24-byte extension), whose stream is cut partway through those
+	// trailing bytes, must be a truncation. This exercises the skip(br, extra)
+	// error branch on the extensible path, where consumed is already 40.
+	fmtBody := extensibleFmtBody(1, 8000, 16, 16, pcmSubFormatGUID)
+	fmtBody = append(fmtBody, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF, 0x11, 0x22, 0x33, 0x44) // 10 trailing bytes
+	full := wavWithFmtBody(fmtBody, uint32(len(fmtBody)), []byte("DATAPAYLOAD"))
+	// Cut partway through the 10 trailing bytes: riff header (12) + chunk
+	// header (8) + fmt base (16) + extension (24) + 5 of the 10 trailing bytes.
+	cut := riffHeaderSize + chunkHeaderSize + fmtChunkMinSize + fmtExtensibleExtSize + 5
+	body := full[:cut]
+	_, err := parseWAVHeader(wavReader(body))
+	if !errors.Is(err, ErrMalformedWAV) || !errors.Is(err, io.ErrUnexpectedEOF) {
+		t.Fatalf("parseWAVHeader = %v, want ErrMalformedWAV wrapping io.ErrUnexpectedEOF", err)
+	}
+}
+
 func TestParseWAVHeaderExtensibleRejections(t *testing.T) {
 	cases := []struct {
 		name string
@@ -258,17 +301,17 @@ func TestParseWAVHeaderExtensibleRejections(t *testing.T) {
 	}{
 		{
 			"wrong subformat",
-			wavWithFmtBody(extensibleFmtBody(1, 8000, 16, 16, nonPCMSubFormatGUID), 40, []byte("D")),
+			wavWithFmtBody(extensibleFmtBody(1, 8000, 16, 16, nonPCMSubFormatGUID), fmtExtensibleMinSize, []byte("D")),
 			ErrUnsupportedFormat,
 		},
 		{
 			"valid bits 24",
-			wavWithFmtBody(extensibleFmtBody(1, 8000, 16, 24, pcmSubFormatGUID), 40, []byte("D")),
+			wavWithFmtBody(extensibleFmtBody(1, 8000, 16, 24, pcmSubFormatGUID), fmtExtensibleMinSize, []byte("D")),
 			ErrUnsupportedFormat,
 		},
 		{
 			"container bits 24",
-			wavWithFmtBody(extensibleFmtBody(1, 8000, 24, 16, pcmSubFormatGUID), 40, []byte("D")),
+			wavWithFmtBody(extensibleFmtBody(1, 8000, 24, 16, pcmSubFormatGUID), fmtExtensibleMinSize, []byte("D")),
 			ErrUnsupportedFormat,
 		},
 		{
@@ -278,9 +321,20 @@ func TestParseWAVHeaderExtensibleRejections(t *testing.T) {
 				// Overwrite cbSize (bytes 16:18 of the fmt body) with 16, below the
 				// required 22.
 				binary.LittleEndian.PutUint16(fmtBody[16:18], 16)
-				return wavWithFmtBody(fmtBody, 40, []byte("D"))
+				return wavWithFmtBody(fmtBody, fmtExtensibleMinSize, []byte("D"))
 			}(),
 			ErrUnsupportedFormat,
+		},
+		{
+			"cbSize overruns chunk size",
+			func() []byte {
+				fmtBody := extensibleFmtBody(1, 8000, 16, 16, pcmSubFormatGUID)
+				// Overwrite cbSize (bytes 16:18 of the fmt body) with 100, so
+				// 18+cbSize overruns the declared 40-byte chunk size.
+				binary.LittleEndian.PutUint16(fmtBody[16:18], 100)
+				return wavWithFmtBody(fmtBody, fmtExtensibleMinSize, []byte("D"))
+			}(),
+			ErrMalformedWAV,
 		},
 		{
 			"fmt chunk smaller than 40",
