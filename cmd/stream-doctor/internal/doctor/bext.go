@@ -78,19 +78,43 @@ const (
 // putFixedASCII copies s into dst, truncated to len(dst) if s is longer.
 // dst is a slice of a body already allocated by make, so it starts zeroed;
 // copy alone therefore also NUL-pads any remainder when s is shorter, with
-// no separate zero-fill needed. Every text field in the bext body is ASCII
-// only (a fixed tool name, or digits and hyphens/colons from time.Format),
-// so byte-level truncation never splits a multi-byte character.
+// no separate zero-fill needed.
+//
+// putFixedASCII does not validate its input: it is a plain byte-level copy
+// with no awareness of UTF-8 or multi-byte characters, so a truncation could
+// in principle split one. Every caller in this file passes ASCII text that
+// already fits within the field width (a fixed tool name, or digits and
+// hyphens/colons from time.Format), which is the contract this function
+// relies on rather than one it enforces.
 func putFixedASCII(dst []byte, s string) {
 	copy(dst, s)
 }
+
+// maxBextSampleRate bounds the sample rate timeReferenceSamples will trust.
+// sampleRate traces back to a camera-supplied SDP clock rate, parsed with an
+// unbounded strconv.Atoi elsewhere in this module, so an implausibly large
+// value must not be allowed to reach the float64-to-uint64 conversion below,
+// where it could overflow and corrupt the TimeReference field (the audio
+// bytes themselves are untouched either way). 10 MHz is far above any real
+// audio sample rate, and since seconds-since-midnight is always under 86400,
+// the largest product this bound allows (86400 * 10_000_000) stays well
+// within both a float64's exact-integer range and uint64.
+const maxBextSampleRate = 10_000_000 // 10 MHz, far above any real audio hardware.
 
 // timeReferenceSamples returns the bext TimeReference: the number of audio
 // samples at sampleRate from 00:00:00 UTC on u's calendar date to u itself,
 // rounded to the nearest sample rather than truncated. u must already be in
 // UTC; buildBextBody converts before calling this, so the calendar date used
 // for the midnight anchor agrees with the OriginationDate field it writes.
+//
+// sampleRate is untrusted input (see maxBextSampleRate); an implausible
+// value, zero, or negative yields 0 (TimeReference unavailable) rather than
+// a computed value, while OriginationDate and OriginationTime still
+// populate from senderStart regardless.
 func timeReferenceSamples(u time.Time, sampleRate int) uint64 {
+	if sampleRate <= 0 || sampleRate > maxBextSampleRate {
+		return 0
+	}
 	midnight := time.Date(u.Year(), u.Month(), u.Day(), 0, 0, 0, 0, time.UTC)
 	seconds := u.Sub(midnight).Seconds()
 	samples := math.Round(seconds * float64(sampleRate))
@@ -108,11 +132,15 @@ func timeReferenceSamples(u time.Time, sampleRate int) uint64 {
 // rate, used to compute the TimeReference sample count. senderStart is
 // converted to UTC internally, so callers may pass any location.
 //
-// Every field this doctor cannot measure (OriginatorReference, UMID, the
-// five loudness metrics, Reserved) is left at its zero value, which callers
-// of the bext chunk read as "not present" per the format; only Description,
-// Originator, OriginationDate, OriginationTime, TimeReference, and Version
-// are populated.
+// Description, Originator, OriginationDate, OriginationTime, TimeReference,
+// and Version are populated. Version is deliberately written as 0: EBU Tech
+// 3285 defines that value as a bext chunk carrying none of the version-1
+// (UMID) or version-2 (loudness) fields, which matches this chunk exactly,
+// so 0 is the correct wire value rather than a placeholder. OriginatorReference,
+// UMID, the five loudness metrics, and Reserved are left at their zero value
+// for a different reason: this doctor has no value to put there (no UMID is
+// assigned, no loudness is measured), and a reader interprets that zero
+// value as "not present" per the format.
 func buildBextBody(senderStart time.Time, sampleRate int) []byte {
 	u := senderStart.UTC()
 	body := make([]byte, bextBodySize)
@@ -126,8 +154,10 @@ func buildBextBody(senderStart time.Time, sampleRate int) []byte {
 	binary.LittleEndian.PutUint32(body[bextOffTimeReferenceLow:], uint32(ref))
 	binary.LittleEndian.PutUint32(body[bextOffTimeReferenceHigh:], uint32(ref>>32))
 
-	// Version, UMID, the loudness fields, and Reserved all stay zero: body
-	// was allocated by make above, so no explicit write is needed for them.
+	// Version is deliberately 0 (see the doc comment above); UMID, the
+	// loudness fields, and Reserved are left zero because their true values
+	// are unknown to this doctor. Neither needs an explicit write here: body
+	// was allocated by make above and is already zero throughout.
 
 	return body
 }

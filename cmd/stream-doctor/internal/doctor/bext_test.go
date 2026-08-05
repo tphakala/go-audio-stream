@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -109,18 +110,101 @@ func TestBuildBextBodyTimeReference(t *testing.T) {
 }
 
 // TestBuildBextBodyTimeReferenceFractionalSecond checks a sub-second offset
-// rounds to the nearest sample rather than truncating.
+// rounds to the nearest sample rather than truncating. The nanosecond
+// offset is chosen so the exact sample count (987.654312 at 8kHz) has a
+// genuine fraction: 500ms would give exactly 4000.0 samples, where rounding
+// and truncating agree and the test would not actually distinguish them.
 func TestBuildBextBodyTimeReferenceFractionalSecond(t *testing.T) {
 	t.Parallel()
-	instant := time.Date(2026, 8, 4, 0, 0, 0, 500_000_000, time.UTC)
+	instant := time.Date(2026, 8, 4, 0, 0, 0, 123_456_789, time.UTC)
 	const sampleRate = 8000
 	body := buildBextBody(instant, sampleRate)
 
 	low := binary.LittleEndian.Uint32(body[338:342])
 	high := binary.LittleEndian.Uint32(body[342:346])
 	got := uint64(low) | uint64(high)<<32
-	if got != 4000 {
-		t.Errorf("TimeReference = %d, want 4000 (500ms at 8kHz)", got)
+	// 0.123456789s * 8000Hz = 987.654312 samples, which rounds to 988 and
+	// would truncate to 987; asserting 988 confirms rounding is in effect.
+	if got != 988 {
+		t.Errorf("TimeReference = %d, want 988 (0.123456789s at 8kHz, rounded)", got)
+	}
+}
+
+// TestBuildBextBodyTimeReferenceMidnightExact checks a senderStart at
+// exactly 00:00:00.000 UTC yields TimeReference 0.
+func TestBuildBextBodyTimeReferenceMidnightExact(t *testing.T) {
+	t.Parallel()
+	instant := time.Date(2026, 8, 4, 0, 0, 0, 0, time.UTC)
+	body := buildBextBody(instant, 8000)
+
+	low := binary.LittleEndian.Uint32(body[338:342])
+	high := binary.LittleEndian.Uint32(body[342:346])
+	got := uint64(low) | uint64(high)<<32
+	if got != 0 {
+		t.Errorf("TimeReference = %d, want 0 at exact midnight", got)
+	}
+}
+
+// TestBuildBextBodyCrossesUTCDate checks a senderStart given in a non-UTC
+// zone that rolls to a different UTC calendar date: OriginationDate must be
+// the UTC date, and TimeReference must be the sample count since UTC
+// midnight of that date, not the input zone's midnight. Every other test in
+// this file passes an already-UTC time.Time, so this is the one that
+// actually exercises buildBextBody's u := senderStart.UTC() conversion.
+func TestBuildBextBodyCrossesUTCDate(t *testing.T) {
+	t.Parallel()
+	zone := time.FixedZone("test-5", -5*3600)
+	// 21:00:00 at UTC-5 is 02:00:00 UTC on the next calendar day.
+	instant := time.Date(2026, 8, 4, 21, 0, 0, 0, zone)
+	const sampleRate = 8000
+	body := buildBextBody(instant, sampleRate)
+
+	date := strings.TrimRight(string(body[320:330]), "\x00")
+	if date != "2026-08-05" {
+		t.Errorf("OriginationDate = %q, want %q (the UTC date, not the input zone's)", date, "2026-08-05")
+	}
+	tm := strings.TrimRight(string(body[330:338]), "\x00")
+	if tm != "02:00:00" {
+		t.Errorf("OriginationTime = %q, want %q", tm, "02:00:00")
+	}
+
+	low := binary.LittleEndian.Uint32(body[338:342])
+	high := binary.LittleEndian.Uint32(body[342:346])
+	got := uint64(low) | uint64(high)<<32
+	want := uint64(2 * 3600 * sampleRate) // 2 hours since UTC midnight.
+	if got != want {
+		t.Errorf("TimeReference = %d, want %d (samples since UTC midnight, not the input zone's midnight)", got, want)
+	}
+}
+
+// TestTimeReferenceSamplesBoundsSampleRate asserts an implausibly large
+// sample rate (as could come from an unbounded, camera-supplied SDP clock
+// rate) yields TimeReference 0 rather than an overflowed value, while a
+// normal sample rate is unaffected and OriginationDate/OriginationTime still
+// populate regardless of the sample rate.
+func TestTimeReferenceSamplesBoundsSampleRate(t *testing.T) {
+	t.Parallel()
+	instant := time.Date(2026, 8, 4, 9, 12, 0, 0, time.UTC)
+
+	tooHigh := buildBextBody(instant, maxBextSampleRate+1)
+	low := binary.LittleEndian.Uint32(tooHigh[338:342])
+	high := binary.LittleEndian.Uint32(tooHigh[342:346])
+	got := uint64(low) | uint64(high)<<32
+	if got != 0 {
+		t.Errorf("TimeReference with an out-of-range sample rate = %d, want 0", got)
+	}
+	date := strings.TrimRight(string(tooHigh[320:330]), "\x00")
+	if date != "2026-08-04" {
+		t.Errorf("OriginationDate = %q, want %q even with an out-of-range sample rate", date, "2026-08-04")
+	}
+
+	normal := buildBextBody(instant, 8000)
+	lowN := binary.LittleEndian.Uint32(normal[338:342])
+	highN := binary.LittleEndian.Uint32(normal[342:346])
+	gotN := uint64(lowN) | uint64(highN)<<32
+	wantN := uint64(33120 * 8000) // 9:12:00 UTC is 33120 seconds after midnight.
+	if gotN != wantN {
+		t.Errorf("TimeReference with a normal sample rate = %d, want %d", gotN, wantN)
 	}
 }
 
@@ -209,6 +293,98 @@ func TestSpliceBextRejectsNonRIFF(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestSpliceBextRIFFSizeOverflow constructs a bare RIFF/WAVE header whose
+// ckSize is close enough to math.MaxUint32 that adding the bext chunk's 610
+// bytes would overflow a 32-bit size field, and asserts spliceBext refuses
+// rather than silently wrapping the RIFF size.
+func TestSpliceBextRIFFSizeOverflow(t *testing.T) {
+	t.Parallel()
+	in := make([]byte, 12)
+	copy(in[0:4], riffChunkID)
+	binary.LittleEndian.PutUint32(in[4:8], math.MaxUint32-100) // +610 would overflow past MaxUint32.
+	copy(in[8:12], waveFormType)
+
+	chunk := buildBextChunk(time.Date(2026, 8, 4, 9, 12, 0, 0, time.UTC), 8000)
+	if _, err := spliceBext(in, chunk); err == nil {
+		t.Fatal("spliceBext with an overflow-inducing ckSize returned nil error, want an error")
+	}
+}
+
+// assertNoStrayTemp fails the test if dir contains any bext splice temp file
+// (the ".stream-doctor-bext-*.wav" pattern spliceBextFile creates), so a
+// failed splice is confirmed to have cleaned up after itself rather than
+// leaving an orphaned file behind.
+func assertNoStrayTemp(t *testing.T, dir string) {
+	t.Helper()
+	matches, err := filepath.Glob(filepath.Join(dir, ".stream-doctor-bext-*.wav"))
+	if err != nil {
+		t.Fatalf("Glob: %v", err)
+	}
+	if len(matches) != 0 {
+		t.Errorf("stray bext temp file(s) left behind: %v", matches)
+	}
+}
+
+// TestSpliceBextFileReadError forces os.ReadFile to fail (tmpName does not
+// exist) and asserts spliceBextFile returns a non-nil error and leaves no
+// stray output temp file in dir, the failure runner.listen relies on to
+// trigger its graceful fallback to the plain WAV.
+func TestSpliceBextFileReadError(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	missing := filepath.Join(dir, "does-not-exist.wav")
+
+	if _, err := spliceBextFile(missing, dir, time.Date(2026, 8, 4, 9, 12, 0, 0, time.UTC), 8000); err == nil {
+		t.Fatal("spliceBextFile with a missing tmpName returned nil error, want an error")
+	}
+	assertNoStrayTemp(t, dir)
+}
+
+// TestSpliceBextFileNotRIFF writes non-RIFF bytes to tmpName and asserts
+// spliceBextFile forwards spliceBext's validation error and leaves no stray
+// output temp file.
+func TestSpliceBextFileNotRIFF(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	tmpName := filepath.Join(dir, "not-a-wav.wav")
+	if err := os.WriteFile(tmpName, []byte("not a RIFF stream"), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	if _, err := spliceBextFile(tmpName, dir, time.Date(2026, 8, 4, 9, 12, 0, 0, time.UTC), 8000); err == nil {
+		t.Fatal("spliceBextFile on non-RIFF bytes returned nil error, want an error")
+	}
+	assertNoStrayTemp(t, dir)
+}
+
+// TestSpliceBextFileCreateTempError forces os.CreateTemp to fail by pointing
+// dir at a subdirectory that does not exist, and asserts spliceBextFile
+// returns a non-nil error and leaves no stray output temp file in the
+// directory that does exist.
+func TestSpliceBextFileCreateTempError(t *testing.T) {
+	t.Parallel()
+	parent := t.TempDir()
+	tmpName := filepath.Join(parent, "plain.wav")
+
+	const sampleRate = 8000
+	const channels = 1
+	pcm := int16sToLE([]int16{1, 2, 3})
+	var buf bytes.Buffer
+	cfg := wavpcm.Config{SampleRate: sampleRate, BitDepth: 16, Channels: channels, Format: wav.SampleFormatPCM}
+	if err := wavpcm.EncodeInterleaved(&buf, cfg, pcm); err != nil {
+		t.Fatalf("EncodeInterleaved: %v", err)
+	}
+	if err := os.WriteFile(tmpName, buf.Bytes(), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	missingDir := filepath.Join(parent, "no-such-subdir")
+	if _, err := spliceBextFile(tmpName, missingDir, time.Date(2026, 8, 4, 9, 12, 0, 0, time.UTC), sampleRate); err == nil {
+		t.Fatal("spliceBextFile with a non-existent dir returned nil error, want an error")
+	}
+	assertNoStrayTemp(t, parent)
 }
 
 // TestRunListenSpliceBextWithValidSenderClock drives Run end to end with a

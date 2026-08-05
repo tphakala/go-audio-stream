@@ -384,10 +384,16 @@ func (r *runner) listen() {
 		}
 		if finalName != tmpName {
 			// The spliced copy was renamed into place; the plain WAV it was
-			// built from is now redundant.
+			// built from is now redundant. The bext chunk was actually
+			// embedded in the delivered file, so the report may claim the
+			// sender-clock start too. When the splice failed instead,
+			// finalName stayed tmpName and this block never runs, so
+			// res.SenderStart is left at its zero value: the report omits
+			// the line exactly as if the sender clock had been invalid,
+			// matching what was actually written to disk.
 			_ = os.Remove(tmpName)
+			res.SenderStart = senderStart
 		}
-		res.SenderStart = senderStart
 		r.report.Listen = res
 	}
 }
