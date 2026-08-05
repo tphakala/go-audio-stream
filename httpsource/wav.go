@@ -65,6 +65,15 @@ const (
 	// wavMaxPreData bounds the bytes a header may consume before the data chunk,
 	// so a hostile stream of junk chunks cannot make the parser read forever.
 	wavMaxPreData = 1 << 20
+
+	// wavMaxSampleRate bounds the sample rate this parser trusts, mirroring
+	// go-wav's riff.MaxSampleRate. It is math.MaxInt32: a rate above it narrows
+	// to a negative int on a 32-bit build (where int is 32-bit) and would flow
+	// into buffer-sizing and resample math as a negative length, so it is
+	// refused as malformed rather than passed on. On a 64-bit build the
+	// narrowing is lossless, but the bound is applied on every build for one
+	// portable definition of a valid rate.
+	wavMaxSampleRate uint32 = 1<<31 - 1
 )
 
 // pcmSubFormatGUID is KSDATAFORMAT_SUBTYPE_PCM, the SubFormat GUID a
@@ -134,7 +143,7 @@ func parseWAVHeader(br *bufio.Reader) (wavInfo, error) {
 
 		switch id {
 		case fmtChunkID:
-			read, ferr := readFmtChunk(br, size, &info)
+			read, ferr := readFmtChunk(br, size, consumed, &info)
 			if ferr != nil {
 				return wavInfo{}, ferr
 			}
@@ -183,7 +192,11 @@ func parseWAVHeader(br *bufio.Reader) (wavInfo, error) {
 // chunk that fails that gate, is ErrUnsupportedFormat; a fmt chunk too small
 // for the format it declares, or a WAVE_FORMAT_EXTENSIBLE cbSize that overruns
 // the chunk, is ErrMalformedWAV.
-func readFmtChunk(br *bufio.Reader, size uint32, info *wavInfo) (int64, error) {
+//
+// outerConsumed is the pre-data byte total parseWAVHeader has already spent (the
+// RIFF header and every chunk before this fmt), so the trailing-skip budget below
+// is enforced against the whole header rather than this chunk alone.
+func readFmtChunk(br *bufio.Reader, size uint32, outerConsumed int64, info *wavInfo) (int64, error) {
 	if size < fmtChunkMinSize {
 		return 0, fmt.Errorf("%w: fmt chunk is %d bytes, need at least %d", ErrMalformedWAV, size, fmtChunkMinSize)
 	}
@@ -248,6 +261,9 @@ func readFmtChunk(br *bufio.Reader, size uint32, info *wavInfo) (int64, error) {
 	if sampleRate < 1 {
 		return 0, fmt.Errorf("%w: WAV sample rate is zero", ErrMalformedWAV)
 	}
+	if sampleRate > wavMaxSampleRate {
+		return 0, fmt.Errorf("%w: WAV sample rate %d exceeds the maximum %d", ErrMalformedWAV, sampleRate, wavMaxSampleRate)
+	}
 	info.rate = int(sampleRate)
 	info.channels = int(channels)
 
@@ -256,7 +272,11 @@ func readFmtChunk(br *bufio.Reader, size uint32, info *wavInfo) (int64, error) {
 	// WAVE_FORMAT_EXTENSIBLE SubFormat GUID) is skipped along with the pad byte
 	// that word-aligns an odd chunk size.
 	if extra := chunkPaddedSize(size) - consumed; extra > 0 {
-		if consumed+extra > wavMaxPreData {
+		// Measure the trailing skip against the whole header, not just the bytes
+		// this fmt chunk has consumed, so the pre-data budget stays a global
+		// ceiling: outerConsumed already counts the RIFF header and every prior
+		// chunk, and consumed counts this fmt chunk's body read so far.
+		if outerConsumed+consumed+extra > wavMaxPreData {
 			return 0, errWAVHeaderTooLarge()
 		}
 		if err := skip(br, extra); err != nil {
