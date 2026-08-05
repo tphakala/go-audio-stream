@@ -8,8 +8,10 @@ import (
 	"io"
 )
 
-// WAV RIFF constants. Only 16-bit integer PCM is accepted; every other shape is
-// rejected rather than delivered.
+// WAV RIFF constants. Only 16-bit integer PCM is accepted, whether declared as
+// classic PCM (audioFormat 1) or wrapped in a WAVE_FORMAT_EXTENSIBLE fmt chunk
+// carrying the PCM SubFormat GUID; every other shape is rejected rather than
+// delivered.
 const (
 	riffMagic   = "RIFF"
 	waveMagic   = "WAVE"
@@ -29,8 +31,29 @@ const (
 
 	// wavFormatPCM is the fmt audioFormat code for integer PCM.
 	wavFormatPCM = 1
+	// wavFormatExtensible is the fmt audioFormat code for WAVE_FORMAT_EXTENSIBLE,
+	// the container some devices use to wrap plain integer PCM behind a
+	// SubFormat GUID instead of declaring audioFormat 1 directly. It is accepted
+	// only when the SubFormat GUID is KSDATAFORMAT_SUBTYPE_PCM and both the
+	// container bits per sample and the valid bits per sample are 16, so this
+	// stays byte-identical 16-bit integer PCM once past the header; every other
+	// EXTENSIBLE subformat (float, A-law, a compressed codec, ...) is rejected.
+	wavFormatExtensible = 0xFFFE
 	// wavBitsPerSample is the only sample width this source delivers.
 	wavBitsPerSample = 16
+
+	// fmtExtensibleMinSize is the WAVE_FORMAT_EXTENSIBLE fmt body this parser
+	// requires: the 16-byte base plus the 24-byte extension (cbSize, the valid
+	// bits per sample, the channel mask, and the 16-byte SubFormat GUID).
+	fmtExtensibleMinSize = 40
+	// fmtExtensibleExtSize is that 24-byte extension on its own, the part read
+	// after the 16-byte base.
+	fmtExtensibleExtSize = fmtExtensibleMinSize - fmtChunkMinSize
+	// fmtExtensibleCbSize is the extension size (cbSize) a WAVE_FORMAT_EXTENSIBLE
+	// fmt chunk must declare: wValidBitsPerSample(2) + dwChannelMask(4) +
+	// SubFormat GUID(16) = 22 bytes. A smaller cbSize means the chunk does not
+	// self-describe as carrying the fields this parser needs to validate.
+	fmtExtensibleCbSize = 22
 
 	// wavUnbounded is the data-chunk size a progressive streamer writes when the
 	// total length is unknown ahead of time; 0 is treated the same way.
@@ -40,6 +63,18 @@ const (
 	// so a hostile stream of junk chunks cannot make the parser read forever.
 	wavMaxPreData = 1 << 20
 )
+
+// pcmSubFormatGUID is KSDATAFORMAT_SUBTYPE_PCM, the SubFormat GUID a
+// WAVE_FORMAT_EXTENSIBLE fmt chunk must carry for this parser to treat the
+// stream as plain integer PCM rather than rejecting it. On the wire a GUID is
+// data1 (uint32 little-endian), data2 (uint16 little-endian), data3 (uint16
+// little-endian), then the 8 remaining bytes (data4) verbatim, so this is not
+// a left-to-right copy of the canonical 00000001-0000-0010-8000-00aa00389b71
+// text form.
+var pcmSubFormatGUID = [16]byte{
+	0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10, 0x00,
+	0x80, 0x00, 0x00, 0xAA, 0x00, 0x38, 0x9B, 0x71,
+}
 
 // wavInfo is the geometry parseWAVHeader resolves from a WAV stream. dataSize
 // is meaningful only when bounded; an unbounded data chunk streams until EOF.
@@ -53,7 +88,9 @@ type wavInfo struct {
 // parseWAVHeader reads the RIFF header and chunk sequence from br, stopping at
 // the data chunk with br positioned at the first PCM byte. It requires a
 // RIFF/WAVE container carrying a 16-bit integer PCM fmt chunk before the data
-// chunk. Unknown chunks (LIST, JUNK, fact, ...) are skipped, including the pad
+// chunk, either classic PCM (audioFormat 1) or an accepted
+// WAVE_FORMAT_EXTENSIBLE PCM16 chunk; see readFmtChunk for the acceptance
+// rule. Unknown chunks (LIST, JUNK, fact, ...) are skipped, including the pad
 // byte after an odd size. RF64 and BW64 (64-bit RIFF) are reported as
 // unsupported; any other structural fault, including a truncation, is
 // ErrMalformedWAV.
@@ -125,11 +162,23 @@ func parseWAVHeader(br *bufio.Reader) (wavInfo, error) {
 	}
 }
 
-// readFmtChunk reads and validates a PCM fmt chunk of declared size, skipping
-// any extension bytes and the pad byte after an odd size, and records the rate
-// and channels into info. It returns the total bytes consumed (the 16-byte body
-// plus any extension and pad) so the caller can charge them against the
-// pre-data budget.
+// readFmtChunk reads and validates a fmt chunk of declared size, skipping any
+// extension bytes and the pad byte after an odd size, and records the rate and
+// channels into info. It returns the total bytes consumed (the 16-byte base,
+// plus a WAVE_FORMAT_EXTENSIBLE extension when present, plus any further
+// trailing bytes and pad) so the caller can charge them against the pre-data
+// budget.
+//
+// Two audioFormat values are accepted, both requiring 16-bit integer PCM: 1
+// (classic PCM, the bitsPerSample field is authoritative) and 0xFFFE
+// (WAVE_FORMAT_EXTENSIBLE, accepted only when the fmt chunk is at least 40
+// bytes, cbSize is at least 22, the SubFormat GUID is
+// KSDATAFORMAT_SUBTYPE_PCM, and both the container and valid bits per sample
+// are 16). This keeps the "16-bit integer PCM only" contract intact: an
+// EXTENSIBLE chunk is accepted only when it is, byte for byte, the same PCM16
+// this parser already delivers. Every other audioFormat, and an EXTENSIBLE
+// chunk that fails that gate, is ErrUnsupportedFormat; a fmt chunk too small
+// for the format it declares is ErrMalformedWAV.
 func readFmtChunk(br *bufio.Reader, size uint32, info *wavInfo) (int64, error) {
 	if size < fmtChunkMinSize {
 		return 0, fmt.Errorf("%w: fmt chunk is %d bytes, need at least %d", ErrMalformedWAV, size, fmtChunkMinSize)
@@ -138,17 +187,48 @@ func readFmtChunk(br *bufio.Reader, size uint32, info *wavInfo) (int64, error) {
 	if _, err := io.ReadFull(br, body[:]); err != nil {
 		return 0, malformedWAV(err)
 	}
+	consumed := int64(fmtChunkMinSize)
+
 	audioFormat := binary.LittleEndian.Uint16(body[0:2])
 	channels := binary.LittleEndian.Uint16(body[2:4])
 	sampleRate := binary.LittleEndian.Uint32(body[4:8])
 	bits := binary.LittleEndian.Uint16(body[14:16])
 
-	if audioFormat != wavFormatPCM {
+	switch audioFormat {
+	case wavFormatPCM:
+		if bits != wavBitsPerSample {
+			return 0, fmt.Errorf("%w: WAV sample width %d bits is not 16", ErrUnsupportedFormat, bits)
+		}
+	case wavFormatExtensible:
+		if size < fmtExtensibleMinSize {
+			return 0, fmt.Errorf("%w: WAVE_FORMAT_EXTENSIBLE fmt chunk is %d bytes, need at least %d", ErrMalformedWAV, size, fmtExtensibleMinSize)
+		}
+		var ext [fmtExtensibleExtSize]byte
+		if _, err := io.ReadFull(br, ext[:]); err != nil {
+			return 0, malformedWAV(err)
+		}
+		consumed += int64(len(ext))
+
+		cbSize := binary.LittleEndian.Uint16(ext[0:2])
+		validBits := binary.LittleEndian.Uint16(ext[2:4])
+		// ext[4:8] is dwChannelMask, not needed to deliver PCM and not validated.
+		var subFormat [16]byte
+		copy(subFormat[:], ext[8:24])
+
+		switch {
+		case cbSize < fmtExtensibleCbSize:
+			return 0, fmt.Errorf("%w: WAVE_FORMAT_EXTENSIBLE cbSize %d is smaller than %d", ErrUnsupportedFormat, cbSize, fmtExtensibleCbSize)
+		case bits != wavBitsPerSample:
+			return 0, fmt.Errorf("%w: WAV sample width %d bits is not 16", ErrUnsupportedFormat, bits)
+		case validBits != wavBitsPerSample:
+			return 0, fmt.Errorf("%w: WAVE_FORMAT_EXTENSIBLE valid bits per sample %d is not 16", ErrUnsupportedFormat, validBits)
+		case subFormat != pcmSubFormatGUID:
+			return 0, fmt.Errorf("%w: WAVE_FORMAT_EXTENSIBLE SubFormat is not KSDATAFORMAT_SUBTYPE_PCM", ErrUnsupportedFormat)
+		}
+	default:
 		return 0, fmt.Errorf("%w: WAV audio format %d is not integer PCM", ErrUnsupportedFormat, audioFormat)
 	}
-	if bits != wavBitsPerSample {
-		return 0, fmt.Errorf("%w: WAV sample width %d bits is not 16", ErrUnsupportedFormat, bits)
-	}
+
 	if channels < 1 || channels > maxChannels {
 		return 0, fmt.Errorf("%w: WAV channel count %d out of range", ErrUnsupportedFormat, channels)
 	}
@@ -158,11 +238,11 @@ func readFmtChunk(br *bufio.Reader, size uint32, info *wavInfo) (int64, error) {
 	info.rate = int(sampleRate)
 	info.channels = int(channels)
 
-	consumed := int64(fmtChunkMinSize)
-	// A fmt chunk larger than 16 bytes carries an extension (WAVE_FORMAT_EX or
-	// EXTENSIBLE fields) this integer-PCM parser does not need; skip it and the
-	// pad byte that word-aligns an odd chunk.
-	if extra := chunkPaddedSize(size) - fmtChunkMinSize; extra > 0 {
+	// Any fmt chunk larger than what this parser required to read (a
+	// classic-PCM extension it does not need, or bytes trailing a
+	// WAVE_FORMAT_EXTENSIBLE SubFormat GUID) is skipped along with the pad byte
+	// that word-aligns an odd chunk size.
+	if extra := chunkPaddedSize(size) - consumed; extra > 0 {
 		if consumed+extra > wavMaxPreData {
 			return 0, errWAVHeaderTooLarge()
 		}

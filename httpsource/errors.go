@@ -36,8 +36,10 @@ var (
 	ErrBadStatus = errors.New("httpsource: non-success response status")
 	// ErrUnsupportedFormat reports a response this source will not decode: a
 	// Content-Type it does not carry (audio/mpeg, audio/aac, audio/ogg and the
-	// rest), a WAV audio format other than 16-bit integer PCM, or an RF64/BW64
-	// container. It fails Open fast rather than delivering garbage.
+	// rest), a WAV audio format other than 16-bit integer PCM (including a
+	// WAVE_FORMAT_EXTENSIBLE chunk whose SubFormat is not PCM or whose valid or
+	// container bits per sample is not 16), or an RF64/BW64 container. It fails
+	// Open fast rather than delivering garbage.
 	ErrUnsupportedFormat = errors.New("httpsource: unsupported media format")
 	// ErrFormatUnknown reports raw audio whose sample rate and channel count
 	// could not be resolved from the Content-Type parameters or Config.Format,

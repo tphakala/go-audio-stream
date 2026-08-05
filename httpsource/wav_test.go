@@ -3,6 +3,7 @@ package httpsource
 import (
 	"bufio"
 	"bytes"
+	"encoding/binary"
 	"errors"
 	"io"
 	"testing"
@@ -11,6 +12,55 @@ import (
 // wavReader wraps body in the same buffered reader the client uses.
 func wavReader(body []byte) *bufio.Reader {
 	return bufio.NewReaderSize(bytes.NewReader(body), readBufSize)
+}
+
+// nonPCMSubFormatGUID is KSDATAFORMAT_SUBTYPE_IEEE_FLOAT, used to exercise
+// the "wrong SubFormat" rejection path. It differs from pcmSubFormatGUID only
+// in the first byte of data1.
+var nonPCMSubFormatGUID = [16]byte{
+	0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10, 0x00,
+	0x80, 0x00, 0x00, 0xAA, 0x00, 0x38, 0x9B, 0x71,
+}
+
+// extensibleFmtBody returns the audioFormat-through-SubFormat bytes of a
+// WAVE_FORMAT_EXTENSIBLE fmt chunk (40 bytes: the 16-byte base plus the
+// cbSize, valid bits per sample, channel mask, and SubFormat GUID
+// extension), so a test can wrap it with a declared chunk size that lies
+// about the true length, truncate it mid-stream, or append trailing bytes
+// past the GUID.
+func extensibleFmtBody(channels uint16, rate uint32, bits, validBits uint16, subFormat [16]byte) []byte {
+	b := le16(nil, wavFormatExtensible)
+	b = le16(b, channels)
+	b = le32(b, rate)
+	b = le32(b, rate*uint32(channels)*uint32(bits/8))
+	b = le16(b, channels*bits/8)
+	b = le16(b, bits)
+	b = le16(b, fmtExtensibleCbSize)
+	b = le16(b, validBits)
+	b = le32(b, 0) // dwChannelMask, ignored by this parser
+	b = append(b, subFormat[:]...)
+	return b
+}
+
+// wavWithFmtBody assembles a RIFF/WAVE stream from a raw fmt chunk body, an
+// explicit declared fmt chunk size, and a data payload. declaredFmtSize must
+// equal len(fmtBody) for a well-formed stream; the pad byte after an odd size
+// is added automatically. The unbounded data size (0xFFFFFFFF) is used so
+// callers need not compute a length.
+func wavWithFmtBody(fmtBody []byte, declaredFmtSize uint32, payload []byte) []byte {
+	b := []byte(riffMagic)
+	b = le32(b, 0xFFFFFFFF)
+	b = append(b, waveMagic...)
+	b = append(b, fmtChunkID...)
+	b = le32(b, declaredFmtSize)
+	b = append(b, fmtBody...)
+	if declaredFmtSize%2 == 1 {
+		b = append(b, 0x00)
+	}
+	b = append(b, dataChunkID...)
+	b = le32(b, 0xFFFFFFFF)
+	b = append(b, payload...)
+	return b
 }
 
 func TestParseWAVHeaderHappy(t *testing.T) {
@@ -133,6 +183,135 @@ func TestParseWAVHeaderFmtExtension(t *testing.T) {
 	}
 	if info.rate != 8000 || info.channels != 1 {
 		t.Fatalf("got %+v, want rate 8000 channels 1", info)
+	}
+}
+
+func TestParseWAVHeaderExtensiblePCM16(t *testing.T) {
+	// WAVE_FORMAT_EXTENSIBLE wrapping plain PCM16 with the KSDATAFORMAT_SUBTYPE_PCM
+	// SubFormat GUID must parse exactly like classic PCM: same rate, same
+	// channels, reader left at the first data byte.
+	cases := []struct {
+		name         string
+		channels     uint16
+		rate         uint32
+		wantChannels int
+	}{
+		{"mono", 1, 48000, 1},
+		{"stereo", 2, 44100, 2},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			payload := []byte("PCMDATA!")
+			fmtBody := extensibleFmtBody(tc.channels, tc.rate, 16, 16, pcmSubFormatGUID)
+			body := wavWithFmtBody(fmtBody, uint32(len(fmtBody)), payload)
+			br := wavReader(body)
+			info, err := parseWAVHeader(br)
+			if err != nil {
+				t.Fatalf("parseWAVHeader: %v", err)
+			}
+			if info.rate != int(tc.rate) || info.channels != tc.wantChannels {
+				t.Fatalf("got rate=%d channels=%d, want %d/%d", info.rate, info.channels, tc.rate, tc.wantChannels)
+			}
+			got, err := io.ReadAll(br)
+			if err != nil {
+				t.Fatalf("read after header: %v", err)
+			}
+			if !bytes.Equal(got, payload) {
+				t.Fatalf("reader left at %q, want it positioned at %q", got, payload)
+			}
+		})
+	}
+}
+
+func TestParseWAVHeaderExtensibleTrailingBytesAndPad(t *testing.T) {
+	// A fmt chunk larger than the required 40 bytes (trailing bytes past the
+	// GUID, plus the pad byte an odd declared size requires) must still be
+	// accepted, with the trailing bytes and pad skipped so the data chunk that
+	// follows is found correctly.
+	fmtBody := extensibleFmtBody(2, 44100, 16, 16, pcmSubFormatGUID)
+	fmtBody = append(fmtBody, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE) // 5 trailing bytes, odd total
+	payload := []byte("TAIL")
+	body := wavWithFmtBody(fmtBody, uint32(len(fmtBody)), payload)
+
+	br := wavReader(body)
+	info, err := parseWAVHeader(br)
+	if err != nil {
+		t.Fatalf("parseWAVHeader: %v", err)
+	}
+	if info.rate != 44100 || info.channels != 2 {
+		t.Fatalf("got %+v, want rate 44100 channels 2", info)
+	}
+	got, err := io.ReadAll(br)
+	if err != nil {
+		t.Fatalf("read after header: %v", err)
+	}
+	if !bytes.Equal(got, payload) {
+		t.Fatalf("reader left at %q, want it positioned at %q", got, payload)
+	}
+}
+
+func TestParseWAVHeaderExtensibleRejections(t *testing.T) {
+	cases := []struct {
+		name string
+		body []byte
+		want error
+	}{
+		{
+			"wrong subformat",
+			wavWithFmtBody(extensibleFmtBody(1, 8000, 16, 16, nonPCMSubFormatGUID), 40, []byte("D")),
+			ErrUnsupportedFormat,
+		},
+		{
+			"valid bits 24",
+			wavWithFmtBody(extensibleFmtBody(1, 8000, 16, 24, pcmSubFormatGUID), 40, []byte("D")),
+			ErrUnsupportedFormat,
+		},
+		{
+			"container bits 24",
+			wavWithFmtBody(extensibleFmtBody(1, 8000, 24, 16, pcmSubFormatGUID), 40, []byte("D")),
+			ErrUnsupportedFormat,
+		},
+		{
+			"cbSize too small",
+			func() []byte {
+				fmtBody := extensibleFmtBody(1, 8000, 16, 16, pcmSubFormatGUID)
+				// Overwrite cbSize (bytes 16:18 of the fmt body) with 16, below the
+				// required 22.
+				binary.LittleEndian.PutUint16(fmtBody[16:18], 16)
+				return wavWithFmtBody(fmtBody, 40, []byte("D"))
+			}(),
+			ErrUnsupportedFormat,
+		},
+		{
+			"fmt chunk smaller than 40",
+			wavWithFmtBody(extensibleFmtBody(1, 8000, 16, 16, pcmSubFormatGUID)[:20], 20, []byte("D")),
+			ErrMalformedWAV,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := parseWAVHeader(wavReader(tc.body)); !errors.Is(err, tc.want) {
+				t.Fatalf("parseWAVHeader = %v, want %v", err, tc.want)
+			}
+		})
+	}
+}
+
+func TestParseWAVHeaderExtensibleTruncatedExtension(t *testing.T) {
+	// A fmt chunk that declares the full 40-byte EXTENSIBLE size but whose
+	// stream ends partway through the 24-byte extension is a truncation, not a
+	// format rejection: it must map to ErrMalformedWAV wrapping
+	// io.ErrUnexpectedEOF, matching every other short-read case.
+	fmtBody := extensibleFmtBody(1, 8000, 16, 16, pcmSubFormatGUID)
+	full := wavWithFmtBody(fmtBody, uint32(len(fmtBody)), []byte("DATAPAYLOAD"))
+	// Cut partway through the 24-byte extension: 12 bytes base RIFF+fmt header
+	// (RIFF+size+WAVE+fmt +size = 12+8=20) plus the 16-byte base plus 10 of the
+	// 24 extension bytes.
+	cut := riffHeaderSize + chunkHeaderSize + fmtChunkMinSize + 10
+	body := full[:cut]
+	_, err := parseWAVHeader(wavReader(body))
+	if !errors.Is(err, ErrMalformedWAV) || !errors.Is(err, io.ErrUnexpectedEOF) {
+		t.Fatalf("parseWAVHeader = %v, want ErrMalformedWAV wrapping io.ErrUnexpectedEOF", err)
 	}
 }
 

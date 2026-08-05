@@ -10,7 +10,12 @@
 // a body sniffed to begin with a RIFF/WAVE signature) is parsed by a minimal
 // streaming RIFF parser that requires 16-bit integer PCM; its fmt chunk is
 // authoritative for the rate and channel count, and a bounded data chunk ends
-// the stream when its declared bytes are consumed. A raw response (audio/L16,
+// the stream when its declared bytes are consumed. The fmt chunk may declare
+// classic PCM (audioFormat 1) or WAVE_FORMAT_EXTENSIBLE, accepted only when its
+// SubFormat GUID is KSDATAFORMAT_SUBTYPE_PCM and both the container and valid
+// bits per sample are 16, so an EXTENSIBLE chunk is admitted only when it is
+// byte-identical 16-bit integer PCM; every other EXTENSIBLE subformat is
+// rejected the same as any other non-PCM audioFormat. A raw response (audio/L16,
 // or an unlabeled application/octet-stream or audio/pcm) carries no header, so
 // its shape comes from the Content-Type parameters and Config.Format. Raw PCM
 // defaults to little-endian and is delivered verbatim. RFC 3551 defines
