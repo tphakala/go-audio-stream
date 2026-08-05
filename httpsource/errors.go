@@ -49,8 +49,9 @@ var (
 	ErrFormatUnknown = errors.New("httpsource: audio format could not be determined")
 	// ErrMalformedWAV reports a WAV stream whose RIFF structure could not be
 	// parsed: a missing RIFF/WAVE signature, a data chunk before fmt, a fmt
-	// chunk that is too small, a header that exceeds the pre-data budget, or a
-	// truncation (which wraps io.ErrUnexpectedEOF).
+	// chunk that is too small or whose WAVE_FORMAT_EXTENSIBLE cbSize overruns
+	// the chunk, a header that exceeds the pre-data budget, or a truncation
+	// (which wraps io.ErrUnexpectedEOF).
 	ErrMalformedWAV = errors.New("httpsource: malformed WAV stream")
 	// ErrInsecureAuth reports that Open refused to send Basic credentials over a
 	// plaintext http connection. Credentials on a plaintext connection travel in

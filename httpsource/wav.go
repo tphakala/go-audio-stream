@@ -181,7 +181,8 @@ func parseWAVHeader(br *bufio.Reader) (wavInfo, error) {
 // EXTENSIBLE chunk is accepted only when it is, byte for byte, the same PCM16
 // this parser already delivers. Every other audioFormat, and an EXTENSIBLE
 // chunk that fails that gate, is ErrUnsupportedFormat; a fmt chunk too small
-// for the format it declares is ErrMalformedWAV.
+// for the format it declares, or a WAVE_FORMAT_EXTENSIBLE cbSize that overruns
+// the chunk, is ErrMalformedWAV.
 func readFmtChunk(br *bufio.Reader, size uint32, info *wavInfo) (int64, error) {
 	if size < fmtChunkMinSize {
 		return 0, fmt.Errorf("%w: fmt chunk is %d bytes, need at least %d", ErrMalformedWAV, size, fmtChunkMinSize)
