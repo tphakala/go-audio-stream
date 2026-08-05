@@ -327,7 +327,19 @@ func (r *runner) listen() {
 	}
 	tmpName := tmp.Name()
 
-	res, werr := writeWAV(tmp, r.audio, r.frames)
+	// Anchor the written WAV to absolute time when the sender clock is valid:
+	// the first captured frame's RTP timestamp extrapolates to the sender's
+	// wall clock. Computed before the encode below, since go-wav writes the
+	// bext chunk inline from senderStart via Config.Bext (see buildBext in
+	// bext.go); HTTP sources and cameras that send no Sender Reports leave
+	// senderStart at its zero value and the WAV stays plain RIFF/WAVE, with no
+	// bext chunk.
+	var senderStart time.Time
+	if sc := r.report.Capture.SenderClock; sc.Valid && len(r.frames) > 0 {
+		senderStart = sc.WallClock(r.frames[0].RTPTime)
+	}
+
+	res, werr := writeWAV(tmp, r.audio, r.frames, senderStart)
 	// A flush failure surfaces only at Close, so fold it into the write error
 	// rather than deferring and discarding it.
 	if closeErr := tmp.Close(); werr == nil {
@@ -344,55 +356,18 @@ func (r *runner) listen() {
 		_ = os.Remove(tmpName)
 		r.report.Listen = res
 	default:
-		// Anchor the written WAV to absolute time when the sender clock is
-		// valid: the first captured frame's RTP timestamp extrapolates to the
-		// sender's wall clock. Computed before the rename below, since a
-		// valid, non-zero senderStart also drives the bext splice that
-		// follows; HTTP sources and cameras that send no Sender Reports
-		// leave senderStart at its zero value and the WAV stays plain
-		// RIFF/WAVE, unchanged from before this chunk existed.
-		var senderStart time.Time
-		if sc := r.report.Capture.SenderClock; sc.Valid && len(r.frames) > 0 {
-			senderStart = sc.WallClock(r.frames[0].RTPTime)
-		}
-
-		// finalName is the file renamed into place: the plain WAV go-wav
-		// wrote at tmpName, or, when senderStart is known, a second temp
-		// file holding tmpName's bytes with a BWF bext chunk spliced in
-		// (go-wav's encoder cannot write bext itself; see bext.go). A
-		// splice failure is a graceful fallback, never a lost capture:
-		// finalName simply stays tmpName and the WAV is written without the
-		// chunk, exactly as if the sender clock had been invalid.
-		finalName := tmpName
-		if !senderStart.IsZero() {
-			if splicedName, spliceErr := spliceBextFile(tmpName, dir, senderStart, res.SampleRate); spliceErr == nil {
-				finalName = splicedName
-			}
-		}
-
-		if renameErr := os.Rename(finalName, r.opts.WAVPath); renameErr != nil {
+		// writeWAV already embedded the bext chunk inline when senderStart was
+		// known and set res.SenderStart to match, so all that remains is to
+		// rename the finished WAV into place. A rename failure is the only way
+		// to fail here.
+		if renameErr := os.Rename(tmpName, r.opts.WAVPath); renameErr != nil {
 			// os.Rename returns an *os.LinkError carrying both the temp and the
 			// destination paths, which sanitizeWriteErr (a *os.PathError
 			// stripper) would not scrub; the report never shows a path, so use
 			// a generic reason as the CreateTemp branch above does.
-			_ = os.Remove(finalName)
-			if finalName != tmpName {
-				_ = os.Remove(tmpName)
-			}
+			_ = os.Remove(tmpName)
 			r.report.Listen = ListenResult{Skipped: true, SkipReason: "could not finalize the WAV output file"}
 			return
-		}
-		if finalName != tmpName {
-			// The spliced copy was renamed into place; the plain WAV it was
-			// built from is now redundant. The bext chunk was actually
-			// embedded in the delivered file, so the report may claim the
-			// sender-clock start too. When the splice failed instead,
-			// finalName stayed tmpName and this block never runs, so
-			// res.SenderStart is left at its zero value: the report omits
-			// the line exactly as if the sender clock had been invalid,
-			// matching what was actually written to disk.
-			_ = os.Remove(tmpName)
-			res.SenderStart = senderStart
 		}
 		r.report.Listen = res
 	}

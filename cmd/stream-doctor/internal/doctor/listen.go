@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"math"
+	"time"
 
 	aacpcm "github.com/tphakala/go-aac/pcm"
 	"github.com/tphakala/go-opus/opus"
@@ -36,14 +37,14 @@ const opusMaxFrameSamples = 5760
 // captured stream must never crash the tool. A non-nil error means the
 // WAV output itself could not be produced, for example a write failure on
 // w.
-func writeWAV(w io.Writer, track rtsp.Track, frames []CapturedFrame) (ListenResult, error) {
+func writeWAV(w io.Writer, track rtsp.Track, frames []CapturedFrame, senderStart time.Time) (ListenResult, error) {
 	switch track.Codec.(type) {
 	case audiostream.CodecG711, audiostream.CodecL16:
-		return writeWAVPCM(w, track, frames)
+		return writeWAVPCM(w, track, frames, senderStart)
 	case audiostream.CodecOpus:
-		return writeWAVOpus(w, track, frames)
+		return writeWAVOpus(w, track, frames, senderStart)
 	case audiostream.CodecAAC:
-		return writeWAVAAC(w, track, frames)
+		return writeWAVAAC(w, track, frames, senderStart)
 	default:
 		return ListenResult{Skipped: true, SkipReason: unsupportedListenReason}, nil
 	}
@@ -54,7 +55,7 @@ func writeWAV(w io.Writer, track rtsp.Track, frames []CapturedFrame) (ListenResu
 // (Frame.Data is byte-swapped to little-endian on arrival), and writes it
 // once with go-wav. Both codecs hand the doctor PCM in the same shape, so
 // they share this one codec-agnostic pass-through path.
-func writeWAVPCM(w io.Writer, track rtsp.Track, frames []CapturedFrame) (ListenResult, error) {
+func writeWAVPCM(w io.Writer, track rtsp.Track, frames []CapturedFrame, senderStart time.Time) (ListenResult, error) {
 	channels := max(track.Channels, 1)
 
 	total := 0
@@ -66,16 +67,17 @@ func writeWAVPCM(w io.Writer, track rtsp.Track, frames []CapturedFrame) (ListenR
 		pcm = append(pcm, frames[i].Data...)
 	}
 
-	cfg := wavpcm.Config{SampleRate: track.ClockRate, BitDepth: 16, Channels: channels, Format: wav.SampleFormatPCM}
+	cfg := wavpcm.Config{SampleRate: track.ClockRate, BitDepth: 16, Channels: channels, Format: wav.SampleFormatPCM, Bext: buildBext(senderStart, track.ClockRate)}
 	if err := wavpcm.EncodeInterleaved(w, cfg, pcm); err != nil {
 		return ListenResult{}, err
 	}
 
 	return ListenResult{
-		Written:    true,
-		SampleRate: track.ClockRate,
-		Channels:   channels,
-		Frames:     len(pcm) / 2 / channels,
+		Written:     true,
+		SampleRate:  track.ClockRate,
+		Channels:    channels,
+		Frames:      len(pcm) / 2 / channels,
+		SenderStart: senderStart,
 	}, nil
 }
 
@@ -86,7 +88,7 @@ func writeWAVPCM(w io.Writer, track rtsp.Track, frames []CapturedFrame) (ListenR
 // or 2) is Skipped at construction, the same treatment as a quirky AAC
 // AudioSpecificConfig; a capture in which every packet fails to decode is
 // likewise Skipped, never reported as a successfully written (empty) WAV.
-func writeWAVOpus(w io.Writer, track rtsp.Track, frames []CapturedFrame) (ListenResult, error) {
+func writeWAVOpus(w io.Writer, track rtsp.Track, frames []CapturedFrame, senderStart time.Time) (ListenResult, error) {
 	const opusSampleRate = 48000
 	ch := max(track.Channels, 1)
 
@@ -98,7 +100,7 @@ func writeWAVOpus(w io.Writer, track rtsp.Track, frames []CapturedFrame) (Listen
 		return ListenResult{Skipped: true, SkipReason: "opus: " + err.Error()}, nil //nolint:nilerr // intentional: see comment above.
 	}
 
-	enc, err := wavpcm.NewEncoder(w, wavpcm.Config{SampleRate: opusSampleRate, BitDepth: 16, Channels: ch, Format: wav.SampleFormatPCM})
+	enc, err := wavpcm.NewEncoder(w, wavpcm.Config{SampleRate: opusSampleRate, BitDepth: 16, Channels: ch, Format: wav.SampleFormatPCM, Bext: buildBext(senderStart, opusSampleRate)})
 	if err != nil {
 		return ListenResult{}, err
 	}
@@ -127,10 +129,11 @@ func writeWAVOpus(w io.Writer, track rtsp.Track, frames []CapturedFrame) (Listen
 	}
 
 	return ListenResult{
-		Written:    true,
-		SampleRate: opusSampleRate,
-		Channels:   ch,
-		Frames:     totalSamples,
+		Written:     true,
+		SampleRate:  opusSampleRate,
+		Channels:    ch,
+		Frames:      totalSamples,
+		SenderStart: senderStart,
 	}, nil
 }
 
@@ -145,7 +148,7 @@ const aacLengthPrefixMax = math.MaxUint16
 // construct against the ASC (ErrUnsupported or ErrCorruptStream) is a
 // quirk of the source stream, not a tool failure, and is reported as
 // Skipped; any other failure to construct the decoder is a genuine error.
-func writeWAVAAC(w io.Writer, track rtsp.Track, frames []CapturedFrame) (ListenResult, error) {
+func writeWAVAAC(w io.Writer, track rtsp.Track, frames []CapturedFrame, senderStart time.Time) (ListenResult, error) {
 	codec, ok := track.Codec.(audiostream.CodecAAC)
 	if !ok {
 		return ListenResult{Skipped: true, SkipReason: unsupportedListenReason}, nil
@@ -175,7 +178,7 @@ func writeWAVAAC(w io.Writer, track rtsp.Track, frames []CapturedFrame) (ListenR
 	}
 	info := dec.Info()
 
-	enc, err := wavpcm.NewEncoder(w, wavpcm.Config{SampleRate: info.SampleRate, BitDepth: 16, Channels: info.Channels, Format: wav.SampleFormatPCM})
+	enc, err := wavpcm.NewEncoder(w, wavpcm.Config{SampleRate: info.SampleRate, BitDepth: 16, Channels: info.Channels, Format: wav.SampleFormatPCM, Bext: buildBext(senderStart, info.SampleRate)})
 	if err != nil {
 		return ListenResult{}, err
 	}
@@ -196,10 +199,11 @@ func writeWAVAAC(w io.Writer, track rtsp.Track, frames []CapturedFrame) (ListenR
 	}
 
 	return ListenResult{
-		Written:    true,
-		SampleRate: info.SampleRate,
-		Channels:   info.Channels,
-		Frames:     frameCount,
+		Written:     true,
+		SampleRate:  info.SampleRate,
+		Channels:    info.Channels,
+		Frames:      frameCount,
+		SenderStart: senderStart,
 	}, nil
 }
 

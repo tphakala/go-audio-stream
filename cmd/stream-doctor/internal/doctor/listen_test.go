@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"math"
 	"testing"
+	"time"
 
 	aac "github.com/tphakala/go-aac"
 	"github.com/tphakala/go-opus/opus"
@@ -70,7 +71,7 @@ func TestWriteWAVG711MuLaw(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	res, err := writeWAV(&buf, track, frames)
+	res, err := writeWAV(&buf, track, frames, time.Time{})
 	if err != nil {
 		t.Fatalf("writeWAV: %v", err)
 	}
@@ -123,7 +124,7 @@ func TestWriteWAVL16(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	res, err := writeWAV(&buf, track, frames)
+	res, err := writeWAV(&buf, track, frames, time.Time{})
 	if err != nil {
 		t.Fatalf("writeWAV: %v", err)
 	}
@@ -175,7 +176,7 @@ func TestWriteWAVOpus(t *testing.T) {
 
 	track := rtsp.Track{ID: 0, Media: audiostream.MediaAudio, Codec: audiostream.CodecOpus{}, ClockRate: sampleRate, Channels: channels}
 	var buf bytes.Buffer
-	res, err := writeWAV(&buf, track, frames)
+	res, err := writeWAV(&buf, track, frames, time.Time{})
 	if err != nil {
 		t.Fatalf("writeWAV: %v", err)
 	}
@@ -220,7 +221,7 @@ func TestWriteWAVAAC(t *testing.T) {
 		ClockRate: sampleRate, Channels: channels,
 	}
 	var buf bytes.Buffer
-	res, err := writeWAV(&buf, track, frames)
+	res, err := writeWAV(&buf, track, frames, time.Time{})
 	if err != nil {
 		t.Fatalf("writeWAV: %v", err)
 	}
@@ -251,7 +252,7 @@ func TestWriteWAVUnsupported(t *testing.T) {
 	t.Parallel()
 	track := rtsp.Track{ID: 1, Media: audiostream.MediaVideo, Codec: audiostream.CodecUnknown{RTPMap: testH264}, ClockRate: 90000}
 	var buf bytes.Buffer
-	res, err := writeWAV(&buf, track, []CapturedFrame{{Data: []byte{1, 2, 3}}})
+	res, err := writeWAV(&buf, track, []CapturedFrame{{Data: []byte{1, 2, 3}}}, time.Time{})
 	if err != nil {
 		t.Fatalf("writeWAV: %v", err)
 	}
@@ -280,7 +281,7 @@ func TestWriteWAVOpusAllCorrupt(t *testing.T) {
 	track := rtsp.Track{ID: 0, Media: audiostream.MediaAudio, Codec: audiostream.CodecOpus{}, ClockRate: 48000, Channels: 2}
 
 	var buf bytes.Buffer
-	res, err := writeWAV(&buf, track, frames)
+	res, err := writeWAV(&buf, track, frames, time.Time{})
 	if err != nil {
 		t.Fatalf("writeWAV returned an error instead of a Skipped result: %v", err)
 	}
@@ -306,7 +307,7 @@ func TestWriteWAVAACCorruptASC(t *testing.T) {
 	frames := []CapturedFrame{{Data: []byte{0xde, 0xad, 0xbe, 0xef}}}
 
 	var buf bytes.Buffer
-	res, err := writeWAV(&buf, track, frames)
+	res, err := writeWAV(&buf, track, frames, time.Time{})
 	if err != nil {
 		t.Fatalf("writeWAV returned an error instead of a Skipped result: %v", err)
 	}
