@@ -8,7 +8,7 @@ require (
 	github.com/tphakala/go-aac v0.3.0
 	github.com/tphakala/go-audio-stream v0.0.0-00010101000000-000000000000
 	github.com/tphakala/go-opus v0.1.2
-	github.com/tphakala/go-wav v0.3.0
+	github.com/tphakala/go-wav v0.4.0
 )
 
 require (
