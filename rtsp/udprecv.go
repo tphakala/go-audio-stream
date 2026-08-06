@@ -106,8 +106,14 @@ func (c *Client) runRTPReceiver(tr *track, m *mediaSockets) {
 		// a cached running baseline would go stale across a reset.
 		lateBefore := reorder.Stats().Late
 		released = reorder.Push(pkt.Header.SequenceNumber, cp, released[:0])
-		if d := reorder.Stats().Late - lateBefore; d > 0 {
-			tr.reorderDrops.Add(d)
+		// Push only ever increments Late, so lateAfter >= lateBefore holds today.
+		// Compare rather than subtract-then-test: a plain d := after - before with
+		// a d > 0 guard is not underflow-safe, since a decrease would wrap the
+		// uint64 to a huge positive that passes the guard and inflates the count.
+		// Guarding on lateAfter > lateBefore keeps it correct even if a future
+		// change ever let Late fall between the two reads.
+		if lateAfter := reorder.Stats().Late; lateAfter > lateBefore {
+			tr.reorderDrops.Add(lateAfter - lateBefore)
 		}
 		c.drainReleased(tr, released, now)
 	}
