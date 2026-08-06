@@ -288,6 +288,41 @@ func TestUDPPublishUDPTrackRegistersMediaAndPinsTransport(t *testing.T) {
 	if got != m {
 		t.Errorf("media[0] = %v, want %v", got, m)
 	}
+
+	if len(c.udpEndpoints) != 1 {
+		t.Fatalf("udpEndpoints = %d, want 1", len(c.udpEndpoints))
+	}
+	if e := c.udpEndpoints[0]; e.TrackID != 0 || e.ClientRTPPort != m.clientRTPPort || e.ClientRTCPPort != m.clientRTCPPort {
+		t.Errorf("udpEndpoints[0] = %+v, want TrackID 0 with client ports %d/%d", e, m.clientRTPPort, m.clientRTCPPort)
+	}
+	if e := c.udpEndpoints[0]; e.ServerRTPPort != 0 || e.ServerRTCPPort != 0 {
+		t.Errorf("udpEndpoints[0] server ports = %d/%d, want 0/0 (peers unresolved here)", e.ServerRTPPort, e.ServerRTCPPort)
+	}
+}
+
+// endpoint reports the client ports unconditionally and the server ports only
+// once resolveServerPeers has recorded the peers, so SessionInfo can surface
+// the exact negotiated server_port pair while a publish that races ahead of
+// peer resolution reads a zero server pair instead of dereferencing a nil peer.
+func TestUDPEndpointReportsResolvedPortsAndGuardsNilPeers(t *testing.T) {
+	t.Parallel()
+	m := &mediaSockets{clientRTPPort: 40000, clientRTCPPort: 40001}
+
+	// Before resolveServerPeers: client ports set, server ports zero, no panic.
+	if got, want := m.endpoint(2), (UDPEndpoint{TrackID: 2, ClientRTPPort: 40000, ClientRTCPPort: 40001}); got != want {
+		t.Errorf("endpoint before resolve = %+v, want %+v", got, want)
+	}
+
+	// After resolveServerPeers: the exact server_port pair from the SETUP
+	// response is reported.
+	th := TransportHeader{HasServerPort: true, ServerRTPPort: 6970, ServerRTCPPort: 6971}
+	if err := m.resolveServerPeers(th, net.ParseIP("203.0.113.7")); err != nil {
+		t.Fatalf("resolveServerPeers: %v", err)
+	}
+	want := UDPEndpoint{TrackID: 0, ClientRTPPort: 40000, ClientRTCPPort: 40001, ServerRTPPort: 6970, ServerRTCPPort: 6971}
+	if got := m.endpoint(0); got != want {
+		t.Errorf("endpoint after resolve = %+v, want %+v", got, want)
+	}
 }
 
 // A publish arriving after shutdown must not resurrect the state, must not

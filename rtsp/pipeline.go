@@ -122,6 +122,12 @@ type track struct {
 	wireBytes    atomic.Uint64
 	seqGaps      atomic.Uint64
 	duplicates   atomic.Uint64
+	// reorderDrops counts datagrams the UDP Reorderer dropped before rtp.Stream
+	// observed them (a duplicate or a too-late reorder). It is kept separate from
+	// duplicates, which publishRRSnapshot overwrites from the stream's own count
+	// on every released packet; Stats sums the two so TrackStats.Duplicates means
+	// the same over UDP as over TCP. It stays zero on the TCP-interleaved path.
+	reorderDrops atomic.Uint64
 	malformed    atomic.Uint64
 	ssrcResets   atomic.Uint64
 	// lastFrameUnixNano is the wall-clock arrival (UnixNano) of the most recent

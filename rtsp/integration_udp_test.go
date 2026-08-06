@@ -118,6 +118,15 @@ func TestIntegrationUDPHappyPathAAC(t *testing.T) {
 	if got := c.SessionInfo().Transport; got != "UDP" {
 		t.Fatalf("SessionInfo().Transport = %q, want UDP", got)
 	}
+	ends := c.SessionInfo().UDPEndpoints
+	if len(ends) != 1 {
+		t.Fatalf("SessionInfo().UDPEndpoints = %d entries, want 1", len(ends))
+	}
+	if e := ends[0]; e.TrackID != 0 ||
+		e.ClientRTPPort <= 0 || e.ClientRTCPPort != e.ClientRTPPort+1 ||
+		e.ServerRTPPort <= 0 || e.ServerRTCPPort != e.ServerRTPPort+1 {
+		t.Errorf("UDPEndpoints[0] = %+v, want TrackID 0 with consecutive client and server port pairs", e)
+	}
 
 	track := wantTrack1(t, tracksCh)
 	if err := track.InjectRTPSequence(datagrams); err != nil {
@@ -140,6 +149,62 @@ func TestIntegrationUDPHappyPathAAC(t *testing.T) {
 			t.Errorf("frame %d PTS = %v, want > previous frame's %v", i, f.PTS, lastPTS)
 		}
 		lastPTS = f.PTS
+	}
+}
+
+// TestIntegrationUDPDuplicates injects a duplicate datagram and a too-late
+// resend, both of which the Reorderer drops inside Push before Stream.Observe
+// sees them. Each dropped datagram must be folded into TrackStats.Duplicates so
+// a UDP session reports duplicates the same way the TCP-interleaved path does,
+// instead of always reading ~0.
+func TestIntegrationUDPDuplicates(t *testing.T) {
+	ssrc := uint32(0x11220004)
+	base := uint16(4000)
+	// Wire order: in-order 0 and 1, a duplicate of 1, then 2, then a too-late
+	// resend of 0. Only three distinct packets (0, 1, 2) are ever released.
+	datagrams := [][]byte{
+		aacUDPDatagram(base, 0, ssrc),
+		aacUDPDatagram(base+1, 1, ssrc),
+		aacUDPDatagram(base+1, 1, ssrc), // duplicate of base+1
+		aacUDPDatagram(base+2, 2, ssrc),
+		aacUDPDatagram(base, 0, ssrc), // too-late resend of base
+	}
+
+	c, frames, tracksCh := playAndInjectUDP(t,
+		&testserver.HandshakeConfig{SDP: aacSDP, UDP: true, ServerRTPBase: nextUDPServerBase()},
+		rtsp.PreferUDP)
+	defer closeAndWait(t, c)
+
+	track := wantTrack1(t, tracksCh)
+	if err := track.InjectRTPSequence(datagrams); err != nil {
+		t.Fatalf("InjectRTPSequence: %v", err)
+	}
+
+	// Exactly three distinct packets are released, in ascending sequence order.
+	for i := 0; i < 3; i++ {
+		f := recvFrame(t, frames)
+		if want := aacAU(i); !bytes.Equal(f.Data, want) {
+			t.Errorf("frame %d Data = % x, want % x", i, f.Data, want)
+		}
+		if f.SeqGap != 0 {
+			t.Errorf("frame %d SeqGap = %d, want 0", i, f.SeqGap)
+		}
+	}
+
+	// The duplicate and the too-late resend are both dropped by the Reorderer
+	// and folded into Duplicates; no gaps or malformed drops occur.
+	st := waitForStats(t, c, 0, func(ts audiostream.TrackStats) bool { return ts.Duplicates >= 2 })
+	if st.Duplicates != 2 {
+		t.Errorf("Duplicates = %d, want 2", st.Duplicates)
+	}
+	if st.Packets != 3 {
+		t.Errorf("Packets = %d, want 3", st.Packets)
+	}
+	if st.SeqGaps != 0 {
+		t.Errorf("SeqGaps = %d, want 0", st.SeqGaps)
+	}
+	if st.Malformed != 0 {
+		t.Errorf("Malformed = %d, want 0", st.Malformed)
 	}
 }
 

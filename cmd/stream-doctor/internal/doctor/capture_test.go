@@ -42,6 +42,31 @@ func TestCollectCompleted(t *testing.T) {
 	}
 }
 
+// TestTransportPreference covers the mapping from the -transport flag value to
+// the library preference: the three accepted values map through, an empty string
+// defaults to TCP, and anything else is rejected (ok false) so parseArgs turns
+// it into a usage error.
+func TestTransportPreference(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		in     string
+		want   rtsp.TransportPreference
+		wantOK bool
+	}{
+		{"", rtsp.PreferTCP, true},
+		{transportTCP, rtsp.PreferTCP, true},
+		{transportUDP, rtsp.PreferUDP, true},
+		{transportUDPThenTCP, rtsp.PreferUDPThenTCP, true},
+		{"tls", rtsp.PreferTCP, false},
+		{"UDP", rtsp.PreferTCP, false},
+	} {
+		got, ok := transportPreference(tc.in)
+		if ok != tc.wantOK || got != tc.want {
+			t.Errorf("transportPreference(%q) = (%v, %v), want (%v, %v)", tc.in, got, ok, tc.want, tc.wantOK)
+		}
+	}
+}
+
 // TestRTSPProberOnFrameCopies drives the production adapter's OnFrame sink
 // directly (white-box: it needs the unexported rtspProber internals) and
 // asserts the stored frame is an owned copy, unaffected by a subsequent

@@ -62,12 +62,27 @@ type ChannelPair struct {
 	RTCP int
 }
 
+// UDPEndpoint is one track's negotiated RTP/AVP unicast UDP port pairs, in UDP
+// transport mode. The client ports are the local pair this client bound and
+// proposed at SETUP; the server ports are the pair resolved from the SETUP
+// response.
+type UDPEndpoint struct {
+	// TrackID is the track the endpoints carry.
+	TrackID int
+	// ClientRTPPort and ClientRTCPPort are the local client_port pair.
+	ClientRTPPort  int
+	ClientRTCPPort int
+	// ServerRTPPort and ServerRTCPPort are the resolved server_port pair.
+	ServerRTPPort  int
+	ServerRTCPPort int
+}
+
 // SessionInfo is a read-only snapshot of the negotiated session, for
 // diagnostics such as a handshake walkthrough tool. It carries no credentials
-// and no counters. Dial sets KeepaliveMethod and Server. Setup sets Channels
-// and Transport, and sets SessionID and SessionTimeout from the first SETUP
-// response that carries a Session header, so they stay empty against a server
-// that omits it.
+// and no counters. Dial sets KeepaliveMethod and Server. Setup sets Channels,
+// Transport, and UDPEndpoints, and sets SessionID and SessionTimeout from the
+// first SETUP response that carries a Session header, so they stay empty
+// against a server that omits it.
 // AuthScheme stays AuthNone until a 401 has been answered, so it reports
 // AuthNone against a server that never challenges.
 type SessionInfo struct {
@@ -97,6 +112,10 @@ type SessionInfo struct {
 	// PreferUDPThenTCP a session that fell back reports "TCP", not the
 	// preference it started from.
 	Transport string
+	// UDPEndpoints lists the negotiated UDP port pairs, one per set-up track,
+	// in Setup order; nil for a TCP-interleaved session (where Channels carries
+	// the interleaved pairs instead). Freshly allocated; never internal state.
+	UDPEndpoints []UDPEndpoint
 }
 
 // Client is a single RTSP session. Close, Wait, Stats, SessionInfo and Info are
@@ -152,6 +171,10 @@ type Client struct {
 	dialURL      string
 	baseURL      string
 	channelPairs []ChannelPair
+	// udpEndpoints records each set-up track's negotiated UDP port pair, in
+	// Setup order, once the session pinned UDP. Written under mu at publish
+	// time and copied by SessionInfo; nil in TCP mode.
+	udpEndpoints []UDPEndpoint
 	termErr      error
 	// transport is the caller's transport preference copied from cfg.Transport
 	// at the first successful UDP Setup. It records that a UDP negotiation
@@ -501,7 +524,7 @@ func (c *Client) Stats() audiostream.Stats {
 			PayloadBytes: tr.payloadBytes.Load(),
 			WireBytes:    tr.wireBytes.Load(),
 			SeqGaps:      tr.seqGaps.Load(),
-			Duplicates:   tr.duplicates.Load(),
+			Duplicates:   tr.duplicates.Load() + tr.reorderDrops.Load(),
 			Malformed:    tr.malformed.Load(),
 			SSRCResets:   tr.ssrcResets.Load(),
 		}
@@ -540,6 +563,11 @@ func (c *Client) SessionInfo() SessionInfo {
 		chans = make([]ChannelPair, len(c.channelPairs))
 		copy(chans, c.channelPairs)
 	}
+	var udpEnds []UDPEndpoint
+	if len(c.udpEndpoints) > 0 {
+		udpEnds = make([]UDPEndpoint, len(c.udpEndpoints))
+		copy(udpEnds, c.udpEndpoints)
+	}
 	return SessionInfo{
 		SessionID:      c.sessionID,
 		SessionTimeout: c.sessionTimeout,
@@ -550,6 +578,7 @@ func (c *Client) SessionInfo() SessionInfo {
 		Server:          c.serverHeader,
 		Channels:        chans,
 		Transport:       c.sessionTransport,
+		UDPEndpoints:    udpEnds,
 	}
 }
 

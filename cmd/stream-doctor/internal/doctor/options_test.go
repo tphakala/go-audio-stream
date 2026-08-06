@@ -10,9 +10,10 @@ import (
 const testStreamURL = "rtsp://cam/stream"
 
 const (
-	durationFlag = "--duration"
-	timeoutFlag  = "--timeout"
-	readIdleFlag = "--read-idle"
+	durationFlag  = "--duration"
+	timeoutFlag   = "--timeout"
+	readIdleFlag  = "--read-idle"
+	transportFlag = "--transport"
 )
 
 func TestParseArgsDefaults(t *testing.T) {
@@ -39,6 +40,9 @@ func TestParseArgsDefaults(t *testing.T) {
 	if opts.WAVPath != "" {
 		t.Errorf("WAVPath = %q, want empty", opts.WAVPath)
 	}
+	if opts.Transport != transportTCP {
+		t.Errorf("Transport = %q, want tcp (default)", opts.Transport)
+	}
 }
 
 func TestParseArgsAllFlags(t *testing.T) {
@@ -52,6 +56,7 @@ func TestParseArgsAllFlags(t *testing.T) {
 		"--insecure-tls",
 		"--insecure-auth",
 		"--full-stream",
+		transportFlag, transportUDP,
 		"--user", "u",
 		"--password", "p",
 		testStreamURL,
@@ -70,6 +75,7 @@ func TestParseArgsAllFlags(t *testing.T) {
 		InsecureTLS:  true,
 		InsecureAuth: true,
 		FullStream:   true,
+		Transport:    transportUDP,
 		Username:     "u",
 		Password:     "p",
 	}
@@ -91,7 +97,7 @@ func TestParseArgsInsecureAuthDefaultsOff(t *testing.T) {
 
 func TestUsageTextCoversHTTP(t *testing.T) {
 	t.Parallel()
-	for _, want := range []string{"rtsp-or-http-url", "-insecure-auth", "WAV or raw PCM/L16"} {
+	for _, want := range []string{"rtsp-or-http-url", "-insecure-auth", "WAV or raw PCM/L16", "-transport"} {
 		if !strings.Contains(usageText, want) {
 			t.Errorf("usageText missing %q:\n%s", want, usageText)
 		}
@@ -168,5 +174,30 @@ func TestParseArgsReadIdle(t *testing.T) {
 	// A zero read-idle is allowed: it disables the watchdog.
 	if _, err := parseArgs([]string{readIdleFlag, "0s", testStreamURL}); err != nil {
 		t.Errorf("parseArgs(%s 0s) error = %v, want nil (0 disables the watchdog)", readIdleFlag, err)
+	}
+}
+
+func TestParseArgsTransport(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		arg  string
+		want string
+	}{
+		{transportTCP, transportTCP},
+		{transportUDP, transportUDP},
+		{transportUDPThenTCP, transportUDPThenTCP},
+	} {
+		opts, err := parseArgs([]string{transportFlag, tc.arg, testStreamURL})
+		if err != nil {
+			t.Errorf("parseArgs(--transport %s) error = %v, want nil", tc.arg, err)
+			continue
+		}
+		if opts.Transport != tc.want {
+			t.Errorf("Transport = %q, want %q", opts.Transport, tc.want)
+		}
+	}
+	// An unrecognized transport is a usage error, not a silent fallback to TCP.
+	if _, err := parseArgs([]string{transportFlag, "tls", testStreamURL}); !errors.Is(err, ErrUsage) {
+		t.Errorf("parseArgs(--transport tls) error = %v, want ErrUsage", err)
 	}
 }

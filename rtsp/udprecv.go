@@ -95,7 +95,20 @@ func (c *Client) runRTPReceiver(tr *track, m *mediaSockets) {
 		// Released.Payload a self-contained RTP packet.
 		cp := make([]byte, n)
 		copy(cp, datagram)
+		// Bracket Push with its late counter so a duplicate or too-late datagram
+		// the Reorderer drops inside Push, before Stream.Observe ever sees it,
+		// still counts as a duplicate, giving UDP the same TrackStats.Duplicates
+		// meaning as the TCP path, where Observe counts duplicates directly. The
+		// delta accumulates in reorderDrops rather than duplicates because
+		// publishRRSnapshot overwrites duplicates from the stream's own counter
+		// on every released packet; Stats sums the two. Read Late immediately
+		// before each Push: reorder.Reset on an SSRC change (above) zeroes it, so
+		// a cached running baseline would go stale across a reset.
+		lateBefore := reorder.Stats().Late
 		released = reorder.Push(pkt.Header.SequenceNumber, cp, released[:0])
+		if d := reorder.Stats().Late - lateBefore; d > 0 {
+			tr.reorderDrops.Add(d)
+		}
 		c.drainReleased(tr, released, now)
 	}
 }

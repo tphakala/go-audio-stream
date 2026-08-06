@@ -381,7 +381,7 @@ func describeDetail(tracks []rtsp.Track) string {
 // setupDetail summarizes the target track, its negotiated channels, and any
 // discarded tracks.
 func setupDetail(si *rtsp.SessionInfo, audio rtsp.Track, discarded int) string {
-	detail := fmt.Sprintf("track %d, %s", audio.ID, channelStr(si, audio.ID))
+	detail := fmt.Sprintf("track %d, %s", audio.ID, transportStr(si, audio.ID))
 	if discarded > 0 {
 		detail += fmt.Sprintf(", %d track%s discarded", discarded, pluralSuffix(discarded))
 	}
@@ -401,6 +401,43 @@ func channelStr(si *rtsp.SessionInfo, trackID int) string {
 		}
 	}
 	return "channels n/a"
+}
+
+// sessionTransportUDP is the value rtsp.SessionInfo.Transport reports for a
+// UDP-pinned session (the library's documented pin value); the doctor compares
+// against it to decide whether to render UDP endpoints or interleaved channels.
+const sessionTransportUDP = "UDP"
+
+// transportStr renders the negotiated media endpoints for trackID in the
+// walkthrough's setup line: the UDP port pairs over a UDP session, otherwise
+// the interleaved channel pair.
+func transportStr(si *rtsp.SessionInfo, trackID int) string {
+	if si.Transport == sessionTransportUDP {
+		return "udp " + udpEndpointStr(si, trackID)
+	}
+	return channelStr(si, trackID)
+}
+
+// reportTransport renders the report session block's transport line: the UDP
+// label and port pairs over a UDP session, otherwise the interleaved label and
+// channel pair. The TCP branch reproduces the previous hard-coded line exactly.
+func reportTransport(si *rtsp.SessionInfo, trackID int) string {
+	if si.Transport == sessionTransportUDP {
+		return "UDP unicast, " + udpEndpointStr(si, trackID)
+	}
+	return "TCP interleaved, " + channelStr(si, trackID)
+}
+
+// udpEndpointStr renders the negotiated UDP client and server port pairs for
+// trackID, without a transport label; "ports n/a" when no endpoint matches.
+func udpEndpointStr(si *rtsp.SessionInfo, trackID int) string {
+	for _, e := range si.UDPEndpoints {
+		if e.TrackID == trackID {
+			return fmt.Sprintf("client_port %d-%d, server_port %d-%d",
+				e.ClientRTPPort, e.ClientRTCPPort, e.ServerRTPPort, e.ServerRTCPPort)
+		}
+	}
+	return "ports n/a"
 }
 
 // pluralSuffix returns "" for a count of one, "s" otherwise.

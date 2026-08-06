@@ -135,6 +135,9 @@ func TestFallbackPreferUDPThenTCPFallsBackOn461(t *testing.T) {
 	if len(info.Channels) != 1 || info.Channels[0].RTP != 0 || info.Channels[0].RTCP != 1 || info.Channels[0].TrackID != 0 {
 		t.Errorf("Channels = %+v, want one pair {TrackID:0 RTP:0 RTCP:1}", info.Channels)
 	}
+	if info.UDPEndpoints != nil {
+		t.Errorf("UDPEndpoints = %+v, want nil after a TCP fallback", info.UDPEndpoints)
+	}
 
 	f := recvFrame(t, frames)
 	if !bytes.Equal(f.Data, payload) {
