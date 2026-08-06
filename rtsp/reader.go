@@ -338,12 +338,12 @@ func (c *Client) handleInterleaved(f InterleavedFrame) bool {
 		tr.malformed.Add(1)
 		return false
 	}
-	c.process(tr, pkt, now)
-	// The frame reached a track and parsed as RTP, which is the "usable"
-	// evidence the resync budget wants; whether process then accepted or
-	// dropped its payload type does not change that it was a real interleaved
-	// frame on a bound channel.
-	return true
+	// process returns the "usable" verdict the resync budget consumes: a foreign
+	// payload type it rejects is NOT re-lock evidence and must not clear the
+	// budget, while an accepted packet is. Returning it directly preserves the
+	// exact phase-1 TCP behavior (a rejected payload type -> false, success ->
+	// true).
+	return c.process(tr, pkt, now)
 }
 
 // process folds one parsed RTP packet into a track's pipeline and delivers its
@@ -356,12 +356,17 @@ func (c *Client) handleInterleaved(f InterleavedFrame) bool {
 // the one reader goroutine in TCP mode, the per-track RTP receive goroutine in
 // UDP mode.
 //
+// It returns whether the packet was accepted, which is handleInterleaved's
+// "usable" verdict for the resync budget: false when a foreign payload type was
+// dropped before Observe, true once the packet was delivered. runRTPReceiver
+// discards the verdict, since UDP has no interleaved-framing resync budget.
+//
 // The wire-level liveness stamps (c.lastFrameAt, tr.lastFrameUnixNano,
 // tr.wireBytes) are NOT done here: they must count every frame or datagram that
 // arrives on the wire, whereas process runs only on packets the caller admits
 // (over UDP, only the ones the Reorderer releases). Each caller stamps them
 // itself before calling process.
-func (c *Client) process(tr *track, pkt rtp.Packet, now time.Time) {
+func (c *Client) process(tr *track, pkt rtp.Packet, now time.Time) bool {
 	if !tr.acceptPayloadType(pkt.Header.PayloadType, c.cfg.Logger) {
 		// A second format multiplexed onto this track's RTP channel (a
 		// telephone-event alongside speech, or the second entry of an m= line
@@ -371,9 +376,10 @@ func (c *Client) process(tr *track, pkt rtp.Packet, now time.Time) {
 		// sequence number becomes a hole this track counts as loss, which is
 		// the cheaper of the two errors: an inflated loss counter is a
 		// diagnostic, a corrupted baseline is every PTS for the rest of the
-		// session.
+		// session. Not usable re-lock evidence: it must not clear the resync
+		// budget.
 		tr.malformed.Add(1)
-		return
+		return false
 	}
 
 	up := tr.stream.Observe(pkt.Header)
@@ -406,6 +412,7 @@ func (c *Client) process(tr *track, pkt rtp.Packet, now time.Time) {
 	tr.packets.Add(1)
 	tr.payloadBytes.Add(uint64(len(pkt.Payload)))
 	tr.publishRRSnapshot()
+	return true
 }
 
 // handleRTCP parses an RTCP compound packet and stores one Sender Report's
