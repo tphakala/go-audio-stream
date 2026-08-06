@@ -389,15 +389,24 @@ func (c *Client) initiateShutdown(cause error) {
 		c.deadlineMu.Unlock()
 
 		// mediaMu is an independent leaf lock: taken alone here, never
-		// nested inside mu or deadlineMu, and released before this closure
-		// returns. In TCP mode media is empty, so this is a no-op.
+		// nested inside mu or deadlineMu. It is held only long enough to
+		// snapshot the map into a local slice; the SetReadDeadline calls
+		// below run outside the lock, so mediaMu stays a pure map-access
+		// leaf and is never held across a socket call, the same discipline
+		// closeMediaSockets applies to Close. In TCP mode media is empty,
+		// so this is a no-op.
 		c.mediaMu.Lock()
-		now := time.Now()
+		sockets := make([]*mediaSockets, 0, len(c.media))
 		for _, m := range c.media {
+			sockets = append(sockets, m)
+		}
+		c.mediaMu.Unlock()
+
+		now := time.Now()
+		for _, m := range sockets {
 			_ = m.rtpConn.SetReadDeadline(now)
 			_ = m.rtcpConn.SetReadDeadline(now)
 		}
-		c.mediaMu.Unlock()
 	})
 }
 
