@@ -53,8 +53,12 @@ const (
 // track is one set-up track's pipeline state. Setup fully initializes it and
 // publishes it into the channel table by an atomic store; that store
 // establishes the happens-before edge, after which only the reader goroutine
-// mutates the non-atomic fields (stream, aac, baseTS/baseSet/baselineFixed,
-// pcmBuf).
+// mutates the non-atomic fields (stream, aac, baseTS/baselineFixed, pcmBuf).
+// baseSet is an atomic.Bool because, in UDP transport mode, the RTP receive
+// goroutine writes it (via process) while the RTCP receive goroutine reads it
+// (via handleRTCP) to gate the sender-clock publish; in TCP mode the single
+// reader goroutine both writes and reads it, so the promotion is behavior-
+// identical there.
 // The atomic stat and RR-snapshot fields are written by the reader and read by
 // Stats and the keepalive timer. A track is always referenced by pointer and
 // never copied.
@@ -87,7 +91,7 @@ type track struct {
 	ptCandidate     uint8
 	ptRun           int
 	baseTS          uint64
-	baseSet         bool
+	baseSet         atomic.Bool
 	// baselineFixed is set true the first time a baseline is established and is
 	// never cleared, so the RTP-Info seed applies only to the very first
 	// baseline. An SSRC reset clears baseSet (to re-baseline the new stream)

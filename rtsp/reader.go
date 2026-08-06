@@ -338,6 +338,30 @@ func (c *Client) handleInterleaved(f InterleavedFrame) bool {
 		tr.malformed.Add(1)
 		return false
 	}
+	c.process(tr, pkt, now)
+	// The frame reached a track and parsed as RTP, which is the "usable"
+	// evidence the resync budget wants; whether process then accepted or
+	// dropped its payload type does not change that it was a real interleaved
+	// frame on a bound channel.
+	return true
+}
+
+// process folds one parsed RTP packet into a track's pipeline and delivers its
+// frames. It is the single shared per-packet processing point, called by both
+// the TCP interleaved reader (handleInterleaved) and the UDP RTP receive loop
+// (runRTPReceiver), so the two transports run byte-for-byte identical payload-
+// type acceptance, SSRC-reset handling, baseline seeding, gap-driven
+// depacketizer reset, delivery, counters, and RR-snapshot publication. The
+// caller guarantees single-goroutine ownership of tr for the call's duration:
+// the one reader goroutine in TCP mode, the per-track RTP receive goroutine in
+// UDP mode.
+//
+// The wire-level liveness stamps (c.lastFrameAt, tr.lastFrameUnixNano,
+// tr.wireBytes) are NOT done here: they must count every frame or datagram that
+// arrives on the wire, whereas process runs only on packets the caller admits
+// (over UDP, only the ones the Reorderer releases). Each caller stamps them
+// itself before calling process.
+func (c *Client) process(tr *track, pkt rtp.Packet, now time.Time) {
 	if !tr.acceptPayloadType(pkt.Header.PayloadType, c.cfg.Logger) {
 		// A second format multiplexed onto this track's RTP channel (a
 		// telephone-event alongside speech, or the second entry of an m= line
@@ -349,19 +373,19 @@ func (c *Client) handleInterleaved(f InterleavedFrame) bool {
 		// diagnostic, a corrupted baseline is every PTS for the rest of the
 		// session.
 		tr.malformed.Add(1)
-		return false
+		return
 	}
 
 	up := tr.stream.Observe(pkt.Header)
 	if up.SSRCReset {
 		tr.ssrcResets.Add(1)
-		tr.baseSet = false
+		tr.baseSet.Store(false)
 		tr.resetDepacketizer()
 		// The RTP-to-NTP correspondence is per SSRC: the previous source's
 		// pair must not convert the new source's timestamps.
 		tr.srClock.Store(nil)
 	}
-	if !tr.baseSet {
+	if !tr.baseSet.Load() {
 		// Also the first packet of the session, where Observe reports no reset
 		// because there was no previous stream to reset from. The sender SSRC
 		// is recorded here rather than under SSRCReset for exactly that reason:
@@ -370,7 +394,7 @@ func (c *Client) handleInterleaved(f InterleavedFrame) bool {
 		// Receiver Report named a source the server was not sending.
 		tr.senderSSRC.Store(pkt.Header.SSRC)
 		tr.baseTS = c.seededOrigin(tr, up.Timestamp)
-		tr.baseSet = true
+		tr.baseSet.Store(true)
 		tr.baselineFixed = true // the seed applies only to this first baseline.
 	}
 	if up.Gap > 0 {
@@ -382,7 +406,6 @@ func (c *Client) handleInterleaved(f InterleavedFrame) bool {
 	tr.packets.Add(1)
 	tr.payloadBytes.Add(uint64(len(pkt.Payload)))
 	tr.publishRRSnapshot()
-	return true
 }
 
 // handleRTCP parses an RTCP compound packet and stores one Sender Report's
@@ -439,15 +462,18 @@ func (c *Client) handleRTCP(tr *track, payload []byte, now time.Time) bool {
 	tr.lastSRUnixNano.Store(now.UnixNano())
 	// Publish the RTP-to-NTP correspondence for Stats, but only once the RTP
 	// stream has identified the media source (tr.baseSet, set on the first
-	// accepted RTP packet on this same reader goroutine). Before that packet
-	// senderSSRC is zero, so the block above adopted reports[0]; in a mixer or
+	// accepted RTP packet). In TCP mode that write and this read are the one
+	// reader goroutine; in UDP mode the RTP receive goroutine sets baseSet while
+	// this runs on the RTCP receive goroutine, which is why baseSet is an
+	// atomic.Bool and this gate is a Load. Before that first packet senderSSRC is
+	// zero, so the block above adopted reports[0]; in a mixer or
 	// translator compound that can be a contributing source the server is not
 	// sending us, and publishing its wall clock would expose a foreign mapping
 	// until a matching report arrived. Once baseSet is true the RTP path has set
 	// senderSSRC to the media source, so the senderSSRC match above already
 	// reduced the compound to that source's report (or returned on no match), so
 	// a mapping is only ever published for the confirmed media source.
-	if tr.baseSet {
+	if tr.baseSet.Load() {
 		if sr.NTPTimestamp == 0 {
 			// A sender declaring it has no wall clock (RFC 3550 section 6.4.1)
 			// maps nothing, so clear any prior correspondence rather than leave a

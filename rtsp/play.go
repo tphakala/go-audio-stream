@@ -2,6 +2,7 @@ package rtsp
 
 import (
 	"context"
+	"maps"
 	"strconv"
 	"strings"
 	"time"
@@ -63,6 +64,18 @@ func (c *Client) Play(ctx context.Context) error {
 	c.commitState(methodPlay)
 	c.playing.Store(true)
 	c.wg.Add(1)
+	udpPinned := c.udpPinned
+	tracks := c.tracks
+	if udpPinned {
+		// Reserve the receive goroutines' WaitGroup count under mu, on the same
+		// discipline wg.Add(1) uses: termErr is nil here, so shutdown has not
+		// begun and closing is not yet closed, so the reader is still in its
+		// framing loop and teardownAndJoin's udpWG.Wait() is not yet reachable.
+		// Counting the two goroutines per track (an RTP and an RTCP receiver, or
+		// two discard drains) before any launch means a launch can never race
+		// the join.
+		c.udpWG.Add(2 * len(tracks))
+	}
 	c.mu.Unlock()
 
 	// Arm the read-idle watchdog now that playing is set: the reader may be
@@ -71,8 +84,47 @@ func (c *Client) Play(ctx context.Context) error {
 	// watchdog fires even when no frame ever arrives. A no-op when ReadIdle is 0.
 	c.armReadDeadline()
 
+	// In UDP mode the media arrives on the per-track sockets, not the control
+	// connection, so start the receive goroutines that feed the pipeline. The
+	// TCP path starts none and is unchanged.
+	if udpPinned {
+		c.startUDPReceivers(tracks)
+	}
+
 	go c.keepaliveLoop()
 	return nil
+}
+
+// startUDPReceivers launches each set-up track's UDP receive goroutines: an RTP
+// and an RTCP receiver for a normal track, or two discard drains (one per
+// socket) for a discard track. Play calls it only when the session is UDP-
+// pinned, after reserving 2*len(tracks) on udpWG under mu. It snapshots the
+// socket map under mediaMu, a leaf lock never held across the goroutine
+// launches, so a receiver whose first read fails and funnels through
+// initiateShutdown (which also takes mediaMu) cannot deadlock against it.
+func (c *Client) startUDPReceivers(tracks []*track) {
+	c.mediaMu.Lock()
+	media := maps.Clone(c.media)
+	c.mediaMu.Unlock()
+
+	for _, tr := range tracks {
+		m := media[tr.id]
+		if m == nil {
+			// Unreachable: a UDP-pinned Setup registers a socket pair for every
+			// track. Guard rather than launch a receiver on a nil socket, and
+			// release the two counts reserved for this track so teardown's
+			// udpWG.Wait() still reaches zero.
+			c.udpWG.Add(-2)
+			continue
+		}
+		if tr.discard {
+			go c.runDiscardReceiver(tr, m.rtpConn, false)
+			go c.runDiscardReceiver(tr, m.rtcpConn, true)
+			continue
+		}
+		go c.runRTPReceiver(tr, m)
+		go c.runRTCPReceiver(tr, m)
+	}
 }
 
 // seededOrigin returns the frame-delivery baseline for a track's first frame.
