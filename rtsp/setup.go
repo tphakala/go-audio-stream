@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 )
 
 var (
@@ -32,6 +33,11 @@ var (
 // negotiates its interleaved channel pair, and constructs and publishes the
 // track's depacketization pipeline into the channel routing table. It is legal
 // only in the described or setup state, else it returns a *StateError.
+//
+// Under a UDP transport preference (PreferUDP or PreferUDPThenTCP) it instead
+// dispatches to the UDP negotiation (setupUDP), which proposes RTP/AVP unicast
+// and, on success, publishes the track without touching the interleaved channel
+// table. The description below of the interleaved profile is the TCP path.
 //
 // trk must be a Track returned by this client's most recent Describe. Anything
 // else is ErrUnknownTrack, and a track already set up is ErrTrackAlreadySetUp.
@@ -64,6 +70,65 @@ func (c *Client) Setup(ctx context.Context, trk Track, opts SetupOptions) error 
 	if err != nil {
 		return err
 	}
+
+	// The pin resolved by an earlier Setup makes the choice session-wide: read
+	// it under mu (lifecycleMu already serializes Setups, so no concurrent one
+	// can move it) and let resolveTransport fold it together with the caller's
+	// preference. attemptUDP picks the path; allowFallback governs only whether
+	// a non-2xx UDP rejection may re-issue over TCP.
+	c.mu.Lock()
+	pin := c.sessionTransport
+	c.mu.Unlock()
+
+	attemptUDP, allowFallback := resolveTransport(c.cfg.Transport, pin)
+	if attemptUDP {
+		return c.setupUDP(ctx, trk, desc, opts, allowFallback)
+	}
+	return c.setupTCP(ctx, trk, desc, opts)
+}
+
+// Media transport pin values. sessionTransport holds one of these once the
+// first Setup resolves, and SessionInfo.Transport surfaces it verbatim; "" is
+// the unresolved default before any track is set up.
+const (
+	transportPinTCP = "TCP"
+	transportPinUDP = "UDP"
+)
+
+// resolveTransport decides, for one Setup, whether to attempt UDP and whether a
+// non-2xx UDP rejection may fall back to TCP. It folds the caller's preference
+// together with the session pin an earlier Setup resolved (pin is "" until the
+// first Setup pins it, then transportPinTCP or transportPinUDP).
+//
+// The pin is what makes the choice session-wide (D6): once a track is set up,
+// every later Setup follows the same transport with no re-attempt, so a
+// PreferUDPThenTCP session that fell back to TCP never proposes UDP again, and a
+// UDP session never re-SETUPs over TCP. allowFallback is true for exactly one
+// case, the first Setup under PreferUDPThenTCP, because that is the only moment
+// a UDP rejection has a TCP path to fall back to that no live session sits on.
+func resolveTransport(pref TransportPreference, pin string) (attemptUDP, allowFallback bool) {
+	switch pin {
+	case transportPinTCP:
+		return false, false
+	case transportPinUDP:
+		return true, false
+	}
+	// Not yet pinned: the first Setup decides from the preference alone.
+	switch pref {
+	case PreferUDP:
+		return true, false
+	case PreferUDPThenTCP:
+		return true, true
+	default: // PreferTCP, the zero value.
+		return false, false
+	}
+}
+
+// setupTCP is the phase 1 SETUP path: RTP/AVP/TCP interleaved, unchanged in
+// behavior from before UDP transport support.
+//
+//nolint:gocritic // Track is the documented public Setup signature; hugeParam does not apply to a per-track lifecycle call.
+func (c *Client) setupTCP(ctx context.Context, trk Track, desc describedTrack, opts SetupOptions) error {
 	rtpCh, rtcpCh, aerr := c.nextChannelPair()
 	if aerr != nil {
 		return aerr
@@ -100,6 +165,106 @@ func (c *Client) Setup(ctx context.Context, trk Track, opts SetupOptions) error 
 
 	tr := newTrack(trk.ID, desc, opts, gotRTCP, c.cfg.Logger)
 	return c.publishTrack(tr, gotRTP, gotRTCP)
+}
+
+// setupUDP is the UDP SETUP path: it opens a per-track socket pair, proposes
+// RTP/AVP unicast, resolves the server's peers from the response, and
+// publishes the track without touching the interleaved channel table (UDP
+// does not route by interleaved channel). On any failure it releases the
+// sockets, and when the server already allocated the stream, releases that
+// stream too, so the session and its other tracks are unaffected.
+//
+// It splits the two UDP-rejection shapes by SETUP status class (D6), because
+// they differ in whether the server created session state. A non-2xx response
+// (a *ResponseError, e.g. 461) allocated nothing: with allowFallback it re-runs
+// the phase 1 TCP SETUP for the same track, else it returns ErrUDPSetupRejected,
+// and neither needs a TEARDOWN. A 2xx whose Transport has no usable server_port
+// DID create state: it never falls back (that would re-SETUP a live session),
+// tears the accepted session down, and returns ErrUDPSetupRejected regardless of
+// allowFallback.
+//
+//nolint:gocritic // Track is the documented public Setup signature; hugeParam does not apply to a per-track lifecycle call.
+func (c *Client) setupUDP(ctx context.Context, trk Track, desc describedTrack, opts SetupOptions, allowFallback bool) error {
+	m, oerr := openMediaSockets()
+	if oerr != nil {
+		return oerr
+	}
+
+	req := &Request{Method: methodSetup, URL: trk.Control, Header: Header{}}
+	req.Header.Set("Transport", BuildTransportUDP(m.clientRTPPort, m.clientRTCPPort))
+	resp, derr := c.do(ctx, req)
+	if derr != nil {
+		_ = m.Close()
+		var respErr *ResponseError
+		if errors.As(derr, &respErr) {
+			// A non-2xx SETUP response (for example 461 Unsupported Transport):
+			// the server declined and allocated nothing, no Session id and no
+			// server-side UDP port, so the sockets just closed are the only
+			// state to release and no TEARDOWN is warranted. This is the ONE
+			// rejection shape that may fall back, precisely because no live
+			// session sits on the connection to re-SETUP against.
+			if allowFallback {
+				// PreferUDPThenTCP's first Setup: re-issue the SAME track's
+				// SETUP over the phase 1 TCP-interleaved profile, which records
+				// the session and pins it TCP. From here it is byte-for-byte the
+				// phase 1 path.
+				return c.setupTCP(ctx, trk, desc, opts)
+			}
+			// The status code is folded in as a value, not wrapped: under
+			// PreferUDP the contract is that a UDP rejection matches only
+			// ErrUDPSetupRejected, not ErrResponseStatus, so a caller cannot
+			// mistake this terminal UDP refusal for a per-track protocol error.
+			return fmt.Errorf("track %d: %w (server declined the UDP transport with status %d)",
+				trk.ID, ErrUDPSetupRejected, respErr.Code)
+		}
+		// A redirect, an auth failure, or a connection or timeout error is not a
+		// UDP rejection: propagate it unchanged, so the caller and the session
+		// react to it exactly as they would from a TCP Setup.
+		return derr
+	}
+
+	c.recordSession(trk.ID, ParseSession(resp.Header.Get("Session")))
+
+	raw := resp.Header.Get("Transport")
+	th, terr := ParseTransport(raw)
+	if terr != nil {
+		// The server answered SETUP 2xx and allocated the stream before
+		// echoing a Transport this client cannot parse. Release the sockets
+		// and the stream so an aggregate PLAY does not go on to stream it
+		// (see #15, the TCP analog of this same failure).
+		_ = m.Close()
+		c.teardownRejectedStream(trk.Control)
+		return fmt.Errorf("track %d: %w (Transport: %q)", trk.ID, terr, raw)
+	}
+
+	if rerr := m.resolveServerPeers(th, remoteIP(c.conn.RemoteAddr())); rerr != nil {
+		// The server allocated the stream, then echoed a Transport with no
+		// usable server_port. Release the sockets and the stream, and
+		// report the rejection rather than the parse-level error, since
+		// resolveServerPeers already normalizes it to ErrUDPSetupRejected.
+		_ = m.Close()
+		c.teardownRejectedStream(trk.Control)
+		return fmt.Errorf("track %d: %w (Transport: %q)", trk.ID, rerr, raw)
+	}
+
+	// rtcpCh is 0 and unused in UDP mode: Receiver Reports go out over the
+	// UDP RTCP socket (sendReceiverReportsUDP in keepalive.go), keyed by
+	// track id through c.media rather than by an interleaved channel; the
+	// depacketizer and stat wiring newTrack builds are transport-independent.
+	tr := newTrack(trk.ID, desc, opts, 0, c.cfg.Logger)
+	if perr := c.publishUDPTrack(tr, trk.ID, m); perr != nil {
+		return perr
+	}
+
+	// Hole-punch now that the server peers are resolved and the track is
+	// registered, using an initial Receiver Report built from tr's still-zero
+	// snapshot (D4): the return path through a NAT or firewall needs opening
+	// before Play starts the receive goroutines, and this is the earliest
+	// point both the resolved peers and a track to build the RR from exist.
+	// Best-effort: holePunch already logs and ignores its own errors, so a
+	// punch failure never fails Setup.
+	m.holePunch(tr.buildReceiverReport(c.reporterSSRC, time.Now()).Marshal(), c.cfg.Logger)
+	return nil
 }
 
 // teardownRejectedStream sends a best-effort per-track TEARDOWN for a stream the
@@ -157,10 +322,14 @@ func (c *Client) describedTrackFor(trk *Track) (describedTrack, error) {
 		return describedTrack{}, fmt.Errorf("%w: id %d does not carry the control URL Describe resolved for it",
 			ErrUnknownTrack, trk.ID)
 	}
-	for _, p := range c.channelPairs {
-		if p.TrackID == trk.ID {
-			return describedTrack{}, fmt.Errorf("%w: id %d on channels %d-%d",
-				ErrTrackAlreadySetUp, trk.ID, p.RTP, p.RTCP)
+	// Scan c.tracks, not c.channelPairs: both publishTrack (TCP) and
+	// publishUDPTrack (UDP) append to c.tracks under c.mu, but only publishTrack
+	// records a channel pair. Guarding on c.tracks rejects a duplicate Setup of
+	// either transport; over UDP a second Setup would otherwise open a second
+	// socket pair, orphan the first, and leave two goroutines reading one socket.
+	for _, t := range c.tracks {
+		if t.id == trk.ID {
+			return describedTrack{}, fmt.Errorf("%w: id %d", ErrTrackAlreadySetUp, trk.ID)
 		}
 	}
 	return desc, nil
@@ -275,6 +444,68 @@ func (c *Client) publishTrack(tr *track, rtpCh, rtcpCh int) error {
 	c.channels.Store(newChannelTable(c.channels.Load(), tr, rtpCh, rtcpCh))
 	c.tracks = append(c.tracks, tr)
 	c.channelPairs = append(c.channelPairs, ChannelPair{TrackID: tr.id, RTP: rtpCh, RTCP: rtcpCh})
+	// Pin the session TCP on the first track and re-affirm it on every later
+	// one (this path is only ever reached in TCP mode, including the UDP-to-TCP
+	// fallback), so SessionInfo reports "TCP" and later Setups follow the pin.
+	c.sessionTransport = transportPinTCP
 	c.commitState(methodSetup)
 	return nil
+}
+
+// publishUDPTrack records tr and pins the session to UDP transport, the UDP
+// counterpart to publishTrack. Unlike publishTrack it does not touch the
+// interleaved channel table (UDP does not route by interleaved channel), and
+// it separately registers m under mediaMu rather than under mu: mediaMu is
+// an independent leaf lock, so the two critical sections are taken one after
+// the other, never nested. When shutdown has already begun it does not
+// resurrect the state, closes m, and returns the terminal error, the same
+// guard publishTrack applies.
+func (c *Client) publishUDPTrack(tr *track, trackID int, m *mediaSockets) error {
+	c.mu.Lock()
+	if c.termErr != nil {
+		c.mu.Unlock()
+		_ = m.Close()
+		return c.termErr
+	}
+	c.tracks = append(c.tracks, tr)
+	c.udpPinned.Store(true)
+	c.transport = c.cfg.Transport
+	// Pin the session UDP so SessionInfo reports "UDP" and later Setups follow
+	// the pin; udpPinned stays the flag the UDP Play and keepalive paths read.
+	c.sessionTransport = transportPinUDP
+	c.commitState(methodSetup)
+	c.mu.Unlock()
+
+	c.registerMediaSockets(trackID, m)
+	return nil
+}
+
+// registerMediaSockets records m under trackID in c.media, taking mediaMu
+// alone (never nested inside mu or lifecycleMu), the leaf-lock discipline
+// initiateShutdown's deadline-arming block and closeMediaSockets both rely
+// on.
+//
+// publishUDPTrack passes its termErr check under mu, releases mu, then calls
+// this, so shutdown can begin in the gap: closeMediaSockets (which snapshots
+// c.media under mediaMu) may already have run without seeing m, and adding m
+// afterward would leak a socket pair no one closes. Guard against that here:
+// c.closing is closed by initiateShutdown before teardownAndJoin runs
+// closeMediaSockets, and both sites serialize on mediaMu, so a closed c.closing
+// observed under the lock means teardown has run or will run without m. In that
+// case do not register m; close it (outside the lock, keeping mediaMu a pure
+// map-access leaf) and return.
+func (c *Client) registerMediaSockets(trackID int, m *mediaSockets) {
+	c.mediaMu.Lock()
+	select {
+	case <-c.closing:
+		c.mediaMu.Unlock()
+		_ = m.Close()
+		return
+	default:
+	}
+	if c.media == nil {
+		c.media = make(map[int]*mediaSockets)
+	}
+	c.media[trackID] = m
+	c.mediaMu.Unlock()
 }

@@ -64,9 +64,10 @@ type ChannelPair struct {
 
 // SessionInfo is a read-only snapshot of the negotiated session, for
 // diagnostics such as a handshake walkthrough tool. It carries no credentials
-// and no counters. Dial sets KeepaliveMethod and Server. Setup sets Channels,
-// and sets SessionID and SessionTimeout from the first SETUP response that
-// carries a Session header, so they stay empty against a server that omits it.
+// and no counters. Dial sets KeepaliveMethod and Server. Setup sets Channels
+// and Transport, and sets SessionID and SessionTimeout from the first SETUP
+// response that carries a Session header, so they stay empty against a server
+// that omits it.
 // AuthScheme stays AuthNone until a 401 has been answered, so it reports
 // AuthNone against a server that never challenges.
 type SessionInfo struct {
@@ -90,6 +91,12 @@ type SessionInfo struct {
 	// Channels lists the assigned interleaved channel pairs, one per set-up
 	// track, in Setup order. Freshly allocated; never internal state.
 	Channels []ChannelPair
+	// Transport is the media transport resolved at the first Setup: "TCP"
+	// (interleaved) or "UDP" (unicast), and "" before any track is set up. It
+	// is a plain diagnostic string, not the caller's TransportPreference: under
+	// PreferUDPThenTCP a session that fell back reports "TCP", not the
+	// preference it started from.
+	Transport string
 }
 
 // Client is a single RTSP session. Close, Wait, Stats, SessionInfo and Info are
@@ -146,6 +153,27 @@ type Client struct {
 	baseURL      string
 	channelPairs []ChannelPair
 	termErr      error
+	// transport is the caller's transport preference copied from cfg.Transport
+	// at the first successful UDP Setup. It records that a UDP negotiation
+	// happened under this preference; SessionInfo reports the resolved wire
+	// transport through sessionTransport, not this field.
+	transport TransportPreference
+	// sessionTransport is the media transport resolved at the first successful
+	// Setup and the session-wide pin every later Setup follows (D6): "" until a
+	// track is set up, then "TCP" (interleaved) or "UDP" (unicast). It backs
+	// SessionInfo.Transport and, once set, makes resolveTransport follow the pin
+	// instead of re-attempting UDP. It is a superset of udpPinned (which stays a
+	// separate flag the UDP Play and keepalive paths read): sessionTransport ==
+	// "UDP" exactly when udpPinned is true.
+	sessionTransport string
+	// udpPinned is true once a Setup has negotiated UDP transport for this
+	// session. False (the zero value) in TCP mode, which is the phase 1
+	// default and behavior. It is an atomic.Bool because armReadDeadline reads
+	// it on the reader goroutine, holding only deadlineMu (a leaf lock that must
+	// not take mu), to disable the control-connection read-idle watchdog in UDP
+	// mode, while setupUDP writes it during Setup on the caller goroutine; a
+	// plain bool would be a data race across that split.
+	udpPinned atomic.Bool
 	// auth is the active authentication state. Once a 401 has been answered,
 	// every outgoing request carries an Authorization header computed from it,
 	// with the nonce count incremented per request under the same server nonce.
@@ -193,6 +221,21 @@ type Client struct {
 	// interrupt so the reader can never re-arm past a shutdown.
 	deadlineMu   sync.Mutex
 	shuttingDown bool
+
+	// mediaMu guards media, the per-track UDP socket pairs, in UDP transport
+	// mode. It is an independent leaf lock: always taken alone, never nested
+	// inside mu or deadlineMu, and released before returning, so it cannot
+	// deadlock against the shutdown funnel or the lifecycle state machine.
+	mediaMu sync.Mutex
+	// media holds the per-track UDP socket pair, keyed by track id, once
+	// Setup has pinned the session to UDP. Nil (and safe to range over) in
+	// TCP mode.
+	media map[int]*mediaSockets
+	// udpWG tracks the UDP receive goroutines Play starts via
+	// startUDPReceivers. teardownAndJoin waits on it so they are joined
+	// deterministically before the session is declared done, the same
+	// discipline wg already applies to the keepalive timer.
+	udpWG sync.WaitGroup
 
 	closeOnce sync.Once
 	closing   chan struct{}
@@ -349,8 +392,11 @@ func (c *Client) options(ctx context.Context, reqURL string) error {
 
 // initiateShutdown funnels every terminal trigger through one place, exactly
 // once. The first cause wins. It signals the timer goroutine, records the
-// shutdown intent under deadlineMu, and interrupts a blocked read or write
-// with an immediate deadline on both directions.
+// shutdown intent under deadlineMu, interrupts a blocked read or write with
+// an immediate deadline on both directions, and (per D3) arms an immediate
+// read deadline on every UDP media socket so a receive goroutine parked in
+// ReadFromUDP unblocks promptly rather than waiting out ReadIdle or the
+// teardown deadline.
 func (c *Client) initiateShutdown(cause error) {
 	c.closeOnce.Do(func() {
 		c.setTermErr(cause)
@@ -359,6 +405,26 @@ func (c *Client) initiateShutdown(cause error) {
 		c.shuttingDown = true
 		_ = c.conn.SetDeadline(time.Now())
 		c.deadlineMu.Unlock()
+
+		// mediaMu is an independent leaf lock: taken alone here, never
+		// nested inside mu or deadlineMu. It is held only long enough to
+		// snapshot the map into a local slice; the SetReadDeadline calls
+		// below run outside the lock, so mediaMu stays a pure map-access
+		// leaf and is never held across a socket call, the same discipline
+		// closeMediaSockets applies to Close. In TCP mode media is empty,
+		// so this is a no-op.
+		c.mediaMu.Lock()
+		sockets := make([]*mediaSockets, 0, len(c.media))
+		for _, m := range c.media {
+			sockets = append(sockets, m)
+		}
+		c.mediaMu.Unlock()
+
+		now := time.Now()
+		for _, m := range sockets {
+			_ = m.rtpConn.SetReadDeadline(now)
+			_ = m.rtcpConn.SetReadDeadline(now)
+		}
 	})
 }
 
@@ -483,6 +549,7 @@ func (c *Client) SessionInfo() SessionInfo {
 		KeepaliveMethod: c.keepaliveMethod,
 		Server:          c.serverHeader,
 		Channels:        chans,
+		Transport:       c.sessionTransport,
 	}
 }
 

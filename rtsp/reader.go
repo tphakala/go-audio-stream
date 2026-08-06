@@ -338,6 +338,35 @@ func (c *Client) handleInterleaved(f InterleavedFrame) bool {
 		tr.malformed.Add(1)
 		return false
 	}
+	// process returns the "usable" verdict the resync budget consumes: a foreign
+	// payload type it rejects is NOT re-lock evidence and must not clear the
+	// budget, while an accepted packet is. Returning it directly preserves the
+	// exact phase-1 TCP behavior (a rejected payload type -> false, success ->
+	// true).
+	return c.process(tr, pkt, now)
+}
+
+// process folds one parsed RTP packet into a track's pipeline and delivers its
+// frames. It is the single shared per-packet processing point, called by both
+// the TCP interleaved reader (handleInterleaved) and the UDP RTP receive loop
+// (runRTPReceiver), so the two transports run byte-for-byte identical payload-
+// type acceptance, SSRC-reset handling, baseline seeding, gap-driven
+// depacketizer reset, delivery, counters, and RR-snapshot publication. The
+// caller guarantees single-goroutine ownership of tr for the call's duration:
+// the one reader goroutine in TCP mode, the per-track RTP receive goroutine in
+// UDP mode.
+//
+// It returns whether the packet was accepted, which is handleInterleaved's
+// "usable" verdict for the resync budget: false when a foreign payload type was
+// dropped before Observe, true once the packet was delivered. runRTPReceiver
+// discards the verdict, since UDP has no interleaved-framing resync budget.
+//
+// The wire-level liveness stamps (c.lastFrameAt, tr.lastFrameUnixNano,
+// tr.wireBytes) are NOT done here: they must count every frame or datagram that
+// arrives on the wire, whereas process runs only on packets the caller admits
+// (over UDP, only the ones the Reorderer releases). Each caller stamps them
+// itself before calling process.
+func (c *Client) process(tr *track, pkt rtp.Packet, now time.Time) bool {
 	if !tr.acceptPayloadType(pkt.Header.PayloadType, c.cfg.Logger) {
 		// A second format multiplexed onto this track's RTP channel (a
 		// telephone-event alongside speech, or the second entry of an m= line
@@ -347,7 +376,8 @@ func (c *Client) handleInterleaved(f InterleavedFrame) bool {
 		// sequence number becomes a hole this track counts as loss, which is
 		// the cheaper of the two errors: an inflated loss counter is a
 		// diagnostic, a corrupted baseline is every PTS for the rest of the
-		// session.
+		// session. Not usable re-lock evidence: it must not clear the resync
+		// budget.
 		tr.malformed.Add(1)
 		return false
 	}
@@ -355,13 +385,13 @@ func (c *Client) handleInterleaved(f InterleavedFrame) bool {
 	up := tr.stream.Observe(pkt.Header)
 	if up.SSRCReset {
 		tr.ssrcResets.Add(1)
-		tr.baseSet = false
+		tr.baseSet.Store(false)
 		tr.resetDepacketizer()
 		// The RTP-to-NTP correspondence is per SSRC: the previous source's
 		// pair must not convert the new source's timestamps.
 		tr.srClock.Store(nil)
 	}
-	if !tr.baseSet {
+	if !tr.baseSet.Load() {
 		// Also the first packet of the session, where Observe reports no reset
 		// because there was no previous stream to reset from. The sender SSRC
 		// is recorded here rather than under SSRCReset for exactly that reason:
@@ -370,7 +400,7 @@ func (c *Client) handleInterleaved(f InterleavedFrame) bool {
 		// Receiver Report named a source the server was not sending.
 		tr.senderSSRC.Store(pkt.Header.SSRC)
 		tr.baseTS = c.seededOrigin(tr, up.Timestamp)
-		tr.baseSet = true
+		tr.baseSet.Store(true)
 		tr.baselineFixed = true // the seed applies only to this first baseline.
 	}
 	if up.Gap > 0 {
@@ -439,15 +469,18 @@ func (c *Client) handleRTCP(tr *track, payload []byte, now time.Time) bool {
 	tr.lastSRUnixNano.Store(now.UnixNano())
 	// Publish the RTP-to-NTP correspondence for Stats, but only once the RTP
 	// stream has identified the media source (tr.baseSet, set on the first
-	// accepted RTP packet on this same reader goroutine). Before that packet
-	// senderSSRC is zero, so the block above adopted reports[0]; in a mixer or
+	// accepted RTP packet). In TCP mode that write and this read are the one
+	// reader goroutine; in UDP mode the RTP receive goroutine sets baseSet while
+	// this runs on the RTCP receive goroutine, which is why baseSet is an
+	// atomic.Bool and this gate is a Load. Before that first packet senderSSRC is
+	// zero, so the block above adopted reports[0]; in a mixer or
 	// translator compound that can be a contributing source the server is not
 	// sending us, and publishing its wall clock would expose a foreign mapping
 	// until a matching report arrived. Once baseSet is true the RTP path has set
 	// senderSSRC to the media source, so the senderSSRC match above already
 	// reduced the compound to that source's report (or returned on no match), so
 	// a mapping is only ever published for the confirmed media source.
-	if tr.baseSet {
+	if tr.baseSet.Load() {
 		if sr.NTPTimestamp == 0 {
 			// A sender declaring it has no wall clock (RFC 3550 section 6.4.1)
 			// maps nothing, so clear any prior correspondence rather than leave a
@@ -557,11 +590,20 @@ func (c *Client) fill() error {
 	return err
 }
 
-// armReadDeadline sets the socket read deadline for the current phase, under
-// deadlineMu so it can never race past a shutdown. Pre-play and with the
-// watchdog disabled there is no deadline; while playing with ReadIdle > 0 the
-// deadline is lastFrameAt + ReadIdle. When shutdown has begun it sets an
-// immediate deadline instead, so a blocked read cannot outlive Close.
+// armReadDeadline sets the control-connection read deadline for the current
+// phase, under deadlineMu so it can never race past a shutdown. Pre-play and
+// with the watchdog disabled there is no deadline; while playing in TCP mode
+// with ReadIdle > 0 the deadline is lastFrameAt + ReadIdle. When shutdown has
+// begun it sets an immediate deadline instead, so a blocked read cannot outlive
+// Close.
+//
+// The read-idle watchdog is disabled in UDP mode (udpPinned): there, media
+// arrives on the per-track UDP sockets, not the control connection, so the
+// control read would time out ReadIdle after the last control activity and kill
+// a perfectly healthy session. UDP media liveness is watchdogged instead on the
+// RTP sockets by runRTPReceiver (armMediaReadDeadline, watch=true). udpPinned is
+// atomic because this runs on the reader goroutine holding only deadlineMu,
+// while setupUDP sets the flag on the caller goroutine.
 func (c *Client) armReadDeadline() {
 	c.deadlineMu.Lock()
 	defer c.deadlineMu.Unlock()
@@ -570,7 +612,7 @@ func (c *Client) armReadDeadline() {
 		return
 	}
 	var deadline time.Time
-	if c.playing.Load() && c.cfg.ReadIdle > 0 {
+	if !c.udpPinned.Load() && c.playing.Load() && c.cfg.ReadIdle > 0 {
 		deadline = time.Unix(0, c.lastFrameAt.Load()).Add(c.cfg.ReadIdle)
 	}
 	_ = c.conn.SetReadDeadline(deadline)
@@ -601,8 +643,29 @@ func (c *Client) teardownAndJoin() {
 	if c.sessionEstablished() {
 		c.sendTeardownBestEffort()
 	}
+	c.closeMediaSockets()
+	c.udpWG.Wait()
 	_ = c.conn.Close()
 	c.wg.Wait()
+}
+
+// closeMediaSockets closes every UDP socket pair Setup opened. It takes
+// mediaMu alone (never nested inside mu or deadlineMu) only long enough to
+// snapshot the map into a local slice, then releases it before calling
+// Close: Close tears down two UDP sockets through the runtime poller, and
+// mediaMu must stay a pure map-access leaf, never held across a socket call.
+// In TCP mode media is empty, so this is a no-op.
+func (c *Client) closeMediaSockets() {
+	c.mediaMu.Lock()
+	sockets := make([]*mediaSockets, 0, len(c.media))
+	for _, m := range c.media {
+		sockets = append(sockets, m)
+	}
+	c.mediaMu.Unlock()
+
+	for _, m := range sockets {
+		_ = m.Close()
+	}
 }
 
 // sessionEstablished reports whether a Session id was negotiated, so the

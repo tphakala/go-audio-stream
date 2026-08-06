@@ -239,6 +239,11 @@ type ServerConn struct {
 	// skipped records interleaved frames ReadRequest and ReadResponse stepped
 	// over, so a test can assert on client-sent data that preceded a request.
 	skipped []rtsp.InterleavedFrame
+
+	// udpTracks holds the UDP media tracks handshakeSetup negotiated, in
+	// SETUP order, for a UDP HandshakeConfig. Nil for an interleaved
+	// handshake. Exposed via UDPTracks (udp.go).
+	udpTracks []UDPTrack
 }
 
 // fill compacts the consumed prefix of buf and appends one read from the
@@ -497,6 +502,20 @@ type HandshakeConfig struct {
 	TrackControls   []string  // reserved; declared for the SETUP URI assertion Handshake does not yet make
 	RangeEcho       bool      // when true, echo the PLAY Range header back
 	RTPInfo         string    // "" omits RTP-Info on the PLAY response
+
+	// UDP makes handshakeSetup negotiate RTP/AVP unicast UDP for any SETUP
+	// that proposes it, instead of the phase 1 interleaved profile. A track
+	// whose SETUP does not propose client_port (because an earlier track's
+	// rejected UDP SETUP already pinned the session TCP) still gets the
+	// ordinary interleaved answer.
+	UDP bool
+	// ServerRTPBase is the first server_port a UDP HandshakeConfig assigns;
+	// RTCP is +1, the next UDP track +2. Ignored when UDP is false.
+	ServerRTPBase int
+	// RejectUDP makes a UDP SETUP answer 461 Unsupported Transport instead of
+	// binding a server socket pair, so the client falls back to interleaved
+	// on the same track. Ignored when UDP is false.
+	RejectUDP bool
 }
 
 // AuthSpec makes Handshake demand authentication before DESCRIBE succeeds.
@@ -806,6 +825,15 @@ func digestHasher(algorithm string) func(string) string {
 // handshakeSetup reads one SETUP per m= section, assigning interleaved
 // channels from cfg.InterleavedBase, and answers each 200 with a Transport
 // and Session header. It returns the assigned channel pairs.
+//
+// For a UDP HandshakeConfig (cfg.UDP), a SETUP that proposes RTP/AVP unicast
+// (a client_port parameter) is instead bound to a server UDP socket pair via
+// acceptUDPSetup, and pairs carries a zero ChannelPair for that track;
+// UDPTracks returns the negotiated UDP tracks separately. Under cfg.RejectUDP
+// such a SETUP is answered 461 Unsupported Transport instead, and the next
+// request read is treated as that same track's interleaved retry, falling
+// through to the ordinary branch below exactly as an interleaved-only
+// handshake would.
 func (sc *ServerConn) handshakeSetup(cfg *HandshakeConfig) ([]ChannelPair, error) {
 	n := countMediaSections(cfg.SDP)
 	pairs := make([]ChannelPair, 0, n)
@@ -815,6 +843,34 @@ func (sc *ServerConn) handshakeSetup(cfg *HandshakeConfig) ([]ChannelPair, error
 			return nil, err
 		}
 		sc.expectMethod(req, "SETUP")
+
+		if cfg.UDP {
+			th, terr := rtsp.ParseTransport(req.Header.Get("Transport"))
+			if terr == nil && th.HasClientPort {
+				if cfg.RejectUDP {
+					if err := sc.Respond(req, rtsp.StatusUnsupportedTransport, "Unsupported Transport", nil, nil); err != nil {
+						return nil, err
+					}
+					// The client falls back to this same track's
+					// TCP-interleaved SETUP on this connection; read it and
+					// fall through to the interleaved branch below.
+					req, err = sc.ReadRequest()
+					if err != nil {
+						return nil, err
+					}
+					sc.expectMethod(req, "SETUP")
+				} else {
+					track, uerr := sc.acceptUDPSetup(cfg, i, req, th)
+					if uerr != nil {
+						return nil, uerr
+					}
+					sc.udpTracks = append(sc.udpTracks, track)
+					pairs = append(pairs, ChannelPair{})
+					continue
+				}
+			}
+		}
+
 		rtpCh := cfg.InterleavedBase + 2*i
 		rtcpCh := rtpCh + 1
 		// An interleaved channel is a single byte on the wire, so an

@@ -37,7 +37,10 @@ type TrackStats struct {
 	// Duplicates is the number of duplicate or reordered packets the stream
 	// observed: a sequence number that did not advance. Rare over the in-order
 	// TCP transport, so a nonzero value points at the server resending or
-	// reordering rather than ordinary loss.
+	// reordering rather than ordinary loss. Over UDP transport this
+	// under-reports: the reorder buffer drops duplicate and too-late datagrams
+	// before Stream.Observe ever sees them, so most UDP duplicates are not
+	// counted here (a known limitation tracked for follow-up).
 	Duplicates uint64
 	// Malformed is the number of packets discarded without being delivered,
 	// for any reason: an RTP header that will not parse, a payload type the

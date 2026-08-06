@@ -218,3 +218,42 @@ func TestDiscardTrackShapeInvalidNotCountedAsPacket(t *testing.T) {
 		})
 	}
 }
+
+// A shape-valid RTP packet whose payload type is foreign to the track is
+// dropped before Observe and is NOT usable re-lock evidence: handleInterleaved
+// returns false, so a burst of such frames cannot clear the resync budget. The
+// matching-payload-type control returns true, proving the false verdict is the
+// payload-type decision and not a blanket rejection. This pins the usable
+// verdict process returns to the reader, the exact corner that regressed when
+// process briefly returned nothing and handleInterleaved always reported true.
+func TestActiveTrackForeignPayloadTypeNotUsable(t *testing.T) {
+	t.Parallel()
+
+	// Foreign payload type 97 against a track whose SDP declared 96.
+	foreign := &track{id: 0, sdpPayloadType: 96}
+	cf := &Client{}
+	cf.channels.Store(newChannelTable(nil, foreign, 0, 1))
+	foreignFrame := InterleavedFrame{Channel: 0, Payload: buildTestRTP(97, 1, 0, 0x0A0B0C0D, []byte{0xff})}
+	if usable := cf.handleInterleaved(foreignFrame); usable {
+		t.Error("handleInterleaved usable = true for a foreign payload type, want false (must not clear the resync budget)")
+	}
+	if got := foreign.malformed.Load(); got != 1 {
+		t.Errorf("malformed = %d, want 1 (a foreign payload type is counted as malformed)", got)
+	}
+	if got := foreign.packets.Load(); got != 0 {
+		t.Errorf("packets = %d, want 0 (a foreign payload type is dropped before delivery)", got)
+	}
+
+	// The declared payload type on the same shape is usable, so the false above
+	// is the payload-type verdict, not a rejection of every packet.
+	match := &track{id: 0, sdpPayloadType: 96}
+	cm := &Client{}
+	cm.channels.Store(newChannelTable(nil, match, 0, 1))
+	matchFrame := InterleavedFrame{Channel: 0, Payload: buildTestRTP(96, 1, 0, 0x0A0B0C0D, []byte{0xff})}
+	if usable := cm.handleInterleaved(matchFrame); !usable {
+		t.Error("handleInterleaved usable = false for the declared payload type, want true")
+	}
+	if got := match.packets.Load(); got != 1 {
+		t.Errorf("packets = %d, want 1 (the declared payload type is delivered)", got)
+	}
+}

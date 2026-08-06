@@ -259,7 +259,8 @@ func TestPtsOf(t *testing.T) {
 
 func TestDeliverOpus(t *testing.T) {
 	t.Parallel()
-	tr := &track{id: 2, kind: deliverOpus, clockRate: 48000, baseSet: true}
+	tr := &track{id: 2, kind: deliverOpus, clockRate: 48000}
+	tr.baseSet.Store(true)
 	payload := []byte{0x78, 0x01, 0x02, 0x03}
 	pkt := rtp.Packet{Header: rtp.Header{Timestamp: 480}, Payload: payload}
 	up := rtp.Update{Timestamp: 480, Gap: 0}
@@ -286,7 +287,8 @@ func TestDeliverOpus(t *testing.T) {
 
 func TestDeliverOpusEmptyPayloadMalformed(t *testing.T) {
 	t.Parallel()
-	tr := &track{id: 0, kind: deliverOpus, clockRate: 48000, baseSet: true}
+	tr := &track{id: 0, kind: deliverOpus, clockRate: 48000}
+	tr.baseSet.Store(true)
 	pkt := rtp.Packet{Header: rtp.Header{}, Payload: nil}
 	n := 0
 	tr.deliver(pkt, rtp.Update{}, time.Unix(1, 0), func(audiostream.Frame) { n++ })
@@ -309,7 +311,8 @@ func TestDeliverG711(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			tr := &track{id: 3, kind: deliverG711, clockRate: 8000, law: tc.law, baseSet: true}
+			tr := &track{id: 3, kind: deliverG711, clockRate: 8000, law: tc.law}
+			tr.baseSet.Store(true)
 			payload := []byte{0x00, 0x7f, 0x80, 0xff}
 			pkt := rtp.Packet{Header: rtp.Header{Timestamp: 160}, Payload: payload}
 
@@ -331,7 +334,8 @@ func TestDeliverG711(t *testing.T) {
 
 func TestDeliverG711BufferReuse(t *testing.T) {
 	t.Parallel()
-	tr := &track{id: 0, kind: deliverG711, clockRate: 8000, law: audiostream.MuLaw, baseSet: true}
+	tr := &track{id: 0, kind: deliverG711, clockRate: 8000, law: audiostream.MuLaw}
+	tr.baseSet.Store(true)
 	big := rtp.Packet{Payload: make([]byte, 200)}
 	tr.deliver(big, rtp.Update{}, time.Unix(1, 0), func(audiostream.Frame) {})
 	grown := cap(tr.pcmBuf)
@@ -351,7 +355,8 @@ func TestDeliverL16(t *testing.T) {
 	// Two 16-bit samples, big-endian on the wire (RFC 3551 network byte order).
 	// deliverL16 must hand them to OnFrame byte-swapped to little-endian s16le,
 	// the same byte order G.711 delivers.
-	tr := &track{id: 4, kind: deliverL16, clockRate: 48000, baseSet: true}
+	tr := &track{id: 4, kind: deliverL16, clockRate: 48000}
+	tr.baseSet.Store(true)
 	// Three distinct-valued samples, so a length-dependent or short-prefix swap
 	// bug (which a single 2-sample payload would miss) is caught.
 	payload := []byte{0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc}
@@ -395,7 +400,8 @@ func TestDeliverL16Malformed(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			tr := &track{id: 0, kind: deliverL16, clockRate: 48000, baseSet: true}
+			tr := &track{id: 0, kind: deliverL16, clockRate: 48000}
+			tr.baseSet.Store(true)
 			pkt := rtp.Packet{Header: rtp.Header{}, Payload: tc.payload}
 			n := 0
 			tr.deliver(pkt, rtp.Update{}, time.Unix(1, 0), func(audiostream.Frame) { n++ })
@@ -411,7 +417,8 @@ func TestDeliverL16Malformed(t *testing.T) {
 
 func TestDeliverL16BufferReuse(t *testing.T) {
 	t.Parallel()
-	tr := &track{id: 0, kind: deliverL16, clockRate: 48000, baseSet: true}
+	tr := &track{id: 0, kind: deliverL16, clockRate: 48000}
+	tr.baseSet.Store(true)
 	big := rtp.Packet{Payload: make([]byte, 320)}
 	tr.deliver(big, rtp.Update{}, time.Unix(1, 0), func(audiostream.Frame) {})
 	grown := cap(tr.pcmBuf)
@@ -429,7 +436,8 @@ func TestDeliverL16NilOnFrame(t *testing.T) {
 	t.Parallel()
 	// A valid payload with a nil OnFrame delivers nothing and, like the Opus
 	// path, records no malformed packet.
-	valid := &track{id: 0, kind: deliverL16, clockRate: 48000, baseSet: true}
+	valid := &track{id: 0, kind: deliverL16, clockRate: 48000}
+	valid.baseSet.Store(true)
 	valid.deliver(rtp.Packet{Payload: []byte{0x00, 0x11}}, rtp.Update{}, time.Unix(1, 0), nil)
 	if valid.malformed.Load() != 0 {
 		t.Errorf("malformed = %d for a valid payload with nil OnFrame, want 0", valid.malformed.Load())
@@ -438,7 +446,8 @@ func TestDeliverL16NilOnFrame(t *testing.T) {
 	// must not depend on a callback being registered. This pins the guard order
 	// (malformed counted before the onFrame==nil check); reordering the two
 	// guards would make this assertion fail.
-	odd := &track{id: 0, kind: deliverL16, clockRate: 48000, baseSet: true}
+	odd := &track{id: 0, kind: deliverL16, clockRate: 48000}
+	odd.baseSet.Store(true)
 	odd.deliver(rtp.Packet{Payload: []byte{0x00, 0x11, 0x22}}, rtp.Update{}, time.Unix(1, 0), nil)
 	if odd.malformed.Load() != 1 {
 		t.Errorf("malformed = %d for an odd payload with nil OnFrame, want 1", odd.malformed.Load())
@@ -487,7 +496,8 @@ func TestDeliverL16StereoWholeFrames(t *testing.T) {
 
 func TestDeliverRaw(t *testing.T) {
 	t.Parallel()
-	tr := &track{id: 7, kind: deliverRaw, clockRate: 90000, baseSet: true}
+	tr := &track{id: 7, kind: deliverRaw, clockRate: 90000}
+	tr.baseSet.Store(true)
 	payload := []byte{0xde, 0xad, 0xbe, 0xef}
 	pkt := rtp.Packet{Header: rtp.Header{Timestamp: 0}, Payload: payload}
 	var got audiostream.Frame
@@ -502,7 +512,8 @@ func TestDeliverRaw(t *testing.T) {
 
 func TestDeliverAACSingleAU(t *testing.T) {
 	t.Parallel()
-	tr := &track{id: 0, kind: deliverAAC, clockRate: 16000, aac: newAACDepacketizer(t), baseSet: true}
+	tr := &track{id: 0, kind: deliverAAC, clockRate: 16000, aac: newAACDepacketizer(t)}
+	tr.baseSet.Store(true)
 	au := []byte{0x11, 0x22, 0x33}
 	pkt := rtp.Packet{Header: rtp.Header{Timestamp: 100, Marker: true}, Payload: buildAUHeaders(au)}
 
@@ -528,7 +539,8 @@ func TestDeliverAACMultipleAUs(t *testing.T) {
 	t.Parallel()
 	// baseTS equals the packet timestamp, as the hot path seeds it on the
 	// first frame, so the first AU's PTS is 0 and later AUs interpolate.
-	tr := &track{id: 0, kind: deliverAAC, clockRate: 16000, aac: newAACDepacketizer(t), baseTS: 200, baseSet: true}
+	tr := &track{id: 0, kind: deliverAAC, clockRate: 16000, aac: newAACDepacketizer(t), baseTS: 200}
+	tr.baseSet.Store(true)
 	au0, au1, au2 := []byte{1, 2}, []byte{3, 4, 5}, []byte{6}
 	pkt := rtp.Packet{Header: rtp.Header{Timestamp: 200, Marker: true}, Payload: buildAUHeaders(au0, au1, au2)}
 
@@ -562,7 +574,8 @@ func TestDeliverAACMultipleAUs(t *testing.T) {
 
 func TestDeliverAACMalformed(t *testing.T) {
 	t.Parallel()
-	tr := &track{id: 0, kind: deliverAAC, clockRate: 16000, aac: newAACDepacketizer(t), baseSet: true}
+	tr := &track{id: 0, kind: deliverAAC, clockRate: 16000, aac: newAACDepacketizer(t)}
+	tr.baseSet.Store(true)
 	// A one-byte payload is too short for the AU-headers-length field.
 	pkt := rtp.Packet{Header: rtp.Header{Marker: true}, Payload: []byte{0x00}}
 	n := 0
@@ -577,7 +590,8 @@ func TestDeliverAACMalformed(t *testing.T) {
 
 func TestDeliverNilOnFrameCounts(t *testing.T) {
 	t.Parallel()
-	tr := &track{id: 0, kind: deliverOpus, clockRate: 48000, baseSet: true}
+	tr := &track{id: 0, kind: deliverOpus, clockRate: 48000}
+	tr.baseSet.Store(true)
 	pkt := rtp.Packet{Header: rtp.Header{}, Payload: []byte{0x78, 0x01}}
 	// A nil OnFrame must not panic; it delivers nothing but also does not
 	// record a malformed packet.
@@ -687,19 +701,24 @@ func TestZeroAllocSteadyStateDelivery(t *testing.T) {
 	now := time.Unix(1, 0)
 	noop := func(audiostream.Frame) {}
 
-	aacTr := &track{id: 0, kind: deliverAAC, clockRate: 16000, aac: newAACDepacketizer(t), baseSet: true}
+	aacTr := &track{id: 0, kind: deliverAAC, clockRate: 16000, aac: newAACDepacketizer(t)}
+	aacTr.baseSet.Store(true)
 	aacPkt := rtp.Packet{Header: rtp.Header{Timestamp: 0, Marker: true}, Payload: buildAUHeaders([]byte{1, 2, 3, 4})}
 
-	opusTr := &track{id: 1, kind: deliverOpus, clockRate: 48000, baseSet: true}
+	opusTr := &track{id: 1, kind: deliverOpus, clockRate: 48000}
+	opusTr.baseSet.Store(true)
 	opusPkt := rtp.Packet{Header: rtp.Header{Timestamp: 0}, Payload: []byte{0x78, 0x01, 0x02, 0x03}}
 
-	g711Tr := &track{id: 2, kind: deliverG711, clockRate: 8000, law: audiostream.MuLaw, baseSet: true}
+	g711Tr := &track{id: 2, kind: deliverG711, clockRate: 8000, law: audiostream.MuLaw}
+	g711Tr.baseSet.Store(true)
 	g711Pkt := rtp.Packet{Header: rtp.Header{Timestamp: 0}, Payload: make([]byte, 160)}
 
-	rawTr := &track{id: 3, kind: deliverRaw, clockRate: 90000, baseSet: true}
+	rawTr := &track{id: 3, kind: deliverRaw, clockRate: 90000}
+	rawTr.baseSet.Store(true)
 	rawPkt := rtp.Packet{Header: rtp.Header{Timestamp: 0}, Payload: []byte{0xaa, 0xbb, 0xcc}}
 
-	l16Tr := &track{id: 4, kind: deliverL16, clockRate: 48000, baseSet: true}
+	l16Tr := &track{id: 4, kind: deliverL16, clockRate: 48000}
+	l16Tr.baseSet.Store(true)
 	l16Pkt := rtp.Packet{Header: rtp.Header{Timestamp: 0}, Payload: make([]byte, 320)}
 
 	cases := []struct {

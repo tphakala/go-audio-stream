@@ -24,9 +24,9 @@ var (
 	ErrChannelConflict = errors.New("rtsp: interleaved channel already claimed")
 )
 
-// TransportHeader is a parsed RTSP Transport header for the TCP-interleaved
-// profile. UDP-specific fields are out of scope for phase 1 and are added
-// in phase 2.
+// TransportHeader is a parsed RTSP Transport header, covering both the
+// TCP-interleaved profile (phase 1) and the RTP/AVP unicast UDP profile
+// (phase 2).
 type TransportHeader struct {
 	// Protocol is the transport-spec token, for example "RTP/AVP/TCP".
 	Protocol string
@@ -49,6 +49,21 @@ type TransportHeader struct {
 	// Source and Destination are the optional address parameters, "" absent.
 	Source      string
 	Destination string
+	// ClientRTPPort and ClientRTCPPort are the client_port=a-b pair as
+	// received, 0 when absent.
+	ClientRTPPort  int
+	ClientRTCPPort int
+	// ServerRTPPort and ServerRTCPPort are the server_port=a-b pair as
+	// received, 0 when absent.
+	ServerRTPPort  int
+	ServerRTCPPort int
+	// HasClientPort and HasServerPort are true when a client_port or
+	// server_port pair with both sides numeric was present. They report
+	// only that a pair was parsed, NOT that the pair is usable: ServerPorts
+	// enforces the range and consecutiveness rules for the server_port pair
+	// before a caller can trust it.
+	HasClientPort bool
+	HasServerPort bool
 }
 
 // ParseTransport parses one Transport header field value (the server's
@@ -91,6 +106,10 @@ func applyTransportParam(t *TransportHeader, param string) {
 		// Recognized; no dedicated field, Unicast stays false.
 	case hasEq && name == "interleaved":
 		parseInterleavedParam(t, val)
+	case hasEq && name == "client_port":
+		parsePortPair(val, &t.ClientRTPPort, &t.ClientRTCPPort, &t.HasClientPort)
+	case hasEq && name == "server_port":
+		parsePortPair(val, &t.ServerRTPPort, &t.ServerRTCPPort, &t.HasServerPort)
 	case hasEq && name == "mode":
 		t.Mode = strings.ToUpper(strings.Trim(val, `"`))
 	case hasEq && name == "ssrc":
@@ -124,6 +143,28 @@ func parseInterleavedParam(t *TransportHeader, val string) {
 	}
 }
 
+// parsePortPair parses a client_port or server_port value "a[-b]" into rtp,
+// rtcp, and has. A pair with both sides numeric sets rtp, rtcp, and has to
+// true, leaving the range and consecutiveness checks to ServerPorts; a lone
+// port number sets only rtp and leaves has false, matching how
+// parseInterleavedParam treats a lone channel; anything else is ignored.
+func parsePortPair(val string, rtp, rtcp *int, has *bool) {
+	rtpStr, rtcpStr, hasDash := strings.Cut(val, "-")
+	if hasDash {
+		r, rerr := strconv.Atoi(strings.TrimSpace(rtpStr))
+		c, cerr := strconv.Atoi(strings.TrimSpace(rtcpStr))
+		if rerr == nil && cerr == nil {
+			*rtp = r
+			*rtcp = c
+			*has = true
+		}
+		return
+	}
+	if r, err := strconv.Atoi(strings.TrimSpace(val)); err == nil {
+		*rtp = r
+	}
+}
+
 // InterleavedChannels validates and returns the server-assigned interleaved
 // channel pair, enforcing the observed rules: the pair must be present,
 // consecutive (rtcp == rtp+1), each in 0..255, and not overlap a channel in
@@ -152,6 +193,29 @@ func (t TransportHeader) InterleavedChannels(claimed map[int]bool) (rtp, rtcp in
 // the format imposes this ceiling; it is not a policy this package chose.
 const maxInterleavedChannel = 255
 
+// minUDPPort and maxUDPPort bound a valid UDP port number.
+const (
+	minUDPPort = 1
+	maxUDPPort = 65535
+)
+
+// ServerPorts returns the server_port RTP and RTCP pair and whether it was
+// present and valid (both numeric, RTCP == RTP+1, each in 1..65535). It
+// never panics.
+//
+//nolint:gocritic // value receiver matches InterleavedChannels above: TransportHeader is a small stateless header value, not a hot-path allocation.
+func (t TransportHeader) ServerPorts() (rtp, rtcp int, ok bool) {
+	if !t.HasServerPort {
+		return 0, 0, false
+	}
+	if t.ServerRTCPPort != t.ServerRTPPort+1 ||
+		t.ServerRTPPort < minUDPPort || t.ServerRTPPort > maxUDPPort ||
+		t.ServerRTCPPort < minUDPPort || t.ServerRTCPPort > maxUDPPort {
+		return 0, 0, false
+	}
+	return t.ServerRTPPort, t.ServerRTCPPort, true
+}
+
 // BuildTransport builds the client SETUP Transport proposal for the
 // TCP-interleaved profile with the given channel pair (RTP then RTCP):
 // "RTP/AVP/TCP;unicast;interleaved=<rtp>-<rtcp>". The server may renumber;
@@ -166,6 +230,15 @@ const maxInterleavedChannel = 255
 // here.
 func BuildTransport(rtpChannel, rtcpChannel int) string {
 	return "RTP/AVP/TCP;unicast;interleaved=" + strconv.Itoa(rtpChannel) + "-" + strconv.Itoa(rtcpChannel)
+}
+
+// BuildTransportUDP builds the client SETUP Transport proposal for the
+// RTP/AVP unicast UDP profile with the given client RTP and RTCP ports:
+// "RTP/AVP;unicast;client_port=<rtp>-<rtcp>". The server may assign
+// different server_port values; its response, parsed by ServerPorts, is
+// authoritative.
+func BuildTransportUDP(clientRTPPort, clientRTCPPort int) string {
+	return "RTP/AVP;unicast;client_port=" + strconv.Itoa(clientRTPPort) + "-" + strconv.Itoa(clientRTCPPort)
 }
 
 // DefaultSessionTimeout is the assumed session timeout when the Session

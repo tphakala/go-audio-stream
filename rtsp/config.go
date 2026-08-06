@@ -2,6 +2,7 @@ package rtsp
 
 import (
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
@@ -28,6 +29,24 @@ const (
 const (
 	defaultRTSPPort  = 554
 	defaultRTSPSPort = 322
+)
+
+// TransportPreference selects the media transport the client negotiates at
+// Setup. The zero value PreferTCP reproduces the phase 1 TCP-interleaved
+// behavior exactly, so existing callers are unaffected.
+type TransportPreference uint8
+
+const (
+	// PreferTCP negotiates only RTP/AVP/TCP interleaved transport. It is the
+	// zero value and the phase 1 default.
+	PreferTCP TransportPreference = iota
+	// PreferUDP negotiates only RTP/AVP unicast UDP. A server that rejects
+	// the UDP SETUP yields ErrUDPSetupRejected with no fallback.
+	PreferUDP
+	// PreferUDPThenTCP tries UDP first and, if the first track's UDP SETUP is
+	// rejected, transparently re-issues it over TCP interleaved and pins TCP
+	// for the session.
+	PreferUDPThenTCP
 )
 
 // Config configures a Client. OnFrame is registered here, before any Setup
@@ -79,6 +98,10 @@ type Config struct {
 	// or a quirky fmtp, and a SETUP response whose Session header is missing or
 	// inconsistent. Credentials are never logged.
 	Logger *slog.Logger
+	// Transport selects the media transport the client negotiates at Setup.
+	// The zero value, PreferTCP, reproduces the phase 1 TCP-interleaved
+	// behavior exactly.
+	Transport TransportPreference
 }
 
 // applyDefaults fills a zero or negative Timeout and a zero UserAgent with
@@ -145,6 +168,14 @@ type SetupOptions struct {
 	// but never depacketizing or delivering them.
 	Discard bool
 }
+
+// ErrUDPSetupRejected is returned by Setup under PreferUDP when the server
+// declines the UDP transport (non-2xx, 461 Unsupported Transport, or a
+// Transport response with no usable server_port). It is also returned under
+// PreferUDPThenTCP for a 2xx response carrying an unusable server_port: the
+// server has already allocated the session, so this is not a clean rejection
+// the client may silently retry over TCP.
+var ErrUDPSetupRejected = errors.New("rtsp: server rejected UDP transport")
 
 // target is the resolved dial destination parsed from a Config: the address
 // to connect, the request-URI to use on the wire (userinfo stripped), the
