@@ -145,10 +145,7 @@ func (r *Reorderer) Flush(out []Released) []Released {
 // uninitialized state, so the next Push re-establishes the release point. The
 // receive goroutine calls it after Flush on an SSRC change.
 func (r *Reorderer) Reset() {
-	r.slots = [MaxReorderWindow]slot{}
-	r.initialized = false
-	r.nextSeq = 0
-	r.buffered = 0
+	*r = Reorderer{}
 }
 
 // ReorderStats is a snapshot of a Reorderer's cumulative counters.

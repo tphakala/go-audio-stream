@@ -255,6 +255,40 @@ func TestReordererFlushOnSSRCChangeThenReset(t *testing.T) {
 	}
 }
 
+func TestReordererResetClearsCumulativeCounters(t *testing.T) {
+	t.Parallel()
+	var r rtp.Reorderer
+	var out []rtp.Released
+
+	// Produce a late/duplicate drop.
+	out = r.Push(100, []byte{100}, out)
+	out = r.Push(101, []byte{101}, out)
+	out = r.Push(101, []byte{101}, out) // late: already released
+	if st := r.Stats(); st.Late == 0 {
+		t.Fatalf("Late = %d, want > 0 before reset", st.Late)
+	}
+
+	// Produce a window-overflow force-release.
+	out = r.Push(300, []byte{0}, out) // far ahead of the release point, forces the gap
+	if st := r.Stats(); st.Forced == 0 {
+		t.Fatalf("Forced = %d, want > 0 before reset", st.Forced)
+	}
+
+	r.Reset()
+
+	if st := r.Stats(); st.Late != 0 || st.Forced != 0 || st.Buffered != 0 {
+		t.Fatalf("stats after reset = %+v, want all zero", st)
+	}
+
+	out = r.Push(700, []byte{7}, out)
+	if want := []uint16{700}; !seqsEqual(out, want) {
+		t.Fatalf("push after reset: got %v, want %v", seqs(out), want)
+	}
+	if st := r.Stats(); st.Buffered != 0 {
+		t.Fatalf("buffered after reset+push = %d, want 0", st.Buffered)
+	}
+}
+
 func seqs(rel []rtp.Released) []uint16 {
 	out := make([]uint16, len(rel))
 	for i, r := range rel {
