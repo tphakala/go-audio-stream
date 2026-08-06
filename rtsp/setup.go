@@ -34,6 +34,11 @@ var (
 // track's depacketization pipeline into the channel routing table. It is legal
 // only in the described or setup state, else it returns a *StateError.
 //
+// Under a UDP transport preference (PreferUDP or PreferUDPThenTCP) it instead
+// dispatches to the UDP negotiation (setupUDP), which proposes RTP/AVP unicast
+// and, on success, publishes the track without touching the interleaved channel
+// table. The description below of the interleaved profile is the TCP path.
+//
 // trk must be a Track returned by this client's most recent Describe. Anything
 // else is ErrUnknownTrack, and a track already set up is ErrTrackAlreadySetUp.
 //
@@ -317,10 +322,14 @@ func (c *Client) describedTrackFor(trk *Track) (describedTrack, error) {
 		return describedTrack{}, fmt.Errorf("%w: id %d does not carry the control URL Describe resolved for it",
 			ErrUnknownTrack, trk.ID)
 	}
-	for _, p := range c.channelPairs {
-		if p.TrackID == trk.ID {
-			return describedTrack{}, fmt.Errorf("%w: id %d on channels %d-%d",
-				ErrTrackAlreadySetUp, trk.ID, p.RTP, p.RTCP)
+	// Scan c.tracks, not c.channelPairs: both publishTrack (TCP) and
+	// publishUDPTrack (UDP) append to c.tracks under c.mu, but only publishTrack
+	// records a channel pair. Guarding on c.tracks rejects a duplicate Setup of
+	// either transport; over UDP a second Setup would otherwise open a second
+	// socket pair, orphan the first, and leave two goroutines reading one socket.
+	for _, t := range c.tracks {
+		if t.id == trk.ID {
+			return describedTrack{}, fmt.Errorf("%w: id %d", ErrTrackAlreadySetUp, trk.ID)
 		}
 	}
 	return desc, nil

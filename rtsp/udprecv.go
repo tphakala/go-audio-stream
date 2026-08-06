@@ -153,9 +153,13 @@ func (c *Client) runRTCPReceiver(tr *track, m *mediaSockets) {
 // counts stay consistent between TCP and UDP; the media-liveness stamps advance
 // too, matching the TCP discard branch. On the RTCP socket (isRTCP true) it
 // drains and attributes nothing, matching the TCP discard path. Play starts two
-// per discard track, one per socket, so a socket close unblocks each. Like the
-// RTP receiver it stops once shutdown arms the immediate deadline, and RTCP is
-// advisory so a read error just ends the goroutine.
+// per discard track, one per socket, so a socket close unblocks each. It stops
+// once shutdown arms the immediate deadline. The RTP socket (isRTCP false) arms
+// the ReadIdle watchdog and funnels a read error through classifyMediaReadErr,
+// matching runRTPReceiver, so a session of only discard tracks still detects a
+// dead peer and a genuine socket error is not swallowed; the RTCP socket
+// (isRTCP true) is advisory, so it neither arms the watchdog nor funnels: a read
+// error just ends the goroutine.
 //
 // peerIP is the negotiated media source for this socket (m.rtpPeer.IP or
 // m.rtcpPeer.IP). A datagram from any other host is dropped before accounting,
@@ -166,11 +170,18 @@ func (c *Client) runDiscardReceiver(tr *track, conn *net.UDPConn, peerIP net.IP,
 
 	buf := make([]byte, maxDatagramSize)
 	for {
-		if !c.armMediaReadDeadline(conn, false) {
+		if !c.armMediaReadDeadline(conn, !isRTCP) {
 			return // shutdown has begun.
 		}
 		n, addr, err := conn.ReadFromUDP(buf)
 		if err != nil {
+			if !isRTCP {
+				// The RTP socket mirrors runRTPReceiver: a watchdog timeout while
+				// playing funnels ErrReadTimeout and any other non-shutdown error
+				// funnels ErrConnectionClosed. RTCP is advisory, so it returns
+				// silently.
+				c.classifyMediaReadErr(err)
+			}
 			return
 		}
 		if !fromPeer(addr, peerIP) {
@@ -199,9 +210,10 @@ func (c *Client) runDiscardReceiver(tr *track, conn *net.UDPConn, peerIP net.IP,
 // datagrams whose source IP matches the resolved peer are treated as media. The
 // match is on IP alone, not port: a server may legitimately send media from a
 // source port other than the server_port it advertised, and resolveServerPeers
-// already fixed the media source IP (the Transport source= parameter when
-// present, else the control-connection peer). A nil addr (not expected from a
-// successful ReadFromUDP) is treated as foreign rather than dereferenced.
+// already fixed the media source IP to the control-connection peer (for a
+// unicast session the media source is always that peer). A nil addr (not
+// expected from a successful ReadFromUDP) is treated as foreign rather than
+// dereferenced.
 func fromPeer(addr *net.UDPAddr, peerIP net.IP) bool {
 	return addr != nil && addr.IP.Equal(peerIP)
 }
@@ -210,10 +222,11 @@ func fromPeer(addr *net.UDPAddr, peerIP net.IP) bool {
 // under deadlineMu so it can never race past a shutdown, mirroring the control
 // connection's armReadDeadline. It reports whether the caller should proceed
 // with the read: false once shutdown has begun, when it installs an immediate
-// deadline so a parked read returns at once. When watch is set (the RTP socket)
-// and the session is playing with ReadIdle > 0, it arms the read-idle watchdog
-// at now+ReadIdle; the RTCP and discard sockets pass watch false, since RTCP is
-// sparse and a watchdog there would fire on a healthy stream.
+// deadline so a parked read returns at once. When watch is set (any RTP socket,
+// including a discard track's) and the session is playing with ReadIdle > 0, it
+// arms the read-idle watchdog at now+ReadIdle; the RTCP sockets pass watch
+// false, since RTCP is sparse and a watchdog there would fire on a healthy
+// stream.
 func (c *Client) armMediaReadDeadline(conn *net.UDPConn, watch bool) bool {
 	c.deadlineMu.Lock()
 	defer c.deadlineMu.Unlock()

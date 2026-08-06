@@ -117,6 +117,33 @@ func (h *recvHarness) start() {
 	go h.c.runRTPReceiver(h.tr, h.m)
 }
 
+// startDiscardRTP records the goroutine baseline and launches the discard
+// receiver on the RTP socket (isRTCP false), the way Play does for a discard
+// track. The sender h.send dials the RTP socket, so h.sendRTP feeds this
+// receiver.
+func (h *recvHarness) startDiscardRTP() {
+	h.baseline = runtime.NumGoroutine()
+	h.c.udpWG.Add(1)
+	go h.c.runDiscardReceiver(h.tr, h.m.rtpConn, h.m.rtpPeer.IP, false)
+}
+
+// waitCounter polls an atomic counter until it reaches want or the deadline
+// passes, so a test can synchronize on the discard receiver having processed a
+// datagram without a frame-delivery channel to wait on.
+func waitCounter(t *testing.T, get func() uint64, want uint64, name string) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if got := get(); got == want {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("%s = %d, want %d (timed out)", name, get(), want)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
 // sendRTP writes one RTP datagram to the receiver's RTP socket.
 func (h *recvHarness) sendRTP(pkt []byte) {
 	h.t.Helper()
@@ -224,27 +251,59 @@ func TestUDPRecvReordered(t *testing.T) {
 }
 
 // A packet more than the reorder window ahead force-releases the gap, and the
-// buffered packet past the hole surfaces the real loss as SeqGap == 1.
+// buffered packets past the hole surface the real loss as SeqGap == 1 on the
+// first of them. It also proves the HOLD: the buffered run is NOT delivered
+// until the force-triggering packet arrives. A Reorderer bypass would deliver
+// each packet the instant it was pushed and trip the mid-run empty assertion.
 func TestUDPRecvLoss(t *testing.T) {
 	h := newRecvHarness(t, harnessOpts{})
 	h.start()
 
 	const ssrc = 0x33333333
+	// Establish the release point at 300 and drain its frame, so the receiver
+	// has provably processed it before the gap is opened.
 	h.sendRTP(buildTestRTP(96, 300, 300, ssrc, []byte{0}))
 	if f := h.waitFrame(); f.RTPTime != 300 {
 		t.Fatalf("first frame RTPTime = %d, want 300", f.RTPTime)
 	}
-	// 301 never arrives. 302 is buffered, then a packet a full window ahead
-	// forces the release point past the missing 301, releasing 302.
-	h.sendRTP(buildTestRTP(96, 302, 302, ssrc, []byte{2}))
-	h.sendRTP(buildTestRTP(96, 300+rtp.MaxReorderWindow+1, 999, ssrc, []byte{9}))
 
-	f := h.waitFrame()
-	if f.RTPTime != 302 {
-		t.Fatalf("post-loss frame RTPTime = %d, want 302", f.RTPTime)
+	// 301 is the lost packet and never arrives. Buffer 302 and 303 behind the
+	// gap, then a sentinel 304, all within the reorder window so none forces a
+	// release on its own. wireBytes is stamped before the Reorderer and the
+	// receive goroutine processes datagrams strictly in order, so once wireBytes
+	// counts all four datagrams the iterations for 302 and 303 are fully done:
+	// under a passthrough (Reorderer bypassed) their frames would already have
+	// been delivered by this point.
+	h.sendRTP(buildTestRTP(96, 302, 302, ssrc, []byte{2}))
+	h.sendRTP(buildTestRTP(96, 303, 303, ssrc, []byte{3}))
+	h.sendRTP(buildTestRTP(96, 304, 304, ssrc, []byte{4}))
+	// Four datagrams of rtp.HeaderSize+1 bytes each (300, 302, 303, 304).
+	waitCounter(t, h.tr.wireBytes.Load, 4*(rtp.HeaderSize+1), "wireBytes")
+
+	// The HOLD assertion: nothing past the gap has been delivered yet, because
+	// the force-triggering packet has not arrived. A Reorderer bypass fails here.
+	select {
+	case f := <-h.frames:
+		t.Fatalf("frame RTPTime %d delivered before the window was forced; packets past a gap must be HELD", f.RTPTime)
+	default:
 	}
-	if f.SeqGap != 1 {
-		t.Errorf("post-loss frame SeqGap = %d, want 1 (301 lost)", f.SeqGap)
+
+	// A packet a full window ahead of the missing 301 forces the release point
+	// past the hole, releasing the entire buffered run 302,303,304 in one burst.
+	h.sendRTP(buildTestRTP(96, 301+rtp.MaxReorderWindow, 999, ssrc, []byte{9}))
+
+	for idx, wantTS := range []uint32{302, 303, 304} {
+		f := h.waitFrame()
+		if f.RTPTime != wantTS {
+			t.Fatalf("post-loss frame %d RTPTime = %d, want %d", idx, f.RTPTime, wantTS)
+		}
+		wantGap := 0
+		if idx == 0 {
+			wantGap = 1 // 301 lost, surfaced on the first frame released past the gap.
+		}
+		if f.SeqGap != wantGap {
+			t.Errorf("post-loss frame %d (RTPTime %d) SeqGap = %d, want %d", idx, f.RTPTime, f.SeqGap, wantGap)
+		}
 	}
 	h.stop()
 }
@@ -334,4 +393,61 @@ func TestUDPRecvSourceAddressFilter(t *testing.T) {
 		t.Errorf("lastFrameAt = %d, want 0 (a foreign-source datagram must not feed the watchdog)", got)
 	}
 	dropped.stop()
+}
+
+// A discard track's RTP receiver counts wireBytes for every datagram from the
+// peer but counts a packet only for a shape-valid one (a full RTP header and
+// version 2), matching the TCP discard branch. Nothing is depacketized, so no
+// frame is delivered.
+func TestUDPDiscardReceiverCountsWireAndShape(t *testing.T) {
+	h := newRecvHarness(t, harnessOpts{})
+	// The receiver ignores tr.discard, but set it so the track faithfully models
+	// a discard track over UDP.
+	h.tr.discard = true
+	h.startDiscardRTP()
+
+	// Shape-valid: version 2 and a full header, so it counts as a packet.
+	valid := buildTestRTP(96, 1, 1, 0xABCDEF01, []byte{1, 2, 3, 4})
+	// Shape-invalid (too short): under rtp.HeaderSize, so wire traffic but not a
+	// packet.
+	short := []byte{0x80, 0x00, 0x00}
+	// Shape-invalid (wrong version): long enough but version bits are 0, not 2.
+	wrongVersion := make([]byte, rtp.HeaderSize+2)
+	wantWire := uint64(len(valid) + len(short) + len(wrongVersion))
+
+	h.sendRTP(valid)
+	h.sendRTP(short)
+	h.sendRTP(wrongVersion)
+
+	waitCounter(t, h.tr.wireBytes.Load, wantWire, "wireBytes")
+	if got := h.tr.packets.Load(); got != 1 {
+		t.Errorf("packets = %d, want 1 (only the shape-valid datagram counts)", got)
+	}
+	if got := h.tr.malformed.Load(); got != 0 {
+		t.Errorf("malformed = %d, want 0 (a discard track never parses, so never reports malformed)", got)
+	}
+	select {
+	case f := <-h.frames:
+		t.Fatalf("discard receiver delivered a frame: %+v", f)
+	default:
+	}
+	h.stop()
+}
+
+// A discard track's RTP socket arms the ReadIdle watchdog: with the session
+// playing and the peer gone silent, the receiver funnels ErrReadTimeout and
+// exits without leaking, instead of hanging forever as it did before the
+// watchdog was armed on the discard RTP path.
+func TestUDPDiscardReceiverRTPWatchdogTimeout(t *testing.T) {
+	h := newRecvHarness(t, harnessOpts{readIdle: 60 * time.Millisecond, playing: true})
+	h.tr.discard = true
+	h.startDiscardRTP()
+
+	// No datagrams: the read-idle deadline on the discard RTP socket must fire
+	// and funnel a timeout, exactly as the active RTP receiver does.
+	h.c.udpWG.Wait()
+	if err := h.c.termError(); !errors.Is(err, audiostream.ErrReadTimeout) {
+		t.Errorf("termErr = %v, want ErrReadTimeout", err)
+	}
+	h.cleanup()
 }

@@ -231,10 +231,10 @@ type Client struct {
 	// Setup has pinned the session to UDP. Nil (and safe to range over) in
 	// TCP mode.
 	media map[int]*mediaSockets
-	// udpWG tracks the UDP receive goroutines (started by Play in a later
-	// task). teardownAndJoin waits on it so they are joined deterministically
-	// before the session is declared done, the same discipline wg already
-	// applies to the keepalive timer.
+	// udpWG tracks the UDP receive goroutines Play starts via
+	// startUDPReceivers. teardownAndJoin waits on it so they are joined
+	// deterministically before the session is declared done, the same
+	// discipline wg already applies to the keepalive timer.
 	udpWG sync.WaitGroup
 
 	closeOnce sync.Once

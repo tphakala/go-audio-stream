@@ -98,11 +98,11 @@ func TestDescribedTrackForSelectsByID(t *testing.T) {
 func TestDescribedTrackForRejects(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
-		name  string
-		state state
-		pairs []ChannelPair
-		trk   Track
-		want  error
+		name   string
+		state  state
+		tracks []*track
+		trk    Track
+		want   error
 	}{
 		{
 			name:  "id past the end",
@@ -131,17 +131,20 @@ func TestDescribedTrackForRejects(t *testing.T) {
 			want:  ErrUnknownTrack,
 		},
 		{
-			name:  "already set up",
-			state: stateSetup,
-			pairs: []ChannelPair{{TrackID: 0, RTP: 0, RTCP: 1}},
-			trk:   Track{ID: 0, Control: testAudioControl},
-			want:  ErrTrackAlreadySetUp,
+			// The guard is transport-agnostic: it scans c.tracks, which both the
+			// TCP and UDP publish paths append to, so a track present there is
+			// rejected regardless of whether a channel pair was ever recorded.
+			name:   "already set up",
+			state:  stateSetup,
+			tracks: []*track{{id: 0, control: testAudioControl}},
+			trk:    Track{ID: 0, Control: testAudioControl},
+			want:   ErrTrackAlreadySetUp,
 		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			c := &Client{state: tc.state, described: describedFixture(), channelPairs: tc.pairs}
+			c := &Client{state: tc.state, described: describedFixture(), tracks: tc.tracks}
 			if _, err := c.describedTrackFor(&tc.trk); !errors.Is(err, tc.want) {
 				t.Errorf("describedTrackFor = %v, want %v", err, tc.want)
 			}

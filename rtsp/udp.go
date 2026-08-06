@@ -11,8 +11,9 @@ import (
 // Tuning constants for UDP transport.
 const (
 	// maxDatagramSize bounds a single RTP or RTCP UDP datagram. It is the
-	// maximum theoretical UDP payload size; the receive path (a later task)
-	// uses it to size its reusable read buffer.
+	// maximum theoretical UDP payload size; the receive goroutines
+	// (runRTPReceiver, runRTCPReceiver, and runDiscardReceiver) use it to size
+	// their reusable read buffers.
 	maxDatagramSize = 65535
 	// natPunchCount is the number of best-effort datagrams holePunch sends
 	// on each socket to open the return path through a NAT or firewall.
@@ -91,9 +92,16 @@ func openMediaSockets() (*mediaSockets, error) {
 }
 
 // resolveServerPeers records the server RTP and RTCP UDP addresses from the
-// SETUP Transport response (server_port, and source when present, else the
-// control-connection peer IP). It returns ErrUDPSetupRejected when the
-// response carries no usable server_port.
+// SETUP Transport response server_port, always paired with the
+// control-connection peer IP. It returns ErrUDPSetupRejected when the response
+// carries no usable server_port.
+//
+// M6 is unicast only, so the media source is always the control-connection
+// peer. The Transport source= parameter is a multicast-origin hint (multicast
+// is deferred) and is deliberately ignored: for a unicast session it names
+// nothing but a reflection target, so honoring a server-supplied source= would
+// let a malicious or MITM server aim this client's hole-punch datagrams and
+// periodic RTCP Receiver Reports at an arbitrary victim IP.
 //
 //nolint:gocritic // value receiver matches ServerPorts and InterleavedChannels in transport.go: TransportHeader is a small stateless header value, not a hot-path allocation.
 func (m *mediaSockets) resolveServerPeers(th TransportHeader, controlPeerIP net.IP) error {
@@ -101,18 +109,8 @@ func (m *mediaSockets) resolveServerPeers(th TransportHeader, controlPeerIP net.
 	if !ok {
 		return ErrUDPSetupRejected
 	}
-	ip := controlPeerIP
-	if th.Source != "" {
-		// A source the server sent but this client cannot parse is treated
-		// as absent rather than fatal: the control-connection peer IP is
-		// usually the same host, and that lets the session proceed rather
-		// than failing SETUP over a cosmetic field.
-		if parsed := net.ParseIP(th.Source); parsed != nil {
-			ip = parsed
-		}
-	}
-	m.rtpPeer = &net.UDPAddr{IP: ip, Port: rtpPort}
-	m.rtcpPeer = &net.UDPAddr{IP: ip, Port: rtcpPort}
+	m.rtpPeer = &net.UDPAddr{IP: controlPeerIP, Port: rtpPort}
+	m.rtcpPeer = &net.UDPAddr{IP: controlPeerIP, Port: rtcpPort}
 	return nil
 }
 

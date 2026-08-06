@@ -171,7 +171,10 @@ type SetupOptions struct {
 
 // ErrUDPSetupRejected is returned by Setup under PreferUDP when the server
 // declines the UDP transport (non-2xx, 461 Unsupported Transport, or a
-// Transport response with no usable server_port).
+// Transport response with no usable server_port). It is also returned under
+// PreferUDPThenTCP for a 2xx response carrying an unusable server_port: the
+// server has already allocated the session, so this is not a clean rejection
+// the client may silently retry over TCP.
 var ErrUDPSetupRejected = errors.New("rtsp: server rejected UDP transport")
 
 // target is the resolved dial destination parsed from a Config: the address

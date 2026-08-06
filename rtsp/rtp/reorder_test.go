@@ -183,6 +183,51 @@ func TestReordererWindowOverflowForceRelease(t *testing.T) {
 	}
 }
 
+// A force-release whose walk passes over an already-BUFFERED slot must evict
+// that slot into the released output WITHOUT counting it as forced loss: only
+// the genuinely-missing sequence numbers the walk skips are forced. This
+// exercises the "present" branch of Push's force-release loop, which the
+// overflow tests that force only over empty gaps never reach.
+func TestReordererForceReleaseEvictsOccupiedSlot(t *testing.T) {
+	t.Parallel()
+	var r rtp.Reorderer
+	var out []rtp.Released
+
+	const n = 1000
+	// Release N, so the next release point is N+1.
+	out = r.Push(n, []byte{0x00}, out)
+	if want := []uint16{n}; !seqsEqual(out, want) {
+		t.Fatalf("push %d: got %v, want %v", n, seqs(out), want)
+	}
+
+	// Buffer N+5 without releasing it: N+1..N+4 stay an open gap. Give it a
+	// distinctive payload so the eviction path can be shown to release the
+	// buffered copy rather than fabricate one.
+	out = r.Push(n+5, []byte{0x55}, out)
+	if len(out) != 0 {
+		t.Fatalf("push %d: got %v, want nothing released (buffered behind the gap)", n+5, seqs(out))
+	}
+
+	// A packet MaxReorderWindow ahead of the occupied slot forces the release
+	// point to walk from N+1 up past N+5: it counts N+1..N+4 (the empty gap) as
+	// forced and evicts the present N+5 into the output, not as forced.
+	forcing := uint16(n + 5 + rtp.MaxReorderWindow)
+	out = r.Push(forcing, []byte{0x99}, out)
+
+	if want := []uint16{n + 5}; !seqsEqual(out, want) {
+		t.Fatalf("push %d: got %v, want [%d] (occupied slot evicted, forcing packet buffered)", forcing, seqs(out), n+5)
+	}
+	if out[0].Payload[0] != 0x55 {
+		t.Fatalf("evicted N+5 payload = %v, want the buffered copy 0x55", out[0].Payload)
+	}
+	if st := r.Stats(); st.Forced != 4 {
+		t.Fatalf("Forced = %d, want 4 (only N+1..N+4 are missing; the present N+5 is evicted, not forced)", st.Forced)
+	}
+	if st := r.Stats(); st.Buffered != 1 {
+		t.Fatalf("Buffered = %d, want 1 (the forcing packet %d is now buffered)", st.Buffered, forcing)
+	}
+}
+
 func TestReordererWraparound(t *testing.T) {
 	t.Parallel()
 	var r rtp.Reorderer

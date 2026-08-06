@@ -7,8 +7,9 @@ import (
 	"time"
 )
 
-// testUDPSourceIP is the resolveServerPeers "source" parameter value shared
-// across the tests below.
+// testUDPSourceIP is a server-supplied Transport source= value that points at
+// a DIFFERENT host than the control connection, used to prove resolveServerPeers
+// ignores it (a unicast source= names only a reflection target).
 const testUDPSourceIP = "192.0.2.10"
 
 // openMediaSockets must bind a real, usable client_port pair: RTP on an
@@ -55,23 +56,30 @@ func TestUDPMediaSocketsCloseIsIdempotent(t *testing.T) {
 	}
 }
 
-func TestUDPResolveServerPeersUsesSourceWhenPresent(t *testing.T) {
+func TestUDPResolveServerPeersIgnoresServerSuppliedSource(t *testing.T) {
 	t.Parallel()
 	m := &mediaSockets{}
+	// A server points source= at a DIFFERENT host than the control connection.
+	// For a unicast session that names a reflection target, so it must be
+	// ignored: both peers must resolve to the control-connection peer IP.
+	controlIP := net.ParseIP("198.51.100.1")
 	th := TransportHeader{
 		HasServerPort:  true,
 		ServerRTPPort:  6000,
 		ServerRTCPPort: 6001,
 		Source:         testUDPSourceIP,
 	}
-	if err := m.resolveServerPeers(th, net.ParseIP("198.51.100.1")); err != nil {
+	if err := m.resolveServerPeers(th, controlIP); err != nil {
 		t.Fatalf("resolveServerPeers: %v", err)
 	}
-	if m.rtpPeer == nil || m.rtpPeer.IP.String() != testUDPSourceIP || m.rtpPeer.Port != 6000 {
-		t.Errorf("rtpPeer = %+v, want 192.0.2.10:6000", m.rtpPeer)
+	if m.rtpPeer == nil || !m.rtpPeer.IP.Equal(controlIP) || m.rtpPeer.Port != 6000 {
+		t.Errorf("rtpPeer = %+v, want %s:6000 (source= ignored)", m.rtpPeer, controlIP)
 	}
-	if m.rtcpPeer == nil || m.rtcpPeer.IP.String() != testUDPSourceIP || m.rtcpPeer.Port != 6001 {
-		t.Errorf("rtcpPeer = %+v, want 192.0.2.10:6001", m.rtcpPeer)
+	if m.rtcpPeer == nil || !m.rtcpPeer.IP.Equal(controlIP) || m.rtcpPeer.Port != 6001 {
+		t.Errorf("rtcpPeer = %+v, want %s:6001 (source= ignored)", m.rtcpPeer, controlIP)
+	}
+	if m.rtpPeer.IP.String() == testUDPSourceIP || m.rtcpPeer.IP.String() == testUDPSourceIP {
+		t.Errorf("resolveServerPeers honored server source= %s; a unicast source= is a reflection target and must be ignored", testUDPSourceIP)
 	}
 }
 
@@ -97,6 +105,31 @@ func TestUDPResolveServerPeersRejectsMissingServerPort(t *testing.T) {
 	th := TransportHeader{}
 	if err := m.resolveServerPeers(th, net.ParseIP("203.0.113.5")); !errors.Is(err, ErrUDPSetupRejected) {
 		t.Errorf("resolveServerPeers = %v, want ErrUDPSetupRejected", err)
+	}
+}
+
+// A second Setup of an already-set-up UDP track must be rejected. Over UDP the
+// track is recorded in c.tracks but not c.channelPairs, so the "already set up"
+// guard must scan c.tracks (transport-agnostic) rather than the TCP-only
+// channel-pair table; otherwise a duplicate UDP Setup would open a second
+// socket pair, orphan the first, and leave two goroutines reading one socket.
+func TestUDPDescribedTrackForRejectsDuplicateUDPSetup(t *testing.T) {
+	t.Parallel()
+	const control = "rtsp://example.test/stream/trackID=0"
+	c := &Client{
+		state:     stateSetup,
+		described: []describedTrack{{control: control}},
+	}
+	// Mirror publishUDPTrack's effect: the track is appended to c.tracks but no
+	// channel pair is installed, so c.channelPairs stays empty.
+	c.tracks = append(c.tracks, &track{id: 0, control: control})
+
+	if len(c.channelPairs) != 0 {
+		t.Fatalf("test precondition: channelPairs = %d, want 0 (UDP installs none)", len(c.channelPairs))
+	}
+	_, err := c.describedTrackFor(&Track{ID: 0, Control: control})
+	if !errors.Is(err, ErrTrackAlreadySetUp) {
+		t.Fatalf("describedTrackFor for an already-set-up UDP track = %v, want ErrTrackAlreadySetUp", err)
 	}
 }
 

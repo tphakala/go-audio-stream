@@ -12,6 +12,7 @@ import (
 	audiostream "github.com/tphakala/go-audio-stream"
 	"github.com/tphakala/go-audio-stream/internal/testserver"
 	"github.com/tphakala/go-audio-stream/rtsp"
+	"github.com/tphakala/go-audio-stream/rtsp/rtp"
 )
 
 // udpBasePortCounter hands out a fresh base port to each UDP integration
@@ -191,7 +192,7 @@ func TestIntegrationUDPReordering(t *testing.T) {
 // number is at least MaxReorderWindow ahead of the missing one, so a genuine
 // end-to-end test of that path has to send at least that many packets after
 // the gap, not fewer.
-const lossTrailingPackets = 128
+const lossTrailingPackets = rtp.MaxReorderWindow
 
 // TestIntegrationUDPLoss omits one packet from the middle of a sequence and
 // sends enough trailing packets to force the reorder window to release the
