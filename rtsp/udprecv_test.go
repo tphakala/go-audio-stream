@@ -43,16 +43,43 @@ type recvHarness struct {
 type harnessOpts struct {
 	readIdle time.Duration
 	playing  bool
+	// peerIP overrides the negotiated media peer IP the receiver filters on.
+	// The zero value (nil) uses the loopback sender's IP, so datagrams are
+	// accepted; a mismatching IP makes the loopback sender foreign, so its
+	// datagrams are dropped by the source-address filter.
+	peerIP net.IP
 }
 
-// newRecvHarness builds a raw-delivery track wired to a real UDP socket pair,
-// with a sender dialing the RTP socket. The track adopts the first payload type
-// it sees (sdpPayloadType unknown), so every test packet is accepted.
+// loopbackUDP binds a UDP socket to an explicit 127.0.0.1 address, so the source
+// IP of datagrams a loopback sender delivers is deterministically 127.0.0.1 (the
+// wildcard bind openMediaSockets uses would leave the family ambiguous).
+func loopbackUDP(t *testing.T) *net.UDPConn {
+	t.Helper()
+	conn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})
+	if err != nil {
+		t.Fatalf("listen udp: %v", err)
+	}
+	return conn
+}
+
+// newRecvHarness builds a raw-delivery track wired to a real loopback UDP socket
+// pair, with a sender dialing the RTP socket. The track adopts the first payload
+// type it sees (sdpPayloadType unknown), so every test packet is accepted. The
+// media peers are set to opts.peerIP (default 127.0.0.1, matching the sender) so
+// the source-address filter admits the sender unless a test overrides it.
 func newRecvHarness(t *testing.T, opts harnessOpts) *recvHarness {
 	t.Helper()
-	m, err := openMediaSockets()
-	if err != nil {
-		t.Fatalf("openMediaSockets: %v", err)
+	peerIP := opts.peerIP
+	if peerIP == nil {
+		peerIP = net.IPv4(127, 0, 0, 1)
+	}
+	rtpConn := loopbackUDP(t)
+	rtcpConn := loopbackUDP(t)
+	m := &mediaSockets{
+		rtpConn:  rtpConn,
+		rtcpConn: rtcpConn,
+		rtpPeer:  &net.UDPAddr{IP: peerIP, Port: rtpConn.LocalAddr().(*net.UDPAddr).Port},
+		rtcpPeer: &net.UDPAddr{IP: peerIP, Port: rtcpConn.LocalAddr().(*net.UDPAddr).Port},
 	}
 	local, remote := net.Pipe()
 	frames := make(chan audiostream.Frame, 256)
@@ -74,7 +101,7 @@ func newRecvHarness(t *testing.T, opts harnessOpts) *recvHarness {
 	if opts.playing {
 		c.playing.Store(true)
 	}
-	send, err := net.DialUDP("udp", nil, m.rtpConn.LocalAddr().(*net.UDPAddr))
+	send, err := net.DialUDP("udp", nil, rtpConn.LocalAddr().(*net.UDPAddr))
 	if err != nil {
 		_ = m.Close()
 		t.Fatalf("dial sender: %v", err)
@@ -266,4 +293,45 @@ func TestUDPRecvWatchdogTimeout(t *testing.T) {
 		t.Errorf("termErr = %v, want ErrReadTimeout", err)
 	}
 	h.cleanup()
+}
+
+// A datagram from the negotiated peer is processed; one from any other source
+// address is dropped before accounting or processing, so an off-path forgery
+// cannot count as bandwidth, keep the watchdog alive, or disturb the pipeline.
+func TestUDPRecvSourceAddressFilter(t *testing.T) {
+	// Accepted: the peer IP defaults to the loopback sender's IP.
+	accepted := newRecvHarness(t, harnessOpts{})
+	accepted.start()
+	accepted.sendRTP(buildTestRTP(96, 10, 10, 0xABCD, []byte{1}))
+	if f := accepted.waitFrame(); f.RTPTime != 10 {
+		t.Errorf("accepted-peer frame RTPTime = %d, want 10", f.RTPTime)
+	}
+	accepted.stop()
+
+	// Dropped: a TEST-NET peer IP (RFC 5737) the loopback sender cannot match,
+	// so its datagram is foreign and must leave no trace.
+	dropped := newRecvHarness(t, harnessOpts{peerIP: net.IPv4(192, 0, 2, 1)})
+	dropped.start()
+	dropped.sendRTP(buildTestRTP(96, 20, 20, 0x1234, []byte{2}))
+	select {
+	case f := <-dropped.frames:
+		t.Fatalf("delivered a frame from a foreign source: %+v", f)
+	case <-time.After(150 * time.Millisecond):
+	}
+	if got := dropped.tr.wireBytes.Load(); got != 0 {
+		t.Errorf("wireBytes = %d, want 0 (a foreign-source datagram is not bandwidth)", got)
+	}
+	if got := dropped.tr.ssrcResets.Load(); got != 0 {
+		t.Errorf("ssrcResets = %d, want 0 (a foreign-source datagram must not disturb the pipeline)", got)
+	}
+	if got := dropped.tr.packets.Load(); got != 0 {
+		t.Errorf("packets = %d, want 0", got)
+	}
+	if got := dropped.tr.malformed.Load(); got != 0 {
+		t.Errorf("malformed = %d, want 0 (a foreign-source datagram is dropped before the parse)", got)
+	}
+	if got := dropped.c.lastFrameAt.Load(); got != 0 {
+		t.Errorf("lastFrameAt = %d, want 0 (a foreign-source datagram must not feed the watchdog)", got)
+	}
+	dropped.stop()
 }

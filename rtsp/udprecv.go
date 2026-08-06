@@ -45,10 +45,18 @@ func (c *Client) runRTPReceiver(tr *track, m *mediaSockets) {
 		if !c.armMediaReadDeadline(m.rtpConn, true) {
 			return // shutdown has begun.
 		}
-		n, _, err := m.rtpConn.ReadFromUDP(buf)
+		n, addr, err := m.rtpConn.ReadFromUDP(buf)
 		if err != nil {
 			c.classifyMediaReadErr(err)
 			return
+		}
+		if !fromPeer(addr, m.rtpPeer.IP) {
+			// Dropped before any accounting or processing: the socket is bound to
+			// the wildcard address, so any host can target this ephemeral port,
+			// and an off-path forgery must not count as bandwidth, keep the
+			// watchdog alive, reach the Reorderer, or trip an SSRC reset (or
+			// inject counterfeit audio) inside process.
+			continue
 		}
 		now := time.Now()
 		// Wire and liveness evidence for every datagram, stamped before the
@@ -124,9 +132,15 @@ func (c *Client) runRTCPReceiver(tr *track, m *mediaSockets) {
 		if !c.armMediaReadDeadline(m.rtcpConn, false) {
 			return // shutdown has begun.
 		}
-		n, _, err := m.rtcpConn.ReadFromUDP(buf)
+		n, addr, err := m.rtcpConn.ReadFromUDP(buf)
 		if err != nil {
 			return
+		}
+		if !fromPeer(addr, m.rtcpPeer.IP) {
+			// An RTCP datagram from a host other than the negotiated peer is a
+			// forgery targeting the wildcard-bound port; drop it so it cannot
+			// steer the sender-clock mapping or the RR snapshot.
+			continue
 		}
 		c.handleRTCP(tr, buf[:n], time.Now())
 	}
@@ -142,7 +156,11 @@ func (c *Client) runRTCPReceiver(tr *track, m *mediaSockets) {
 // per discard track, one per socket, so a socket close unblocks each. Like the
 // RTP receiver it stops once shutdown arms the immediate deadline, and RTCP is
 // advisory so a read error just ends the goroutine.
-func (c *Client) runDiscardReceiver(tr *track, conn *net.UDPConn, isRTCP bool) {
+//
+// peerIP is the negotiated media source for this socket (m.rtpPeer.IP or
+// m.rtcpPeer.IP). A datagram from any other host is dropped before accounting,
+// so an off-path attacker cannot inflate even a discard track's counters.
+func (c *Client) runDiscardReceiver(tr *track, conn *net.UDPConn, peerIP net.IP, isRTCP bool) {
 	defer c.udpWG.Done()
 	defer c.recoverReceiver()
 
@@ -151,9 +169,12 @@ func (c *Client) runDiscardReceiver(tr *track, conn *net.UDPConn, isRTCP bool) {
 		if !c.armMediaReadDeadline(conn, false) {
 			return // shutdown has begun.
 		}
-		n, _, err := conn.ReadFromUDP(buf)
+		n, addr, err := conn.ReadFromUDP(buf)
 		if err != nil {
 			return
+		}
+		if !fromPeer(addr, peerIP) {
+			continue // not from the negotiated peer; drop without accounting.
 		}
 		if isRTCP {
 			// A discard track's RTCP is not media, is attributed to nothing, and
@@ -170,6 +191,19 @@ func (c *Client) runDiscardReceiver(tr *track, conn *net.UDPConn, isRTCP bool) {
 			tr.packets.Add(1)
 		}
 	}
+}
+
+// fromPeer reports whether a received datagram's source address is the
+// negotiated media peer. The UDP media sockets bind the wildcard address, so any
+// host on the network can send to the client's ephemeral RTP/RTCP port; only
+// datagrams whose source IP matches the resolved peer are treated as media. The
+// match is on IP alone, not port: a server may legitimately send media from a
+// source port other than the server_port it advertised, and resolveServerPeers
+// already fixed the media source IP (the Transport source= parameter when
+// present, else the control-connection peer). A nil addr (not expected from a
+// successful ReadFromUDP) is treated as foreign rather than dereferenced.
+func fromPeer(addr *net.UDPAddr, peerIP net.IP) bool {
+	return addr != nil && addr.IP.Equal(peerIP)
 }
 
 // armMediaReadDeadline sets a media socket's read deadline for the next read,

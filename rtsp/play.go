@@ -118,8 +118,8 @@ func (c *Client) startUDPReceivers(tracks []*track) {
 			continue
 		}
 		if tr.discard {
-			go c.runDiscardReceiver(tr, m.rtpConn, false)
-			go c.runDiscardReceiver(tr, m.rtcpConn, true)
+			go c.runDiscardReceiver(tr, m.rtpConn, m.rtpPeer.IP, false)
+			go c.runDiscardReceiver(tr, m.rtcpConn, m.rtcpPeer.IP, true)
 			continue
 		}
 		go c.runRTPReceiver(tr, m)
