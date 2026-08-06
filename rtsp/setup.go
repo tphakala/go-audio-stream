@@ -66,14 +66,57 @@ func (c *Client) Setup(ctx context.Context, trk Track, opts SetupOptions) error 
 		return err
 	}
 
-	// TODO(task6): PreferUDPThenTCP should fall back to TCP interleaved when
-	// the UDP SETUP is rejected. Until that lands it is treated exactly like
-	// PreferUDP: a rejection surfaces the same ErrUDPSetupRejected, with no
-	// fallback.
-	if c.cfg.Transport != PreferTCP {
-		return c.setupUDP(ctx, trk, desc, opts)
+	// The pin resolved by an earlier Setup makes the choice session-wide: read
+	// it under mu (lifecycleMu already serializes Setups, so no concurrent one
+	// can move it) and let resolveTransport fold it together with the caller's
+	// preference. attemptUDP picks the path; allowFallback governs only whether
+	// a non-2xx UDP rejection may re-issue over TCP.
+	c.mu.Lock()
+	pin := c.sessionTransport
+	c.mu.Unlock()
+
+	attemptUDP, allowFallback := resolveTransport(c.cfg.Transport, pin)
+	if attemptUDP {
+		return c.setupUDP(ctx, trk, desc, opts, allowFallback)
 	}
 	return c.setupTCP(ctx, trk, desc, opts)
+}
+
+// Media transport pin values. sessionTransport holds one of these once the
+// first Setup resolves, and SessionInfo.Transport surfaces it verbatim; "" is
+// the unresolved default before any track is set up.
+const (
+	transportPinTCP = "TCP"
+	transportPinUDP = "UDP"
+)
+
+// resolveTransport decides, for one Setup, whether to attempt UDP and whether a
+// non-2xx UDP rejection may fall back to TCP. It folds the caller's preference
+// together with the session pin an earlier Setup resolved (pin is "" until the
+// first Setup pins it, then transportPinTCP or transportPinUDP).
+//
+// The pin is what makes the choice session-wide (D6): once a track is set up,
+// every later Setup follows the same transport with no re-attempt, so a
+// PreferUDPThenTCP session that fell back to TCP never proposes UDP again, and a
+// UDP session never re-SETUPs over TCP. allowFallback is true for exactly one
+// case, the first Setup under PreferUDPThenTCP, because that is the only moment
+// a UDP rejection has a TCP path to fall back to that no live session sits on.
+func resolveTransport(pref TransportPreference, pin string) (attemptUDP, allowFallback bool) {
+	switch pin {
+	case transportPinTCP:
+		return false, false
+	case transportPinUDP:
+		return true, false
+	}
+	// Not yet pinned: the first Setup decides from the preference alone.
+	switch pref {
+	case PreferUDP:
+		return true, false
+	case PreferUDPThenTCP:
+		return true, true
+	default: // PreferTCP, the zero value.
+		return false, false
+	}
 }
 
 // setupTCP is the phase 1 SETUP path: RTP/AVP/TCP interleaved, unchanged in
@@ -126,8 +169,17 @@ func (c *Client) setupTCP(ctx context.Context, trk Track, desc describedTrack, o
 // sockets, and when the server already allocated the stream, releases that
 // stream too, so the session and its other tracks are unaffected.
 //
+// It splits the two UDP-rejection shapes by SETUP status class (D6), because
+// they differ in whether the server created session state. A non-2xx response
+// (a *ResponseError, e.g. 461) allocated nothing: with allowFallback it re-runs
+// the phase 1 TCP SETUP for the same track, else it returns ErrUDPSetupRejected,
+// and neither needs a TEARDOWN. A 2xx whose Transport has no usable server_port
+// DID create state: it never falls back (that would re-SETUP a live session),
+// tears the accepted session down, and returns ErrUDPSetupRejected regardless of
+// allowFallback.
+//
 //nolint:gocritic // Track is the documented public Setup signature; hugeParam does not apply to a per-track lifecycle call.
-func (c *Client) setupUDP(ctx context.Context, trk Track, desc describedTrack, opts SetupOptions) error {
+func (c *Client) setupUDP(ctx context.Context, trk Track, desc describedTrack, opts SetupOptions, allowFallback bool) error {
 	m, oerr := openMediaSockets()
 	if oerr != nil {
 		return oerr
@@ -138,6 +190,31 @@ func (c *Client) setupUDP(ctx context.Context, trk Track, desc describedTrack, o
 	resp, derr := c.do(ctx, req)
 	if derr != nil {
 		_ = m.Close()
+		var respErr *ResponseError
+		if errors.As(derr, &respErr) {
+			// A non-2xx SETUP response (for example 461 Unsupported Transport):
+			// the server declined and allocated nothing, no Session id and no
+			// server-side UDP port, so the sockets just closed are the only
+			// state to release and no TEARDOWN is warranted. This is the ONE
+			// rejection shape that may fall back, precisely because no live
+			// session sits on the connection to re-SETUP against.
+			if allowFallback {
+				// PreferUDPThenTCP's first Setup: re-issue the SAME track's
+				// SETUP over the phase 1 TCP-interleaved profile, which records
+				// the session and pins it TCP. From here it is byte-for-byte the
+				// phase 1 path.
+				return c.setupTCP(ctx, trk, desc, opts)
+			}
+			// The status code is folded in as a value, not wrapped: under
+			// PreferUDP the contract is that a UDP rejection matches only
+			// ErrUDPSetupRejected, not ErrResponseStatus, so a caller cannot
+			// mistake this terminal UDP refusal for a per-track protocol error.
+			return fmt.Errorf("track %d: %w (server declined the UDP transport with status %d)",
+				trk.ID, ErrUDPSetupRejected, respErr.Code)
+		}
+		// A redirect, an auth failure, or a connection or timeout error is not a
+		// UDP rejection: propagate it unchanged, so the caller and the session
+		// react to it exactly as they would from a TCP Setup.
 		return derr
 	}
 
@@ -358,6 +435,10 @@ func (c *Client) publishTrack(tr *track, rtpCh, rtcpCh int) error {
 	c.channels.Store(newChannelTable(c.channels.Load(), tr, rtpCh, rtcpCh))
 	c.tracks = append(c.tracks, tr)
 	c.channelPairs = append(c.channelPairs, ChannelPair{TrackID: tr.id, RTP: rtpCh, RTCP: rtcpCh})
+	// Pin the session TCP on the first track and re-affirm it on every later
+	// one (this path is only ever reached in TCP mode, including the UDP-to-TCP
+	// fallback), so SessionInfo reports "TCP" and later Setups follow the pin.
+	c.sessionTransport = transportPinTCP
 	c.commitState(methodSetup)
 	return nil
 }
@@ -380,6 +461,9 @@ func (c *Client) publishUDPTrack(tr *track, trackID int, m *mediaSockets) error 
 	c.tracks = append(c.tracks, tr)
 	c.udpPinned = true
 	c.transport = c.cfg.Transport
+	// Pin the session UDP so SessionInfo reports "UDP" and later Setups follow
+	// the pin; udpPinned stays the flag the UDP Play and keepalive paths read.
+	c.sessionTransport = transportPinUDP
 	c.commitState(methodSetup)
 	c.mu.Unlock()
 

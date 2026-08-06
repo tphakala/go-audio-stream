@@ -64,9 +64,10 @@ type ChannelPair struct {
 
 // SessionInfo is a read-only snapshot of the negotiated session, for
 // diagnostics such as a handshake walkthrough tool. It carries no credentials
-// and no counters. Dial sets KeepaliveMethod and Server. Setup sets Channels,
-// and sets SessionID and SessionTimeout from the first SETUP response that
-// carries a Session header, so they stay empty against a server that omits it.
+// and no counters. Dial sets KeepaliveMethod and Server. Setup sets Channels
+// and Transport, and sets SessionID and SessionTimeout from the first SETUP
+// response that carries a Session header, so they stay empty against a server
+// that omits it.
 // AuthScheme stays AuthNone until a 401 has been answered, so it reports
 // AuthNone against a server that never challenges.
 type SessionInfo struct {
@@ -90,6 +91,12 @@ type SessionInfo struct {
 	// Channels lists the assigned interleaved channel pairs, one per set-up
 	// track, in Setup order. Freshly allocated; never internal state.
 	Channels []ChannelPair
+	// Transport is the media transport resolved at the first Setup: "TCP"
+	// (interleaved) or "UDP" (unicast), and "" before any track is set up. It
+	// is a plain diagnostic string, not the caller's TransportPreference: under
+	// PreferUDPThenTCP a session that fell back reports "TCP", not the
+	// preference it started from.
+	Transport string
 }
 
 // Client is a single RTSP session. Close, Wait, Stats, SessionInfo and Info are
@@ -146,12 +153,19 @@ type Client struct {
 	baseURL      string
 	channelPairs []ChannelPair
 	termErr      error
-	// transport is the transport preference resolved at the first Setup
-	// call, copied from cfg.Transport. It exists alongside cfg.Transport
-	// (which never changes after Dial) so that a later fallback (Task 6,
-	// under PreferUDPThenTCP) has somewhere to record a pin that differs
-	// from the caller's original preference.
+	// transport is the caller's transport preference copied from cfg.Transport
+	// at the first successful UDP Setup. It records that a UDP negotiation
+	// happened under this preference; SessionInfo reports the resolved wire
+	// transport through sessionTransport, not this field.
 	transport TransportPreference
+	// sessionTransport is the media transport resolved at the first successful
+	// Setup and the session-wide pin every later Setup follows (D6): "" until a
+	// track is set up, then "TCP" (interleaved) or "UDP" (unicast). It backs
+	// SessionInfo.Transport and, once set, makes resolveTransport follow the pin
+	// instead of re-attempting UDP. It is a superset of udpPinned (which stays a
+	// separate flag the UDP Play and keepalive paths read): sessionTransport ==
+	// "UDP" exactly when udpPinned is true.
+	sessionTransport string
 	// udpPinned is true once a Setup has negotiated UDP transport for this
 	// session. False (the zero value) in TCP mode, which is the phase 1
 	// default and behavior.
@@ -531,6 +545,7 @@ func (c *Client) SessionInfo() SessionInfo {
 		KeepaliveMethod: c.keepaliveMethod,
 		Server:          c.serverHeader,
 		Channels:        chans,
+		Transport:       c.sessionTransport,
 	}
 }
 
