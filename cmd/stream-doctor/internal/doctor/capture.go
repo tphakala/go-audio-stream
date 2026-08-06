@@ -150,8 +150,28 @@ func newRTSPProber(opts Options) *rtspProber {
 	return p
 }
 
+// transportPreference maps the -transport flag value to the library's
+// TransportPreference. ok is false for an unrecognized value, which parseArgs
+// turns into a usage error; an empty string maps to the default PreferTCP so a
+// zero Options is valid.
+func transportPreference(s string) (pref rtsp.TransportPreference, ok bool) {
+	switch s {
+	case "", transportTCP:
+		return rtsp.PreferTCP, true
+	case transportUDP:
+		return rtsp.PreferUDP, true
+	case transportUDPThenTCP:
+		return rtsp.PreferUDPThenTCP, true
+	default:
+		return rtsp.PreferTCP, false
+	}
+}
+
 // Dial connects to opts.URL and runs OPTIONS via rtsp.Dial.
 func (p *rtspProber) Dial(ctx context.Context) error {
+	// opts.Transport was validated by parseArgs, so ok is always true here; the
+	// zero-value PreferTCP is a safe fallback for a caller that bypassed it.
+	pref, _ := transportPreference(p.opts.Transport)
 	cfg := rtsp.Config{
 		URL:         p.opts.URL,
 		Username:    p.opts.Username,
@@ -161,6 +181,7 @@ func (p *rtspProber) Dial(ctx context.Context) error {
 		InsecureTLS: p.opts.InsecureTLS,
 		UserAgent:   "stream-doctor/" + Version,
 		OnFrame:     p.onFrame,
+		Transport:   pref,
 	}
 	client, err := rtsp.Dial(ctx, cfg)
 	if err != nil {

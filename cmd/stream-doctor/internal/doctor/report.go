@@ -87,7 +87,7 @@ func reportSession(b *strings.Builder, r *Report) {
 	}
 	fmt.Fprintf(b, "  keepalive: %s\n", r.Session.KeepaliveMethod)
 	if setupOK {
-		fmt.Fprintf(b, "  transport: TCP interleaved, %s\n", channelStr(&r.Session, r.AudioTrack.ID))
+		fmt.Fprintf(b, "  transport: %s\n", reportTransport(&r.Session, r.AudioTrack.ID))
 	}
 }
 

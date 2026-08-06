@@ -473,6 +473,10 @@ func (c *Client) publishUDPTrack(tr *track, trackID int, m *mediaSockets) error 
 	// Pin the session UDP so SessionInfo reports "UDP" and later Setups follow
 	// the pin; udpPinned stays the flag the UDP Play and keepalive paths read.
 	c.sessionTransport = transportPinUDP
+	// Record this track's negotiated UDP port pair under mu, next to the
+	// channelPairs equivalent, so SessionInfo can report it without reaching
+	// into mediaMu-guarded state.
+	c.udpEndpoints = append(c.udpEndpoints, m.endpoint(trackID))
 	c.commitState(methodSetup)
 	c.mu.Unlock()
 

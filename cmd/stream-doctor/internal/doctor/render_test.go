@@ -58,6 +58,56 @@ func TestDecodable(t *testing.T) {
 	}
 }
 
+// TestTransportStr covers the walkthrough setup-line detail: a TCP session
+// renders the interleaved channel pair (unchanged from before UDP), a UDP
+// session renders its negotiated port pairs, and a UDP session missing an
+// endpoint for the track renders the n/a marker.
+func TestTransportStr(t *testing.T) {
+	t.Parallel()
+	tcp := &rtsp.SessionInfo{
+		Transport: "TCP",
+		Channels:  []rtsp.ChannelPair{{TrackID: 0, RTP: 0, RTCP: 1}},
+	}
+	udp := &rtsp.SessionInfo{
+		Transport: sessionTransportUDP,
+		UDPEndpoints: []rtsp.UDPEndpoint{
+			{TrackID: 0, ClientRTPPort: 40000, ClientRTCPPort: 40001, ServerRTPPort: 6970, ServerRTCPPort: 6971},
+		},
+	}
+	if got, want := transportStr(tcp, 0), "channels 0-1"; got != want {
+		t.Errorf("transportStr(tcp) = %q, want %q", got, want)
+	}
+	if got, want := transportStr(udp, 0), "udp client_port 40000-40001, server_port 6970-6971"; got != want {
+		t.Errorf("transportStr(udp) = %q, want %q", got, want)
+	}
+	if got, want := transportStr(udp, 7), "udp ports n/a"; got != want {
+		t.Errorf("transportStr(udp, missing track) = %q, want %q", got, want)
+	}
+}
+
+// TestReportTransport covers the report session block's transport line. The TCP
+// branch reproduces the previous hard-coded line byte for byte, so existing
+// golden output is unchanged.
+func TestReportTransport(t *testing.T) {
+	t.Parallel()
+	tcp := &rtsp.SessionInfo{
+		Transport: "TCP",
+		Channels:  []rtsp.ChannelPair{{TrackID: 0, RTP: 0, RTCP: 1}},
+	}
+	udp := &rtsp.SessionInfo{
+		Transport: sessionTransportUDP,
+		UDPEndpoints: []rtsp.UDPEndpoint{
+			{TrackID: 0, ClientRTPPort: 40000, ClientRTCPPort: 40001, ServerRTPPort: 6970, ServerRTCPPort: 6971},
+		},
+	}
+	if got, want := reportTransport(tcp, 0), "TCP interleaved, channels 0-1"; got != want {
+		t.Errorf("reportTransport(tcp) = %q, want %q", got, want)
+	}
+	if got, want := reportTransport(udp, 0), "UDP unicast, client_port 40000-40001, server_port 6970-6971"; got != want {
+		t.Errorf("reportTransport(udp) = %q, want %q", got, want)
+	}
+}
+
 // TestRenderWalkthroughColumns covers the two column-rendering edge cases: a
 // track with zero channels renders "-", and a failed early step omits every
 // later step.

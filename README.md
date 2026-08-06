@@ -8,8 +8,9 @@
 
 A pure-Go library for pulling audio off the network and handing the consumer
 timestamped frames. Its primary source is an RTSP client for IP cameras and
-restreamers: it runs the DESCRIBE / SETUP / PLAY handshake over TCP-interleaved
-RTP, depacketizes AAC, Opus, G.711 and L16 PCM, and delivers codec frames. A
+restreamers: it runs the DESCRIBE / SETUP / PLAY handshake and pulls RTP over
+interleaved TCP or, opt-in, unicast UDP, depacketizes AAC, Opus, G.711 and L16
+PCM, and delivers codec frames. A
 second source, the `httpsource` package, pulls linear PCM off an HTTP(S)
 progressive endpoint, a WAV response or raw L16/PCM, and delivers it as the same
 s16le frames. Both sources satisfy one `Source` interface, so a consumer can
@@ -39,10 +40,11 @@ deliver frames; what remains is broad live-camera interop across vendors and
 long-running soak testing, not core functionality.
 
 - **RTSP 1.0 client**: the full DESCRIBE / SETUP / PLAY lifecycle over the
-  TCP-interleaved RTP profile, per-track setup with optional payload discard,
-  Basic and Digest authentication (answered and retried automatically, including
-  a stale-nonce rotation), `rtsps` TLS, session keepalive, and RTCP Receiver
-  Reports.
+  TCP-interleaved RTP profile by default, with opt-in RTP/AVP unicast UDP
+  transport (and a UDP-then-TCP fallback), per-track setup with optional payload
+  discard, Basic and Digest authentication (answered and retried automatically,
+  including a stale-nonce rotation), `rtsps` TLS, session keepalive, and RTCP
+  Receiver Reports.
 - **HTTP progressive source** (`httpsource`): a single GET against an endpoint
   that streams linear PCM. A WAV response (its `fmt` chunk authoritative) or a
   raw response (`audio/L16`, or an unlabeled `application/octet-stream` or
@@ -87,12 +89,12 @@ long-running soak testing, not core functionality.
   mis-declaring camera still delivers audio.
 
 `stream-doctor`, a diagnostic CLI (in `cmd/stream-doctor/`, a separate module
-built and tested in CI), connects to an RTSP URL and prints the handshake, the
-negotiated track and codec, and packet statistics. An HTTP source mode for it is
-still pending (issue #53).
+built and tested in CI), connects to an RTSP or HTTP progressive URL and prints
+the handshake, the negotiated track and codec, and packet statistics. A
+`-transport` flag selects the RTSP media transport (`tcp`, `udp`, or
+`udp-then-tcp`), and the walkthrough renders the negotiated UDP endpoints.
 
-The RTSP transport is TCP-interleaved only; there is no UDP transport. Within
-that profile a few details are deliberately coarse and documented where they are
+A few transport details are deliberately coarse and documented where they are
 implemented: Receiver Reports carry no jitter or fraction-lost estimate, only
 AAC-hbr among RFC 3640's modes is depacketized, and AAC PTS interpolation
 assumes 1024 samples per frame.

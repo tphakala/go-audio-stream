@@ -123,6 +123,27 @@ func (m *mediaSockets) resolveServerPeers(th TransportHeader, controlPeerIP net.
 	return nil
 }
 
+// endpoint returns the negotiated UDP port pair for trackID. The client ports
+// are always set (openMediaSockets bound them before SETUP proposed them); the
+// server ports are set only once resolveServerPeers has recorded the peers and
+// stay 0 otherwise, so a caller that publishes a track before the peers resolve
+// (the unit tests do) reads a zero server pair rather than dereferencing a nil
+// peer.
+func (m *mediaSockets) endpoint(trackID int) UDPEndpoint {
+	e := UDPEndpoint{
+		TrackID:        trackID,
+		ClientRTPPort:  m.clientRTPPort,
+		ClientRTCPPort: m.clientRTCPPort,
+	}
+	if m.rtpPeer != nil {
+		e.ServerRTPPort = m.rtpPeer.Port
+	}
+	if m.rtcpPeer != nil {
+		e.ServerRTCPPort = m.rtcpPeer.Port
+	}
+	return e
+}
+
 // holePunch sends natPunchCount best-effort datagrams to open the return
 // path: a zero-length datagram on the RTP socket and the caller-supplied RTCP
 // Receiver Report rr on the RTCP socket, to the resolved server peers.

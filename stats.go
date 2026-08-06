@@ -34,13 +34,16 @@ type TrackStats struct {
 	// SeqGaps is the total number of packets lost per sequence
 	// number tracking.
 	SeqGaps uint64
-	// Duplicates is the number of duplicate or reordered packets the stream
-	// observed: a sequence number that did not advance. Rare over the in-order
-	// TCP transport, so a nonzero value points at the server resending or
-	// reordering rather than ordinary loss. Over UDP transport this
-	// under-reports: the reorder buffer drops duplicate and too-late datagrams
-	// before Stream.Observe ever sees them, so most UDP duplicates are not
-	// counted here (a known limitation tracked for follow-up).
+	// Duplicates is the number of duplicate or reordered packets observed: a
+	// sequence number that did not advance. Rare over the in-order TCP
+	// transport, so a nonzero value points at the server resending or
+	// reordering rather than ordinary loss. Over UDP transport the reorder
+	// buffer drops duplicate and too-late datagrams before Stream.Observe would
+	// see them; each such drop is counted here too, so the counter means the
+	// same on both transports. A datagram that arrives after the reorder window
+	// already force-declared its sequence number lost is counted once in SeqGaps
+	// (when the window advanced) and once here (on its late arrival), the same
+	// dual count the TCP path produces for a packet that arrives after its gap.
 	Duplicates uint64
 	// Malformed is the number of packets discarded without being delivered,
 	// for any reason: an RTP header that will not parse, a payload type the

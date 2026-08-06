@@ -17,8 +17,9 @@ type Options struct {
 	WAVPath      string // "" disables the listen check
 	Report       bool
 	InsecureTLS  bool
-	InsecureAuth bool // permit HTTP Basic credentials over a plaintext http connection (mirrors httpsource.Config.AllowInsecureAuth)
-	FullStream   bool // set up all tracks (discarding non-target ones) for cameras that reject audio-only SETUP
+	InsecureAuth bool   // permit HTTP Basic credentials over a plaintext http connection (mirrors httpsource.Config.AllowInsecureAuth)
+	FullStream   bool   // set up all tracks (discarding non-target ones) for cameras that reject audio-only SETUP
+	Transport    string // media transport: "tcp" (default), "udp", or "udp-then-tcp" (RTSP only, ignored for http)
 	Username     string
 	Password     string
 }
@@ -28,6 +29,14 @@ const (
 	DefaultDuration = 10 * time.Second
 	DefaultTimeout  = 10 * time.Second
 	DefaultReadIdle = 15 * time.Second
+)
+
+// Accepted -transport flag values, mapped to a library TransportPreference by
+// transportPreference.
+const (
+	transportTCP        = "tcp"
+	transportUDP        = "udp"
+	transportUDPThenTCP = "udp-then-tcp"
 )
 
 // Version is the stream-doctor version string, printed by --version and in
@@ -59,6 +68,8 @@ Flags:
   -insecure-auth        permit HTTP Basic credentials over a plaintext http connection
   -full-stream          set up all tracks, not just audio, for cameras that
                         reject audio-only SETUP (RTSP only; ignored for http)
+  -transport mode       media transport: tcp, udp, or udp-then-tcp
+                        (default tcp; RTSP only, ignored for http)
   -user username        stream username (overridden by URL userinfo)
   -password password    stream password (overridden by URL userinfo)
   -version               print the version and exit
@@ -85,6 +96,7 @@ func parseArgs(args []string) (Options, error) {
 	fs.BoolVar(&opts.InsecureTLS, "insecure-tls", false, "skip certificate verification for rtsps and https")
 	fs.BoolVar(&opts.InsecureAuth, "insecure-auth", false, "permit HTTP Basic credentials over a plaintext http connection")
 	fs.BoolVar(&opts.FullStream, "full-stream", false, "set up all tracks, not just audio")
+	fs.StringVar(&opts.Transport, "transport", transportTCP, "media transport: tcp, udp, or udp-then-tcp")
 	fs.StringVar(&opts.Username, "user", "", "stream username")
 	fs.StringVar(&opts.Password, "password", "", "stream password")
 	fs.BoolVar(&version, "version", false, "print the version and exit")
@@ -120,6 +132,12 @@ func parseArgs(args []string) (Options, error) {
 	// usage error here.
 	if opts.ReadIdle < 0 {
 		return Options{}, fmt.Errorf("%w: -read-idle must not be negative, got %s", ErrUsage, opts.ReadIdle)
+	}
+	// Validate the transport selector against the same mapping the RTSP adapter
+	// uses, so an unknown value fails as a usage error here rather than silently
+	// falling back to TCP at Dial time.
+	if _, ok := transportPreference(opts.Transport); !ok {
+		return Options{}, fmt.Errorf("%w: -transport must be tcp, udp, or udp-then-tcp, got %q", ErrUsage, opts.Transport)
 	}
 
 	return opts, nil
