@@ -146,6 +146,16 @@ type Client struct {
 	baseURL      string
 	channelPairs []ChannelPair
 	termErr      error
+	// transport is the transport preference resolved at the first Setup
+	// call, copied from cfg.Transport. It exists alongside cfg.Transport
+	// (which never changes after Dial) so that a later fallback (Task 6,
+	// under PreferUDPThenTCP) has somewhere to record a pin that differs
+	// from the caller's original preference.
+	transport TransportPreference
+	// udpPinned is true once a Setup has negotiated UDP transport for this
+	// session. False (the zero value) in TCP mode, which is the phase 1
+	// default and behavior.
+	udpPinned bool
 	// auth is the active authentication state. Once a 401 has been answered,
 	// every outgoing request carries an Authorization header computed from it,
 	// with the nonce count incremented per request under the same server nonce.
@@ -193,6 +203,21 @@ type Client struct {
 	// interrupt so the reader can never re-arm past a shutdown.
 	deadlineMu   sync.Mutex
 	shuttingDown bool
+
+	// mediaMu guards media, the per-track UDP socket pairs, in UDP transport
+	// mode. It is an independent leaf lock: always taken alone, never nested
+	// inside mu or deadlineMu, and released before returning, so it cannot
+	// deadlock against the shutdown funnel or the lifecycle state machine.
+	mediaMu sync.Mutex
+	// media holds the per-track UDP socket pair, keyed by track id, once
+	// Setup has pinned the session to UDP. Nil (and safe to range over) in
+	// TCP mode.
+	media map[int]*mediaSockets
+	// udpWG tracks the UDP receive goroutines (started by Play in a later
+	// task). teardownAndJoin waits on it so they are joined deterministically
+	// before the session is declared done, the same discipline wg already
+	// applies to the keepalive timer.
+	udpWG sync.WaitGroup
 
 	closeOnce sync.Once
 	closing   chan struct{}
@@ -349,8 +374,11 @@ func (c *Client) options(ctx context.Context, reqURL string) error {
 
 // initiateShutdown funnels every terminal trigger through one place, exactly
 // once. The first cause wins. It signals the timer goroutine, records the
-// shutdown intent under deadlineMu, and interrupts a blocked read or write
-// with an immediate deadline on both directions.
+// shutdown intent under deadlineMu, interrupts a blocked read or write with
+// an immediate deadline on both directions, and (per D3) arms an immediate
+// read deadline on every UDP media socket so a receive goroutine parked in
+// ReadFromUDP unblocks promptly rather than waiting out ReadIdle or the
+// teardown deadline.
 func (c *Client) initiateShutdown(cause error) {
 	c.closeOnce.Do(func() {
 		c.setTermErr(cause)
@@ -359,6 +387,17 @@ func (c *Client) initiateShutdown(cause error) {
 		c.shuttingDown = true
 		_ = c.conn.SetDeadline(time.Now())
 		c.deadlineMu.Unlock()
+
+		// mediaMu is an independent leaf lock: taken alone here, never
+		// nested inside mu or deadlineMu, and released before this closure
+		// returns. In TCP mode media is empty, so this is a no-op.
+		c.mediaMu.Lock()
+		now := time.Now()
+		for _, m := range c.media {
+			_ = m.rtpConn.SetReadDeadline(now)
+			_ = m.rtcpConn.SetReadDeadline(now)
+		}
+		c.mediaMu.Unlock()
 	})
 }
 

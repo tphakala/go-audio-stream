@@ -601,8 +601,21 @@ func (c *Client) teardownAndJoin() {
 	if c.sessionEstablished() {
 		c.sendTeardownBestEffort()
 	}
+	c.closeMediaSockets()
+	c.udpWG.Wait()
 	_ = c.conn.Close()
 	c.wg.Wait()
+}
+
+// closeMediaSockets closes every UDP socket pair Setup opened, taking
+// mediaMu alone (never nested inside mu or deadlineMu). In TCP mode media is
+// empty, so this is a no-op.
+func (c *Client) closeMediaSockets() {
+	c.mediaMu.Lock()
+	for _, m := range c.media {
+		_ = m.Close()
+	}
+	c.mediaMu.Unlock()
 }
 
 // sessionEstablished reports whether a Session id was negotiated, so the

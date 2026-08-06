@@ -64,6 +64,22 @@ func (c *Client) Setup(ctx context.Context, trk Track, opts SetupOptions) error 
 	if err != nil {
 		return err
 	}
+
+	// TODO(task6): PreferUDPThenTCP should fall back to TCP interleaved when
+	// the UDP SETUP is rejected. Until that lands it is treated exactly like
+	// PreferUDP: a rejection surfaces the same ErrUDPSetupRejected, with no
+	// fallback.
+	if c.cfg.Transport != PreferTCP {
+		return c.setupUDP(ctx, trk, desc, opts)
+	}
+	return c.setupTCP(ctx, trk, desc, opts)
+}
+
+// setupTCP is the phase 1 SETUP path: RTP/AVP/TCP interleaved, unchanged in
+// behavior from before UDP transport support.
+//
+//nolint:gocritic // Track is the documented public Setup signature; hugeParam does not apply to a per-track lifecycle call.
+func (c *Client) setupTCP(ctx context.Context, trk Track, desc describedTrack, opts SetupOptions) error {
 	rtpCh, rtcpCh, aerr := c.nextChannelPair()
 	if aerr != nil {
 		return aerr
@@ -100,6 +116,60 @@ func (c *Client) Setup(ctx context.Context, trk Track, opts SetupOptions) error 
 
 	tr := newTrack(trk.ID, desc, opts, gotRTCP, c.cfg.Logger)
 	return c.publishTrack(tr, gotRTP, gotRTCP)
+}
+
+// setupUDP is the UDP SETUP path: it opens a per-track socket pair, proposes
+// RTP/AVP unicast, resolves the server's peers from the response, and
+// publishes the track without touching the interleaved channel table (UDP
+// does not route by interleaved channel). On any failure it releases the
+// sockets, and when the server already allocated the stream, releases that
+// stream too, so the session and its other tracks are unaffected.
+//
+//nolint:gocritic // Track is the documented public Setup signature; hugeParam does not apply to a per-track lifecycle call.
+func (c *Client) setupUDP(ctx context.Context, trk Track, desc describedTrack, opts SetupOptions) error {
+	m, oerr := openMediaSockets()
+	if oerr != nil {
+		return oerr
+	}
+
+	req := &Request{Method: methodSetup, URL: trk.Control, Header: Header{}}
+	req.Header.Set("Transport", BuildTransportUDP(m.clientRTPPort, m.clientRTCPPort))
+	resp, derr := c.do(ctx, req)
+	if derr != nil {
+		_ = m.Close()
+		return derr
+	}
+
+	c.recordSession(trk.ID, ParseSession(resp.Header.Get("Session")))
+
+	raw := resp.Header.Get("Transport")
+	th, terr := ParseTransport(raw)
+	if terr != nil {
+		// The server answered SETUP 2xx and allocated the stream before
+		// echoing a Transport this client cannot parse. Release the sockets
+		// and the stream so an aggregate PLAY does not go on to stream it
+		// (see #15, the TCP analog of this same failure).
+		_ = m.Close()
+		c.teardownRejectedStream(trk.Control)
+		return fmt.Errorf("track %d: %w (Transport: %q)", trk.ID, terr, raw)
+	}
+
+	if rerr := m.resolveServerPeers(th, remoteIP(c.conn.RemoteAddr())); rerr != nil {
+		// The server allocated the stream, then echoed a Transport with no
+		// usable server_port. Release the sockets and the stream, and
+		// report the rejection rather than the parse-level error, since
+		// resolveServerPeers already normalizes it to ErrUDPSetupRejected.
+		_ = m.Close()
+		c.teardownRejectedStream(trk.Control)
+		return fmt.Errorf("track %d: %w (Transport: %q)", trk.ID, rerr, raw)
+	}
+
+	// rtcpCh is unused in UDP mode until a later task routes Receiver
+	// Reports over the UDP RTCP socket instead of the TCP interleaved
+	// channel (rtcpChannel only matters to sendReceiverReports); the
+	// depacketizer and stat wiring newTrack builds are transport-independent.
+	tr := newTrack(trk.ID, desc, opts, 0, c.cfg.Logger)
+	return c.publishUDPTrack(tr, trk.ID, m)
 }
 
 // teardownRejectedStream sends a best-effort per-track TEARDOWN for a stream the
@@ -277,4 +347,42 @@ func (c *Client) publishTrack(tr *track, rtpCh, rtcpCh int) error {
 	c.channelPairs = append(c.channelPairs, ChannelPair{TrackID: tr.id, RTP: rtpCh, RTCP: rtcpCh})
 	c.commitState(methodSetup)
 	return nil
+}
+
+// publishUDPTrack records tr and pins the session to UDP transport, the UDP
+// counterpart to publishTrack. Unlike publishTrack it does not touch the
+// interleaved channel table (UDP does not route by interleaved channel), and
+// it separately registers m under mediaMu rather than under mu: mediaMu is
+// an independent leaf lock, so the two critical sections are taken one after
+// the other, never nested. When shutdown has already begun it does not
+// resurrect the state, closes m, and returns the terminal error, the same
+// guard publishTrack applies.
+func (c *Client) publishUDPTrack(tr *track, trackID int, m *mediaSockets) error {
+	c.mu.Lock()
+	if c.termErr != nil {
+		c.mu.Unlock()
+		_ = m.Close()
+		return c.termErr
+	}
+	c.tracks = append(c.tracks, tr)
+	c.udpPinned = true
+	c.transport = c.cfg.Transport
+	c.commitState(methodSetup)
+	c.mu.Unlock()
+
+	c.registerMediaSockets(trackID, m)
+	return nil
+}
+
+// registerMediaSockets records m under trackID in c.media, taking mediaMu
+// alone (never nested inside mu or lifecycleMu), the leaf-lock discipline
+// initiateShutdown's deadline-arming block and closeMediaSockets both rely
+// on.
+func (c *Client) registerMediaSockets(trackID int, m *mediaSockets) {
+	c.mediaMu.Lock()
+	if c.media == nil {
+		c.media = make(map[int]*mediaSockets)
+	}
+	c.media[trackID] = m
+	c.mediaMu.Unlock()
 }
