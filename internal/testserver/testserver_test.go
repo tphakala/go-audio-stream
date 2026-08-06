@@ -233,10 +233,11 @@ func (c *testClient) readServerRequest() (*rtsp.Request, error) {
 	}
 }
 
-// clientHandshake drives the client side of the standard exchange against a
-// server whose handler runs ServerConn.Handshake, and returns the channel
-// pairs it read from the SETUP Transport responses.
-func clientHandshake(t *testing.T, c *testClient, base string, nTracks int) []ChannelPair {
+// clientOptionsDescribe drives the client side of OPTIONS then DESCRIBE
+// against a server running Handshake, asserting both succeed. Split out of
+// clientHandshake so a test that scripts its own SETUP exchange (a UDP one,
+// say) can still share this common prefix.
+func clientOptionsDescribe(t *testing.T, c *testClient, base string) {
 	t.Helper()
 	optCSeq := c.send(methodOptions, base, nil, nil)
 	resp, err := c.readResponse()
@@ -255,6 +256,16 @@ func clientHandshake(t *testing.T, c *testClient, base string, nTracks int) []Ch
 	if resp.StatusCode != 200 {
 		t.Fatalf("DESCRIBE: got %d, want 200", resp.StatusCode)
 	}
+}
+
+// clientHandshake drives the client side of the standard exchange against a
+// server whose handler runs ServerConn.Handshake, and returns the channel
+// pairs it read from the SETUP Transport responses.
+func clientHandshake(t *testing.T, c *testClient, base string, nTracks int) []ChannelPair {
+	t.Helper()
+	clientOptionsDescribe(t, c, base)
+	var resp *rtsp.Response
+	var err error
 
 	pairs := make([]ChannelPair, 0, nTracks)
 	for i := 0; i < nTracks; i++ {
