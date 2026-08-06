@@ -110,9 +110,12 @@ func newRecvHarness(t *testing.T, opts harnessOpts) *recvHarness {
 }
 
 // start records the goroutine baseline and launches the RTP receiver under the
-// same udpWG discipline Play uses.
+// same udpWG discipline Play uses. It seeds tr.lastFrameUnixNano first, exactly
+// as startUDPReceivers does, so the anchored watchdog is not armed to a 1970
+// deadline on the first read.
 func (h *recvHarness) start() {
 	h.baseline = runtime.NumGoroutine()
+	h.tr.lastFrameUnixNano.Store(time.Now().UnixNano())
 	h.c.udpWG.Add(1)
 	go h.c.runRTPReceiver(h.tr, h.m)
 }
@@ -120,9 +123,10 @@ func (h *recvHarness) start() {
 // startDiscardRTP records the goroutine baseline and launches the discard
 // receiver on the RTP socket (isRTCP false), the way Play does for a discard
 // track. The sender h.send dials the RTP socket, so h.sendRTP feeds this
-// receiver.
+// receiver. It seeds tr.lastFrameUnixNano first, as startUDPReceivers does.
 func (h *recvHarness) startDiscardRTP() {
 	h.baseline = runtime.NumGoroutine()
+	h.tr.lastFrameUnixNano.Store(time.Now().UnixNano())
 	h.c.udpWG.Add(1)
 	go h.c.runDiscardReceiver(h.tr, h.m.rtpConn, h.m.rtpPeer.IP, false)
 }
@@ -352,6 +356,92 @@ func TestUDPRecvWatchdogTimeout(t *testing.T) {
 		t.Errorf("termErr = %v, want ErrReadTimeout", err)
 	}
 	h.cleanup()
+}
+
+// The media watchdog anchors to the last accepted-from-peer datagram, not to
+// wall clock at each read, so foreign-source traffic cannot hold a dead session
+// open while accepted traffic keeps it alive.
+func TestUDPRecvWatchdogAnchorsToAcceptedTraffic(t *testing.T) {
+	t.Run("foreign traffic does not hold the session open", func(t *testing.T) {
+		h := newRecvHarness(t, harnessOpts{
+			readIdle: 80 * time.Millisecond,
+			playing:  true,
+			peerIP:   net.IPv4(192, 0, 2, 1), // the loopback sender (127.0.0.1) is foreign to this peer.
+		})
+		h.start()
+
+		// Flood foreign-source datagrams faster than ReadIdle. fromPeer drops
+		// them, so they must NOT advance the anchor; the session must still time
+		// out ReadIdle after the seed despite the steady inbound traffic.
+		stop := make(chan struct{})
+		senderDone := make(chan struct{})
+		go func() {
+			defer close(senderDone)
+			pkt := buildTestRTP(96, 1, 1, 0xDEADBEEF, []byte{0})
+			ticker := time.NewTicker(10 * time.Millisecond)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-stop:
+					return
+				case <-ticker.C:
+					_, _ = h.send.Write(pkt) // ignore errors: the socket closes at teardown.
+				}
+			}
+		}()
+
+		done := make(chan struct{})
+		go func() { h.c.udpWG.Wait(); close(done) }()
+		select {
+		case <-done:
+		case <-time.After(2 * time.Second):
+			close(stop)
+			<-senderDone
+			t.Fatal("receiver did not time out under a foreign-source flood within 2s")
+		}
+		close(stop)
+		<-senderDone
+
+		if err := h.c.termError(); !errors.Is(err, audiostream.ErrReadTimeout) {
+			t.Errorf("termErr = %v, want ErrReadTimeout (foreign traffic must not reset the watchdog)", err)
+		}
+		h.cleanup()
+	})
+
+	t.Run("accepted traffic keeps the session alive", func(t *testing.T) {
+		const readIdle = 150 * time.Millisecond
+		h := newRecvHarness(t, harnessOpts{readIdle: readIdle, playing: true})
+		h.start()
+
+		// Send accepted (peer-matching) datagrams every readIdle/3, well inside
+		// the window, for several windows. Each advances the anchor, so the
+		// watchdog must never fire. The margin matches the end-to-end
+		// control-watchdog test's proven timing.
+		ticker := time.NewTicker(readIdle / 3)
+		defer ticker.Stop()
+		span := time.After(readIdle * 3)
+		seq := uint16(100)
+	loop:
+		for {
+			select {
+			case <-span:
+				break loop
+			case <-ticker.C:
+				h.sendRTP(buildTestRTP(96, seq, uint32(seq), 0x0BADC0DE, []byte{byte(seq)}))
+				if f := h.waitFrame(); f.RTPTime != uint32(seq) {
+					t.Fatalf("accepted frame RTPTime = %d, want %d", f.RTPTime, seq)
+				}
+				if err := h.c.termError(); err != nil {
+					t.Fatalf("session died under accepted traffic at seq %d: %v", seq, err)
+				}
+				seq++
+			}
+		}
+		if err := h.c.termError(); err != nil {
+			t.Errorf("termErr = %v, want nil (accepted traffic must keep the session alive)", err)
+		}
+		h.stop()
+	})
 }
 
 // A datagram from the negotiated peer is processed; one from any other source

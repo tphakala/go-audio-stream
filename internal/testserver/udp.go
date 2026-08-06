@@ -171,6 +171,18 @@ func (sc *ServerConn) UDPTracks() []UDPTrack {
 //nolint:gocritic // hugeParam: value receiver matches ServerPorts and InterleavedChannels in rtsp/transport.go: TransportHeader is a small stateless header value, not a hot-path allocation.
 func (sc *ServerConn) acceptUDPSetup(cfg *HandshakeConfig, i int, req *rtsp.Request, th rtsp.TransportHeader) (UDPTrack, error) {
 	base := cfg.ServerRTPBase + 2*i
+	// Validate the base before binding, mirroring how handshakeSetup validates
+	// InterleavedBase. A non-positive ServerRTPBase (typically an unset zero on
+	// a UDP HandshakeConfig) makes the first attempt bind RTCP on a privileged
+	// port (port 1 for an unset base), so every retry fails with a confusing
+	// bind error rather than an explicit config error. Account for the per-track
+	// +2*i offset and the retry span: the last attempt binds RTCP at
+	// base + 2*(maxServerUDPBindRetries-1) + 1, which must stay <= 65535.
+	topPort := base + 2*(maxServerUDPBindRetries-1) + 1
+	if cfg.ServerRTPBase <= 0 || topPort > 65535 {
+		return UDPTrack{}, fmt.Errorf("testserver: ServerRTPBase %d puts track %d server ports (%d-%d across %d retries) outside 1..65535",
+			cfg.ServerRTPBase, i, base, topPort, maxServerUDPBindRetries)
+	}
 	var rtpConn, rtcpConn *net.UDPConn
 	var serverRTP int
 	var lastErr error

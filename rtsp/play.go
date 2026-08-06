@@ -107,6 +107,13 @@ func (c *Client) startUDPReceivers(tracks []*track) {
 	media := maps.Clone(c.media)
 	c.mediaMu.Unlock()
 
+	// Seed each track's media-liveness clock before its receivers start. The
+	// RTP-socket watchdog anchors its deadline to tr.lastFrameUnixNano, so a
+	// zero anchor plus playing would arm a 1970 deadline that expired decades
+	// ago, killing a healthy stream on its first read. This is the per-track
+	// analog of Play's c.lastFrameAt seed, and the store happens-before the
+	// goroutine launch below.
+	now := time.Now().UnixNano()
 	for _, tr := range tracks {
 		m := media[tr.id]
 		if m == nil {
@@ -117,6 +124,7 @@ func (c *Client) startUDPReceivers(tracks []*track) {
 			c.udpWG.Add(-2)
 			continue
 		}
+		tr.lastFrameUnixNano.Store(now)
 		if tr.discard {
 			go c.runDiscardReceiver(tr, m.rtpConn, m.rtpPeer.IP, false)
 			go c.runDiscardReceiver(tr, m.rtcpConn, m.rtcpPeer.IP, true)

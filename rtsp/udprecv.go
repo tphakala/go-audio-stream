@@ -42,7 +42,10 @@ func (c *Client) runRTPReceiver(tr *track, m *mediaSockets) {
 	var haveSSRC bool
 
 	for {
-		if !c.armMediaReadDeadline(m.rtpConn, true) {
+		// Anchor the watchdog to this track's last accepted-from-peer datagram,
+		// so foreign or malformed traffic that ReadFromUDP returns but the loop
+		// drops cannot refresh it.
+		if !c.armMediaReadDeadline(m.rtpConn, true, tr.lastFrameUnixNano.Load()) {
 			return // shutdown has begun.
 		}
 		n, addr, err := m.rtpConn.ReadFromUDP(buf)
@@ -129,7 +132,8 @@ func (c *Client) runRTCPReceiver(tr *track, m *mediaSockets) {
 
 	buf := make([]byte, maxDatagramSize)
 	for {
-		if !c.armMediaReadDeadline(m.rtcpConn, false) {
+		// RTCP is unwatched (watch false), so the anchor is unused; pass 0.
+		if !c.armMediaReadDeadline(m.rtcpConn, false, 0) {
 			return // shutdown has begun.
 		}
 		n, addr, err := m.rtcpConn.ReadFromUDP(buf)
@@ -170,7 +174,9 @@ func (c *Client) runDiscardReceiver(tr *track, conn *net.UDPConn, peerIP net.IP,
 
 	buf := make([]byte, maxDatagramSize)
 	for {
-		if !c.armMediaReadDeadline(conn, !isRTCP) {
+		// The RTP socket (watch true) anchors to accepted media; the RTCP socket
+		// is unwatched and ignores the anchor.
+		if !c.armMediaReadDeadline(conn, !isRTCP, tr.lastFrameUnixNano.Load()) {
 			return // shutdown has begun.
 		}
 		n, addr, err := conn.ReadFromUDP(buf)
@@ -224,10 +230,20 @@ func fromPeer(addr *net.UDPAddr, peerIP net.IP) bool {
 // with the read: false once shutdown has begun, when it installs an immediate
 // deadline so a parked read returns at once. When watch is set (any RTP socket,
 // including a discard track's) and the session is playing with ReadIdle > 0, it
-// arms the read-idle watchdog at now+ReadIdle; the RTCP sockets pass watch
-// false, since RTCP is sparse and a watchdog there would fire on a healthy
+// arms the read-idle watchdog at anchorUnixNano+ReadIdle; the RTCP sockets pass
+// watch false, since RTCP is sparse and a watchdog there would fire on a healthy
 // stream.
-func (c *Client) armMediaReadDeadline(conn *net.UDPConn, watch bool) bool {
+//
+// anchorUnixNano is the wall-clock time (UnixNano) of the last datagram this
+// socket accepted from the negotiated peer (tr.lastFrameUnixNano), NOT the
+// current time. Anchoring the deadline to accepted media, exactly as the
+// control connection's armReadDeadline anchors to c.lastFrameAt, means a
+// foreign-source or malformed datagram (which ReadFromUDP still returns, then
+// the receiver drops) cannot refresh the watchdog: an off-path attacker who
+// learns the client_port cannot hold a dead session open by sending one
+// datagram per ReadIdle. The caller seeds tr.lastFrameUnixNano before the first
+// read (see startUDPReceivers), so the first armed deadline is not a 1970 time.
+func (c *Client) armMediaReadDeadline(conn *net.UDPConn, watch bool, anchorUnixNano int64) bool {
 	c.deadlineMu.Lock()
 	defer c.deadlineMu.Unlock()
 	if c.shuttingDown {
@@ -236,7 +252,7 @@ func (c *Client) armMediaReadDeadline(conn *net.UDPConn, watch bool) bool {
 	}
 	var deadline time.Time
 	if watch && c.playing.Load() && c.cfg.ReadIdle > 0 {
-		deadline = time.Now().Add(c.cfg.ReadIdle)
+		deadline = time.Unix(0, anchorUnixNano).Add(c.cfg.ReadIdle)
 	}
 	_ = conn.SetReadDeadline(deadline)
 	return true

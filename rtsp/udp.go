@@ -94,7 +94,7 @@ func openMediaSockets() (*mediaSockets, error) {
 // resolveServerPeers records the server RTP and RTCP UDP addresses from the
 // SETUP Transport response server_port, always paired with the
 // control-connection peer IP. It returns ErrUDPSetupRejected when the response
-// carries no usable server_port.
+// carries no usable server_port, or when controlPeerIP is nil.
 //
 // M6 is unicast only, so the media source is always the control-connection
 // peer. The Transport source= parameter is a multicast-origin hint (multicast
@@ -103,8 +103,17 @@ func openMediaSockets() (*mediaSockets, error) {
 // let a malicious or MITM server aim this client's hole-punch datagrams and
 // periodic RTCP Receiver Reports at an arbitrary victim IP.
 //
+// controlPeerIP is the sole media-source IP, so a nil one (an unparseable
+// control-connection remote address) is fatal: it would record nil peer IPs,
+// making fromPeer drop all inbound media and holePunch/RTCP writes target the
+// wildcard address. Rejecting here routes setupUDP through its existing
+// resolveServerPeers-rejection path, which tears the accepted stream down.
+//
 //nolint:gocritic // value receiver matches ServerPorts and InterleavedChannels in transport.go: TransportHeader is a small stateless header value, not a hot-path allocation.
 func (m *mediaSockets) resolveServerPeers(th TransportHeader, controlPeerIP net.IP) error {
+	if controlPeerIP == nil {
+		return ErrUDPSetupRejected
+	}
 	rtpPort, rtcpPort, ok := th.ServerPorts()
 	if !ok {
 		return ErrUDPSetupRejected

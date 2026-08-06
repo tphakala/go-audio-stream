@@ -3,6 +3,7 @@ package testserver
 import (
 	"bytes"
 	"net"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -259,5 +260,47 @@ func TestServerHandshakeUDPRejects(t *testing.T) {
 	}
 	if got := res.sc.UDPTracks(); len(got) != 0 {
 		t.Errorf("UDPTracks after a rejected UDP SETUP: got %d, want 0", len(got))
+	}
+}
+
+// TestServerHandshakeUDPRejectsUnsetServerRTPBase asserts acceptUDPSetup fails
+// fast with an explicit config error when ServerRTPBase is unset (zero) on a
+// UDP HandshakeConfig, rather than burning through its bind retries against
+// privileged ports (an unset base makes the first attempt bind RTCP on port 1).
+// The error must name ServerRTPBase so the misconfiguration is obvious.
+func TestServerHandshakeUDPRejectsUnsetServerRTPBase(t *testing.T) {
+	errCh := make(chan error, 1)
+	s := New(t, Options{Handle: func(sc *ServerConn) {
+		_, err := sc.Handshake(HandshakeConfig{
+			SDP:       aacSDP,
+			SessionID: "sess-udp-badbase",
+			UDP:       true,
+			// ServerRTPBase deliberately left unset (0).
+		})
+		errCh <- err
+	}})
+
+	c := dialPlain(t, s, "/stream")
+	base := s.URL("/stream")
+	clientOptionsDescribe(t, c, base)
+
+	clientRTP, _ := bindFakeClientUDPPair(t)
+	h := rtsp.Header{}
+	h.Set("Transport", rtsp.BuildTransportUDP(clientPort(clientRTP), clientPort(clientRTP)+1))
+	c.send("SETUP", base, h, nil)
+	// The server rejects the SETUP with a config error before binding and closes
+	// the connection, so the client's response read would fail; the authoritative
+	// signal is the Handshake error below, not a client-visible response.
+
+	select {
+	case err := <-errCh:
+		if err == nil {
+			t.Fatal("Handshake succeeded with an unset ServerRTPBase, want a config error")
+		}
+		if !strings.Contains(err.Error(), "ServerRTPBase") {
+			t.Errorf("Handshake error = %v, want it to name ServerRTPBase", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Handshake did not return within 2s")
 	}
 }

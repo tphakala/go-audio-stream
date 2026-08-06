@@ -484,8 +484,25 @@ func (c *Client) publishUDPTrack(tr *track, trackID int, m *mediaSockets) error 
 // alone (never nested inside mu or lifecycleMu), the leaf-lock discipline
 // initiateShutdown's deadline-arming block and closeMediaSockets both rely
 // on.
+//
+// publishUDPTrack passes its termErr check under mu, releases mu, then calls
+// this, so shutdown can begin in the gap: closeMediaSockets (which snapshots
+// c.media under mediaMu) may already have run without seeing m, and adding m
+// afterward would leak a socket pair no one closes. Guard against that here:
+// c.closing is closed by initiateShutdown before teardownAndJoin runs
+// closeMediaSockets, and both sites serialize on mediaMu, so a closed c.closing
+// observed under the lock means teardown has run or will run without m. In that
+// case do not register m; close it (outside the lock, keeping mediaMu a pure
+// map-access leaf) and return.
 func (c *Client) registerMediaSockets(trackID int, m *mediaSockets) {
 	c.mediaMu.Lock()
+	select {
+	case <-c.closing:
+		c.mediaMu.Unlock()
+		_ = m.Close()
+		return
+	default:
+	}
 	if c.media == nil {
 		c.media = make(map[int]*mediaSockets)
 	}

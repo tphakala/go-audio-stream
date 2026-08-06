@@ -108,6 +108,23 @@ func TestUDPResolveServerPeersRejectsMissingServerPort(t *testing.T) {
 	}
 }
 
+// A nil controlPeerIP (an unparseable control-connection remote address) is
+// fatal: it is the sole media-source IP, so recording nil peer IPs would make
+// fromPeer drop all inbound media and aim hole-punch/RTCP writes at the
+// wildcard address. resolveServerPeers must reject it even with a valid
+// server_port, so setupUDP tears the accepted stream down.
+func TestUDPResolveServerPeersRejectsNilControlPeerIP(t *testing.T) {
+	t.Parallel()
+	m := &mediaSockets{}
+	th := TransportHeader{HasServerPort: true, ServerRTPPort: 6000, ServerRTCPPort: 6001}
+	if err := m.resolveServerPeers(th, nil); !errors.Is(err, ErrUDPSetupRejected) {
+		t.Errorf("resolveServerPeers with nil controlPeerIP = %v, want ErrUDPSetupRejected", err)
+	}
+	if m.rtpPeer != nil || m.rtcpPeer != nil {
+		t.Errorf("peers recorded on rejection: rtpPeer=%v rtcpPeer=%v, want both nil", m.rtpPeer, m.rtcpPeer)
+	}
+}
+
 // A second Setup of an already-set-up UDP track must be rejected. Over UDP the
 // track is recorded in c.tracks but not c.channelPairs, so the "already set up"
 // guard must scan c.tracks (transport-agnostic) rather than the TCP-only
@@ -300,6 +317,38 @@ func TestUDPPublishUDPTrackRefusesAfterShutdownAndClosesSockets(t *testing.T) {
 	// publishUDPTrack actually closed it rather than leaking the fd.
 	if err := m.rtpConn.Close(); !errors.Is(err, net.ErrClosed) {
 		t.Errorf("rtpConn Close after publishUDPTrack = %v, want net.ErrClosed (already closed)", err)
+	}
+}
+
+// registerMediaSockets must not register a socket pair once shutdown has begun.
+// publishUDPTrack passes its termErr check, releases mu, and only then calls
+// registerMediaSockets, so closeMediaSockets can run in the gap and miss the
+// pair; a late registration would leak sockets no one closes. With c.closing
+// already closed, the pair must be closed and left out of c.media.
+func TestUDPRegisterMediaSocketsRefusesAfterShutdown(t *testing.T) {
+	t.Parallel()
+	c := &Client{closing: make(chan struct{})}
+	close(c.closing)
+
+	m, err := openMediaSockets()
+	if err != nil {
+		t.Fatalf("openMediaSockets: %v", err)
+	}
+
+	c.registerMediaSockets(0, m)
+
+	c.mediaMu.Lock()
+	_, present := c.media[0]
+	n := len(c.media)
+	c.mediaMu.Unlock()
+	if present || n != 0 {
+		t.Errorf("media has %d entries (pair present=%v), want the pair not registered after shutdown", n, present)
+	}
+	// mediaSockets.Close is idempotent (sync.Once), so a second call through it
+	// cannot prove anything; closing the raw conn directly shows
+	// registerMediaSockets actually closed it rather than leaking the fd.
+	if err := m.rtpConn.Close(); !errors.Is(err, net.ErrClosed) {
+		t.Errorf("rtpConn Close after registerMediaSockets = %v, want net.ErrClosed (already closed)", err)
 	}
 }
 
