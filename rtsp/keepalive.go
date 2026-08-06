@@ -1,7 +1,9 @@
 package rtsp
 
 import (
+	"maps"
 	"math"
+	"math/rand/v2"
 	"time"
 
 	"github.com/tphakala/go-audio-stream/rtsp/rtp"
@@ -35,18 +37,32 @@ func (c *Client) keepaliveInterval() time.Duration {
 
 // keepaliveLoop is the keepalive/RTCP timer goroutine, started by Play. It
 // sends an RTSP keepalive every sessionTimeout/2 (floor 1s) using the
-// negotiated method to the session base URL, fire-and-forget, and emits RTCP
-// Receiver Reports every rtcpReportInterval on each non-discard track's RTCP
-// channel. It reads no socket and never touches rtp.Stream: Receiver Reports
-// are built from the per-track atomic snapshot the reader publishes. It exits
-// when closing is signaled, and the deferred wg.Done lets the reader's teardown
-// join it.
+// negotiated method to the session base URL, fire-and-forget, over the TCP
+// control connection in every transport mode. Receiver Reports go one of two
+// ways depending on how the session is pinned: in TCP mode, one is emitted
+// every rtcpReportInterval on each non-discard track's interleaved RTCP
+// channel; in UDP mode, one is emitted on each non-discard track's UDP RTCP
+// socket at a fresh, independently randomized rtcpReportIntervalUDP each time
+// (RFC 3550 section 6.3.1), so a fleet of clients does not synchronize its
+// reports. Either way, it reads no socket and never touches rtp.Stream:
+// Receiver Reports are built from the per-track atomic snapshot the reader
+// publishes. It exits when closing is signaled, and the deferred wg.Done lets
+// the reader's teardown join it.
 func (c *Client) keepaliveLoop() {
 	defer c.wg.Done()
 
+	c.mu.Lock()
+	udpPinned := c.udpPinned
+	c.mu.Unlock()
+
 	keepalive := time.NewTicker(c.keepaliveInterval())
 	defer keepalive.Stop()
-	reports := time.NewTicker(rtcpReportInterval)
+
+	reportInterval := rtcpReportInterval
+	if udpPinned {
+		reportInterval = rtcpReportIntervalUDP()
+	}
+	reports := time.NewTicker(reportInterval)
 	defer reports.Stop()
 
 	for {
@@ -56,9 +72,26 @@ func (c *Client) keepaliveLoop() {
 		case <-keepalive.C:
 			c.sendKeepalive()
 		case <-reports.C:
-			c.sendReceiverReports()
+			if udpPinned {
+				c.sendReceiverReportsUDP(time.Now())
+				// The interval varies per tick, so the ticker is reset to a
+				// fresh randomized value after each fire rather than run at a
+				// fixed period.
+				reports.Reset(rtcpReportIntervalUDP())
+			} else {
+				c.sendReceiverReports()
+			}
 		}
 	}
+}
+
+// rtcpReportIntervalUDP returns the next RTCP Receiver Report interval for
+// UDP mode: rtcpReportInterval (the RFC 3550 minimum, 5s) scaled by a random
+// factor in [0.5, 1.5) per RFC 3550 section 6.3.1. TCP mode keeps the fixed
+// rtcpReportInterval cadence unchanged; only the UDP path randomizes.
+func rtcpReportIntervalUDP() time.Duration {
+	factor := 0.5 + rand.Float64()
+	return time.Duration(float64(rtcpReportInterval) * factor)
 }
 
 // sendKeepalive writes one RTSP keepalive to the session base URL,
@@ -125,6 +158,47 @@ func (c *Client) sendReceiverReports() {
 			continue
 		}
 		_ = c.writeMessage(raw)
+	}
+}
+
+// sendReceiverReportsUDP emits one RTCP Receiver Report per non-discard track
+// as a UDP datagram, written to that track's own RTCP socket and addressed to
+// the resolved server RTCP peer. The report is built from the same per-track
+// atomic snapshot sendReceiverReports uses, so the two paths never disagree on
+// content, only on how the bytes reach the server. The write is fire-and-
+// forget under a bounded deadline: a failed write is logged and ignored here,
+// never funneled into shutdown, because Receiver Reports are advisory and a
+// truly dead path is instead caught by the RTP receiver's own read failure.
+func (c *Client) sendReceiverReportsUDP(now time.Time) {
+	c.mu.Lock()
+	tracks := c.tracks
+	reporter := c.reporterSSRC
+	c.mu.Unlock()
+
+	c.mediaMu.Lock()
+	media := maps.Clone(c.media)
+	c.mediaMu.Unlock()
+
+	for _, tr := range tracks {
+		if tr.discard {
+			continue
+		}
+		m := media[tr.id]
+		if m == nil {
+			// Unreachable in a correctly pinned UDP session: every non-discard
+			// track set up over UDP has a registered socket pair. Skip rather
+			// than panic on a nil socket.
+			continue
+		}
+		rr := tr.buildReceiverReport(reporter, now)
+		if err := m.rtcpConn.SetWriteDeadline(time.Now().Add(c.cfg.Timeout)); err != nil {
+			logWarn(c.cfg.Logger, "could not arm a receiver report write deadline; skipping this track",
+				"track", tr.id, "error", err)
+			continue
+		}
+		if _, err := m.rtcpConn.WriteToUDP(rr.Marshal(), m.rtcpPeer); err != nil {
+			logWarn(c.cfg.Logger, "UDP receiver report write failed", "track", tr.id, "error", err)
+		}
 	}
 }
 

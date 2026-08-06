@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 )
 
 var (
@@ -164,12 +165,24 @@ func (c *Client) setupUDP(ctx context.Context, trk Track, desc describedTrack, o
 		return fmt.Errorf("track %d: %w (Transport: %q)", trk.ID, rerr, raw)
 	}
 
-	// rtcpCh is unused in UDP mode until a later task routes Receiver
-	// Reports over the UDP RTCP socket instead of the TCP interleaved
-	// channel (rtcpChannel only matters to sendReceiverReports); the
+	// rtcpCh is 0 and unused in UDP mode: Receiver Reports go out over the
+	// UDP RTCP socket (sendReceiverReportsUDP in keepalive.go), keyed by
+	// track id through c.media rather than by an interleaved channel; the
 	// depacketizer and stat wiring newTrack builds are transport-independent.
 	tr := newTrack(trk.ID, desc, opts, 0, c.cfg.Logger)
-	return c.publishUDPTrack(tr, trk.ID, m)
+	if perr := c.publishUDPTrack(tr, trk.ID, m); perr != nil {
+		return perr
+	}
+
+	// Hole-punch now that the server peers are resolved and the track is
+	// registered, using an initial Receiver Report built from tr's still-zero
+	// snapshot (D4): the return path through a NAT or firewall needs opening
+	// before Play starts the receive goroutines, and this is the earliest
+	// point both the resolved peers and a track to build the RR from exist.
+	// Best-effort: holePunch already logs and ignores its own errors, so a
+	// punch failure never fails Setup.
+	m.holePunch(tr.buildReceiverReport(c.reporterSSRC, time.Now()).Marshal(), c.cfg.Logger)
+	return nil
 }
 
 // teardownRejectedStream sends a best-effort per-track TEARDOWN for a stream the
