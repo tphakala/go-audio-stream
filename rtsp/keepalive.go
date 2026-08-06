@@ -52,7 +52,7 @@ func (c *Client) keepaliveLoop() {
 	defer c.wg.Done()
 
 	c.mu.Lock()
-	udpPinned := c.udpPinned
+	udpPinned := c.udpPinned.Load()
 	c.mu.Unlock()
 
 	keepalive := time.NewTicker(c.keepaliveInterval())

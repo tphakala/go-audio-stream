@@ -459,7 +459,7 @@ func (c *Client) publishUDPTrack(tr *track, trackID int, m *mediaSockets) error 
 		return c.termErr
 	}
 	c.tracks = append(c.tracks, tr)
-	c.udpPinned = true
+	c.udpPinned.Store(true)
 	c.transport = c.cfg.Transport
 	// Pin the session UDP so SessionInfo reports "UDP" and later Setups follow
 	// the pin; udpPinned stays the flag the UDP Play and keepalive paths read.

@@ -64,7 +64,7 @@ func (c *Client) Play(ctx context.Context) error {
 	c.commitState(methodPlay)
 	c.playing.Store(true)
 	c.wg.Add(1)
-	udpPinned := c.udpPinned
+	udpPinned := c.udpPinned.Load()
 	tracks := c.tracks
 	if udpPinned {
 		// Reserve the receive goroutines' WaitGroup count under mu, on the same

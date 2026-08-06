@@ -389,3 +389,112 @@ func TestIntegrationUDPCleanShutdownNoLeak(t *testing.T) {
 	closeAndWait(t, c)
 	assertNoGoroutineLeak(t, baseline)
 }
+
+// TestIntegrationUDPControlWatchdogSurvivesIdleControl is the regression test
+// for the live-interop bug where the phase-1 control-connection read-idle
+// watchdog killed a healthy UDP session at exactly ReadIdle. In UDP mode media
+// arrives on the per-track UDP sockets, not the control connection, so the
+// control read must NOT be given a ReadIdle deadline; the RTP-socket watchdog in
+// runRTPReceiver handles media liveness instead. With the bug present the
+// session died at ReadIdle regardless of UDP media; here a small ReadIdle is set
+// and RTP datagrams are injected one at a time with a real gap between them, so
+// the stream spans several ReadIdle windows while the control connection stays
+// quiet (testTimeoutS is 90s, so no keepalive fires in this sub-second window).
+// Receiving every frame proves the session stayed alive across those windows,
+// and the backgrounded Wait must not return ErrReadTimeout.
+func TestIntegrationUDPControlWatchdogSurvivesIdleControl(t *testing.T) {
+	const readIdle = 150 * time.Millisecond
+	const n = 12                      // 12 datagrams
+	const gap = 40 * time.Millisecond // ~440ms of injection, several ReadIdle windows
+	ssrc := uint32(0x11220003)
+
+	frames := make(chan audiostream.Frame, 256)
+	tracksOut := make(chan []testserver.UDPTrack, 1)
+	cfg := testserver.HandshakeConfig{
+		SDP:            aacSDP,
+		SessionID:      testSessionID,
+		SessionTimeout: testTimeoutS,
+		UDP:            true,
+		ServerRTPBase:  nextUDPServerBase(),
+	}
+	s := testserver.New(t, testserver.Options{Handle: func(sc *testserver.ServerConn) {
+		if _, err := sc.Handshake(cfg); err != nil {
+			t.Errorf("Handshake: %v", err)
+			close(tracksOut)
+			return
+		}
+		tracksOut <- sc.UDPTracks()
+		drainRequests(sc)
+	}})
+
+	// Dial directly so ReadIdle can be set (dialTransport does not expose it).
+	c, err := rtsp.Dial(context.Background(), rtsp.Config{
+		URL:       s.URL("/stream"),
+		Timeout:   testTimeout,
+		Transport: rtsp.PreferUDP,
+		ReadIdle:  readIdle,
+		OnFrame: func(f audiostream.Frame) {
+			cp := f
+			cp.Data = append([]byte(nil), f.Data...)
+			frames <- cp
+		},
+	})
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	describeSetupPlay(t, c, nil)
+	if got := c.SessionInfo().Transport; got != "UDP" {
+		t.Fatalf("SessionInfo().Transport = %q, want UDP", got)
+	}
+	track := wantTrack1(t, tracksOut)
+
+	// Background Wait so a spurious watchdog ErrReadTimeout surfaces the instant
+	// it funnels rather than being missed.
+	waitErr := make(chan error, 1)
+	go func() { waitErr <- c.Wait(context.Background()) }()
+
+	// Inject datagrams one at a time with a real gap between them, so the stream
+	// spans several ReadIdle windows while the control connection stays quiet.
+	// Receiving every frame is the proof: with the control watchdog still active
+	// the session would have been torn down around the first ReadIdle window and
+	// the later frames would never arrive.
+	for i := 0; i < n; i++ {
+		if err := track.InjectRTP(aacUDPDatagram(uint16(2000+i), i, ssrc)); err != nil { //nolint:gosec // i < n is tiny.
+			t.Fatalf("InjectRTP %d: %v", i, err)
+		}
+		if got := recvFrame(t, frames); !bytes.Equal(got.Data, aacAU(i)) {
+			t.Errorf("frame %d Data = % x, want % x", i, got.Data, aacAU(i))
+		}
+		select {
+		case err := <-waitErr:
+			t.Fatalf("session ended after %d frames: %v (ErrReadTimeout means the control watchdog still fired in UDP mode)", i+1, err)
+		default:
+		}
+		if i < n-1 {
+			time.Sleep(gap)
+		}
+	}
+
+	// Every frame arrived across roughly n*gap of wall-clock time, several
+	// ReadIdle windows, so the control-connection watchdog is off in UDP mode.
+	// The session is still alive right after the last frame; assert that before
+	// tearing down. (Once injection stops the RTP-socket media watchdog will
+	// legitimately end the session after ReadIdle; that is the separate
+	// media-liveness path, not the control-watchdog bug under test, so this
+	// check must run before that window elapses.)
+	select {
+	case err := <-waitErr:
+		t.Fatalf("session ended just after the stream: %v, want it still alive", err)
+	default:
+	}
+
+	// Tear down explicitly. The terminal cause may be ErrClosed or, if the media
+	// watchdog wins the race now that injection has stopped, ErrReadTimeout;
+	// both are correct here, so assert only that Wait returns.
+	_ = c.Close()
+	select {
+	case <-waitErr:
+	case <-time.After(testTimeout):
+		t.Fatal("Wait did not return after Close")
+	}
+}

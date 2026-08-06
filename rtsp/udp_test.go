@@ -216,7 +216,7 @@ func TestUDPPublishUDPTrackRegistersMediaAndPinsTransport(t *testing.T) {
 	if err := c.publishUDPTrack(tr, 0, m); err != nil {
 		t.Fatalf("publishUDPTrack: %v", err)
 	}
-	if !c.udpPinned {
+	if !c.udpPinned.Load() {
 		t.Error("udpPinned = false, want true")
 	}
 	if c.transport != PreferUDP {

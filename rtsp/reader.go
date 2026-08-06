@@ -590,11 +590,20 @@ func (c *Client) fill() error {
 	return err
 }
 
-// armReadDeadline sets the socket read deadline for the current phase, under
-// deadlineMu so it can never race past a shutdown. Pre-play and with the
-// watchdog disabled there is no deadline; while playing with ReadIdle > 0 the
-// deadline is lastFrameAt + ReadIdle. When shutdown has begun it sets an
-// immediate deadline instead, so a blocked read cannot outlive Close.
+// armReadDeadline sets the control-connection read deadline for the current
+// phase, under deadlineMu so it can never race past a shutdown. Pre-play and
+// with the watchdog disabled there is no deadline; while playing in TCP mode
+// with ReadIdle > 0 the deadline is lastFrameAt + ReadIdle. When shutdown has
+// begun it sets an immediate deadline instead, so a blocked read cannot outlive
+// Close.
+//
+// The read-idle watchdog is disabled in UDP mode (udpPinned): there, media
+// arrives on the per-track UDP sockets, not the control connection, so the
+// control read would time out ReadIdle after the last control activity and kill
+// a perfectly healthy session. UDP media liveness is watchdogged instead on the
+// RTP sockets by runRTPReceiver (armMediaReadDeadline, watch=true). udpPinned is
+// atomic because this runs on the reader goroutine holding only deadlineMu,
+// while setupUDP sets the flag on the caller goroutine.
 func (c *Client) armReadDeadline() {
 	c.deadlineMu.Lock()
 	defer c.deadlineMu.Unlock()
@@ -603,7 +612,7 @@ func (c *Client) armReadDeadline() {
 		return
 	}
 	var deadline time.Time
-	if c.playing.Load() && c.cfg.ReadIdle > 0 {
+	if !c.udpPinned.Load() && c.playing.Load() && c.cfg.ReadIdle > 0 {
 		deadline = time.Unix(0, c.lastFrameAt.Load()).Add(c.cfg.ReadIdle)
 	}
 	_ = c.conn.SetReadDeadline(deadline)

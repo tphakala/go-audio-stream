@@ -168,8 +168,12 @@ type Client struct {
 	sessionTransport string
 	// udpPinned is true once a Setup has negotiated UDP transport for this
 	// session. False (the zero value) in TCP mode, which is the phase 1
-	// default and behavior.
-	udpPinned bool
+	// default and behavior. It is an atomic.Bool because armReadDeadline reads
+	// it on the reader goroutine, holding only deadlineMu (a leaf lock that must
+	// not take mu), to disable the control-connection read-idle watchdog in UDP
+	// mode, while setupUDP writes it during Setup on the caller goroutine; a
+	// plain bool would be a data race across that split.
+	udpPinned atomic.Bool
 	// auth is the active authentication state. Once a 401 has been answered,
 	// every outgoing request carries an Authorization header computed from it,
 	// with the nonce count incremented per request under the same server nonce.
