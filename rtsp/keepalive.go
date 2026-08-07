@@ -1,7 +1,6 @@
 package rtsp
 
 import (
-	"maps"
 	"math"
 	"math/rand/v2"
 	"time"
@@ -173,9 +172,7 @@ func (c *Client) sendReceiverReportsUDP(now time.Time) {
 	reporter := c.reporterSSRC
 	c.mu.Unlock()
 
-	c.mediaMu.Lock()
-	media := maps.Clone(c.media)
-	c.mediaMu.Unlock()
+	media := c.snapshotMedia()
 
 	for _, tr := range tracks {
 		if tr.discard {

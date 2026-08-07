@@ -45,6 +45,24 @@ func TestParseTransportInterleaved(t *testing.T) {
 	}
 }
 
+// TestParseTransportInterleavedLoneChannel covers the lone-number (no dash)
+// branch of parsePortPair reached via the interleaved= parameter: a single
+// channel number sets only RTPChannel and leaves Interleaved false, so a
+// malformed pair is not mistaken for a valid interleaved channel assignment.
+func TestParseTransportInterleavedLoneChannel(t *testing.T) {
+	t.Parallel()
+	th, err := rtsp.ParseTransport("RTP/AVP/TCP;unicast;interleaved=7")
+	if err != nil {
+		t.Fatalf("ParseTransport error = %v", err)
+	}
+	if th.Interleaved {
+		t.Error("Interleaved = true, want false for a lone channel number")
+	}
+	if th.RTPChannel != 7 {
+		t.Errorf("RTPChannel = %d, want 7", th.RTPChannel)
+	}
+}
+
 func TestParseTransportModeAndSSRC(t *testing.T) {
 	t.Parallel()
 	th, err := rtsp.ParseTransport(`RTP/AVP/TCP;unicast;interleaved=2-3;ssrc=1234ABCD;mode="PLAY"`)

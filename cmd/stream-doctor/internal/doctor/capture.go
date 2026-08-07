@@ -167,12 +167,14 @@ func transportPreference(s string) (pref rtsp.TransportPreference, ok bool) {
 	}
 }
 
-// Dial connects to opts.URL and runs OPTIONS via rtsp.Dial.
-func (p *rtspProber) Dial(ctx context.Context) error {
+// dialConfig builds the rtsp.Config Dial hands to rtsp.Dial: a pure mapping
+// from p.opts plus the prober's OnFrame sink, kept as its own method so the
+// -transport binding is assertable without a live dial.
+func (p *rtspProber) dialConfig() rtsp.Config {
 	// opts.Transport was validated by parseArgs, so ok is always true here; the
 	// zero-value PreferTCP is a safe fallback for a caller that bypassed it.
 	pref, _ := transportPreference(p.opts.Transport)
-	cfg := rtsp.Config{
+	return rtsp.Config{
 		URL:         p.opts.URL,
 		Username:    p.opts.Username,
 		Password:    p.opts.Password,
@@ -183,7 +185,11 @@ func (p *rtspProber) Dial(ctx context.Context) error {
 		OnFrame:     p.onFrame,
 		Transport:   pref,
 	}
-	client, err := rtsp.Dial(ctx, cfg)
+}
+
+// Dial connects to opts.URL and runs OPTIONS via rtsp.Dial.
+func (p *rtspProber) Dial(ctx context.Context) error {
+	client, err := rtsp.Dial(ctx, p.dialConfig())
 	if err != nil {
 		return err
 	}
@@ -278,7 +284,10 @@ func (p *rtspProber) Collect(ctx context.Context, track rtsp.Track, window time.
 // simply elapsing (EndCompleted).
 func classifyEndReason(ctx context.Context, err error, truncated bool, frameCount int) EndReason {
 	switch {
-	case ctx.Err() != nil:
+	// Only a genuine cancellation (Ctrl-C) is EndCancelled. A parent-context
+	// deadline is the caller's own time budget elapsing, not a cancel, so it
+	// falls through to the completed/truncated handling below.
+	case errors.Is(ctx.Err(), context.Canceled):
 		return EndCancelled
 	case errors.Is(err, context.DeadlineExceeded) && !truncated:
 		return EndCompleted

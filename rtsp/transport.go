@@ -105,7 +105,7 @@ func applyTransportParam(t *TransportHeader, param string) {
 	case !hasEq && name == "multicast":
 		// Recognized; no dedicated field, Unicast stays false.
 	case hasEq && name == "interleaved":
-		parseInterleavedParam(t, val)
+		parsePortPair(val, &t.RTPChannel, &t.RTCPChannel, &t.Interleaved)
 	case hasEq && name == "client_port":
 		parsePortPair(val, &t.ClientRTPPort, &t.ClientRTCPPort, &t.HasClientPort)
 	case hasEq && name == "server_port":
@@ -121,33 +121,12 @@ func applyTransportParam(t *TransportHeader, param string) {
 	}
 }
 
-// parseInterleavedParam parses an interleaved=a[-b] value into t. Any pair
-// with both sides numeric sets RTPChannel, RTCPChannel, and Interleaved,
-// leaving the range and consecutiveness checks to InterleavedChannels; a
-// lone channel number sets only RTPChannel and leaves Interleaved false;
-// anything else is ignored.
-func parseInterleavedParam(t *TransportHeader, val string) {
-	rtpStr, rtcpStr, hasDash := strings.Cut(val, "-")
-	if hasDash {
-		rtp, rerr := strconv.Atoi(strings.TrimSpace(rtpStr))
-		rtcp, cerr := strconv.Atoi(strings.TrimSpace(rtcpStr))
-		if rerr == nil && cerr == nil {
-			t.RTPChannel = rtp
-			t.RTCPChannel = rtcp
-			t.Interleaved = true
-		}
-		return
-	}
-	if rtp, err := strconv.Atoi(strings.TrimSpace(val)); err == nil {
-		t.RTPChannel = rtp
-	}
-}
-
-// parsePortPair parses a client_port or server_port value "a[-b]" into rtp,
-// rtcp, and has. A pair with both sides numeric sets rtp, rtcp, and has to
-// true, leaving the range and consecutiveness checks to ServerPorts; a lone
-// port number sets only rtp and leaves has false, matching how
-// parseInterleavedParam treats a lone channel; anything else is ignored.
+// parsePortPair parses an interleaved=a[-b], client_port=a[-b], or
+// server_port=a[-b] value into rtp, rtcp, and has. A pair with both sides
+// numeric sets rtp, rtcp, and has to true, leaving the range and
+// consecutiveness checks to the caller (InterleavedChannels or ServerPorts); a
+// lone number sets only rtp (the first target) and leaves has false; anything
+// else is ignored.
 func parsePortPair(val string, rtp, rtcp *int, has *bool) {
 	rtpStr, rtcpStr, hasDash := strings.Cut(val, "-")
 	if hasDash {

@@ -29,6 +29,10 @@ const fallbackTwoAudioSDP = "v=0\r\n" +
 // reports, whether it was pinned directly under PreferTCP or by a fallback.
 const wantTransportTCP = "TCP"
 
+// wantTransportUDP is the SessionInfo.Transport value a UDP-pinned session
+// reports.
+const wantTransportUDP = "UDP"
+
 // isUDPProposal reports whether a SETUP Transport header is the RTP/AVP unicast
 // UDP proposal (client_port), as opposed to the TCP-interleaved profile.
 func isUDPProposal(transport string) bool {
@@ -84,6 +88,7 @@ func playSessionHeaders() rtsp.Header {
 // client re-issues the same track's SETUP over TCP interleaved, pins the session
 // TCP, and streams frames over the interleaved channels exactly as phase 1.
 func TestFallbackPreferUDPThenTCPFallsBackOn461(t *testing.T) {
+	t.Parallel()
 	payload := []byte{0x78, 0xaa, 0xbb, 0xcc}
 	frames := make(chan audiostream.Frame, 8)
 	s := testserver.New(t, testserver.Options{Handle: func(sc *testserver.ServerConn) {
@@ -152,6 +157,7 @@ func TestFallbackPreferUDPThenTCPFallsBackOn461(t *testing.T) {
 // session down and returns ErrUDPSetupRejected. It holds under both PreferUDP
 // and PreferUDPThenTCP.
 func TestFallback2xxUnusableServerPortDoesNotFallBack(t *testing.T) {
+	t.Parallel()
 	for _, pref := range []struct {
 		name string
 		pref rtsp.TransportPreference
@@ -209,6 +215,7 @@ func TestFallback2xxUnusableServerPortDoesNotFallBack(t *testing.T) {
 // nothing more after the 461 (the connection just closes on Close, since a 461
 // leaves no session to TEARDOWN).
 func TestFallbackPreferUDPNoFallbackOn461(t *testing.T) {
+	t.Parallel()
 	afterReject := make(chan string, 1)
 	s := testserver.New(t, testserver.Options{Handle: func(sc *testserver.ServerConn) {
 		serve(t, sc, methodOptions, 200, "OK", keepaliveHeader(), nil)
@@ -255,6 +262,7 @@ func TestFallbackPreferUDPNoFallbackOn461(t *testing.T) {
 // TestFallbackPreferTCPIgnoresUDP covers PreferTCP (the zero value): the SETUP
 // proposal is the TCP-interleaved profile, never a UDP client_port.
 func TestFallbackPreferTCPIgnoresUDP(t *testing.T) {
+	t.Parallel()
 	s := testserver.New(t, testserver.Options{Handle: func(sc *testserver.ServerConn) {
 		serve(t, sc, methodOptions, 200, "OK", keepaliveHeader(), nil)
 		serve(t, sc, methodDescribe, 200, "OK", sdpHeaders(""), []byte(opusSDP))
@@ -297,6 +305,7 @@ func TestFallbackPreferTCPIgnoresUDP(t *testing.T) {
 // the first track falls back to TCP, and the second track's SETUP then proposes
 // TCP directly with no UDP attempt, verified on the wire.
 func TestFallbackSessionWidePin(t *testing.T) {
+	t.Parallel()
 	s := testserver.New(t, testserver.Options{Handle: func(sc *testserver.ServerConn) {
 		serve(t, sc, methodOptions, 200, "OK", keepaliveHeader(), nil)
 		serve(t, sc, methodDescribe, 200, "OK", sdpHeaders(""), []byte(fallbackTwoAudioSDP))

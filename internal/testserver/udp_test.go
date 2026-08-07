@@ -72,6 +72,7 @@ func readUDPWithDeadline(t *testing.T, conn *net.UDPConn, timeout time.Duration)
 // InjectRTPSequence, InjectRTCP, and WaitClientRTCP against a fake client
 // socket pair standing in for the real rtsp.Client.
 func TestServerHandshakeUDP(t *testing.T) {
+	t.Parallel()
 	resultCh := make(chan udpHandshakeResult, 1)
 	done := make(chan struct{})
 	var doneOnce sync.Once
@@ -195,6 +196,7 @@ func TestServerHandshakeUDP(t *testing.T) {
 // TCP-interleaved) is handled exactly like an interleaved-only handshake.
 // UDPTracks stays empty since no UDP track was ever bound.
 func TestServerHandshakeUDPRejects(t *testing.T) {
+	t.Parallel()
 	resultCh := make(chan udpHandshakeResult, 1)
 	s := New(t, Options{Handle: func(sc *ServerConn) {
 		pairs, err := sc.Handshake(HandshakeConfig{
@@ -263,12 +265,76 @@ func TestServerHandshakeUDPRejects(t *testing.T) {
 	}
 }
 
+// TestServerHandshakeUDPNonProposalFallsThrough covers handshakeSetupUDP's
+// "not a UDP proposal" branch (the one carrying the deliberate nolint:nilerr):
+// under a UDP HandshakeConfig with RejectUDP off, a SETUP that carries no
+// client_port is not a UDP request, so the server falls through to the
+// interleaved branch and binds no UDP track, exactly as an interleaved-only
+// handshake would.
+func TestServerHandshakeUDPNonProposalFallsThrough(t *testing.T) {
+	t.Parallel()
+	resultCh := make(chan udpHandshakeResult, 1)
+	s := New(t, Options{Handle: func(sc *ServerConn) {
+		pairs, err := sc.Handshake(HandshakeConfig{
+			SDP:           aacSDP,
+			SessionID:     "sess-udp-nonproposal",
+			UDP:           true,
+			ServerRTPBase: serverRTPBaseUDP + 40,
+		})
+		if err != nil {
+			t.Errorf("Handshake: %v", err)
+			resultCh <- udpHandshakeResult{}
+			return
+		}
+		resultCh <- udpHandshakeResult{sc: sc, pairs: pairs}
+	}})
+
+	c := dialPlain(t, s, "/stream")
+	base := s.URL("/stream")
+	clientOptionsDescribe(t, c, base)
+
+	// A TCP-interleaved SETUP (no client_port) under a UDP config is not a UDP
+	// proposal, so the server must fall through to the interleaved branch.
+	h := rtsp.Header{}
+	h.Set("Transport", rtsp.BuildTransport(0, 1))
+	c.send("SETUP", base, h, nil)
+	resp, err := c.readResponse()
+	if err != nil {
+		t.Fatalf("read SETUP response: %v", err)
+	}
+	if resp.StatusCode != 200 {
+		t.Fatalf("SETUP: got %d, want 200", resp.StatusCode)
+	}
+	tr, terr := rtsp.ParseTransport(resp.Header.Get("Transport"))
+	if terr != nil || !tr.Interleaved || tr.RTPChannel != 0 || tr.RTCPChannel != 1 {
+		t.Fatalf("SETUP transport = %q, want interleaved 0-1", resp.Header.Get("Transport"))
+	}
+
+	c.send("PLAY", base, nil, nil)
+	resp, err = c.readResponse()
+	if err != nil || resp.StatusCode != 200 {
+		t.Fatalf("PLAY: resp=%+v err=%v", resp, err)
+	}
+
+	res := <-resultCh
+	if res.sc == nil {
+		t.Fatal("Handshake failed; see prior error")
+	}
+	if len(res.pairs) != 1 || res.pairs[0] != (ChannelPair{RTP: 0, RTCP: 1}) {
+		t.Errorf("pairs = %+v, want [{0 1}]", res.pairs)
+	}
+	if got := res.sc.UDPTracks(); len(got) != 0 {
+		t.Errorf("UDPTracks after a non-UDP SETUP: got %d, want 0", len(got))
+	}
+}
+
 // TestServerHandshakeUDPRejectsUnsetServerRTPBase asserts acceptUDPSetup fails
 // fast with an explicit config error when ServerRTPBase is unset (zero) on a
 // UDP HandshakeConfig, rather than burning through its bind retries against
 // privileged ports (an unset base makes the first attempt bind RTCP on port 1).
 // The error must name ServerRTPBase so the misconfiguration is obvious.
 func TestServerHandshakeUDPRejectsUnsetServerRTPBase(t *testing.T) {
+	t.Parallel()
 	errCh := make(chan error, 1)
 	s := New(t, Options{Handle: func(sc *ServerConn) {
 		_, err := sc.Handshake(HandshakeConfig{

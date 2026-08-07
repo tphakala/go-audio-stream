@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"net"
 	"sync"
 )
@@ -193,4 +194,16 @@ func remoteIP(addr net.Addr) net.IP {
 		return nil
 	}
 	return net.ParseIP(host)
+}
+
+// snapshotMedia returns a copy of the per-track media socket map taken under
+// mediaMu; nil in TCP mode, and a nil map is safe to range over. mediaMu is an
+// independent leaf lock held only for the clone, never across a socket call.
+// Callers that only need to iterate the map clone it through this helper so the
+// leaf-lock discipline lives in one place; the sole mutator, registerMediaSockets,
+// takes mediaMu directly.
+func (c *Client) snapshotMedia() map[int]*mediaSockets {
+	c.mediaMu.Lock()
+	defer c.mediaMu.Unlock()
+	return maps.Clone(c.media)
 }

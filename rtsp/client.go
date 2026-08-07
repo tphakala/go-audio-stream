@@ -110,12 +110,24 @@ type SessionInfo struct {
 	// (interleaved) or "UDP" (unicast), and "" before any track is set up. It
 	// is a plain diagnostic string, not the caller's TransportPreference: under
 	// PreferUDPThenTCP a session that fell back reports "TCP", not the
-	// preference it started from.
+	// preference it started from. IsUDP reports the UDP case without comparing
+	// against the literal.
 	Transport string
 	// UDPEndpoints lists the negotiated UDP port pairs, one per set-up track,
 	// in Setup order; nil for a TCP-interleaved session (where Channels carries
 	// the interleaved pairs instead). Freshly allocated; never internal state.
 	UDPEndpoints []UDPEndpoint
+}
+
+// IsUDP reports whether the session resolved to RTP/AVP unicast UDP media
+// transport at the first Setup. It is false for a TCP-interleaved session and
+// before any track has been set up (Transport is then ""), so a caller can
+// branch on the negotiated transport without comparing Transport against its
+// literal value.
+//
+//nolint:gocritic // hugeParam: value receiver keeps the predicate callable directly on the snapshot Client.SessionInfo returns; SessionInfo is a small read-only snapshot, not a hot-path allocation.
+func (si SessionInfo) IsUDP() bool {
+	return si.Transport == transportPinUDP
 }
 
 // Client is a single RTSP session. Close, Wait, Stats, SessionInfo and Info are
@@ -176,11 +188,6 @@ type Client struct {
 	// time and copied by SessionInfo; nil in TCP mode.
 	udpEndpoints []UDPEndpoint
 	termErr      error
-	// transport is the caller's transport preference copied from cfg.Transport
-	// at the first successful UDP Setup. It records that a UDP negotiation
-	// happened under this preference; SessionInfo reports the resolved wire
-	// transport through sessionTransport, not this field.
-	transport TransportPreference
 	// sessionTransport is the media transport resolved at the first successful
 	// Setup and the session-wide pin every later Setup follows (D6): "" until a
 	// track is set up, then "TCP" (interleaved) or "UDP" (unicast). It backs
@@ -429,22 +436,11 @@ func (c *Client) initiateShutdown(cause error) {
 		_ = c.conn.SetDeadline(time.Now())
 		c.deadlineMu.Unlock()
 
-		// mediaMu is an independent leaf lock: taken alone here, never
-		// nested inside mu or deadlineMu. It is held only long enough to
-		// snapshot the map into a local slice; the SetReadDeadline calls
-		// below run outside the lock, so mediaMu stays a pure map-access
-		// leaf and is never held across a socket call, the same discipline
-		// closeMediaSockets applies to Close. In TCP mode media is empty,
-		// so this is a no-op.
-		c.mediaMu.Lock()
-		sockets := make([]*mediaSockets, 0, len(c.media))
-		for _, m := range c.media {
-			sockets = append(sockets, m)
-		}
-		c.mediaMu.Unlock()
-
+		// snapshotMedia keeps mediaMu a pure map-access leaf; the
+		// SetReadDeadline calls below run outside the lock. In TCP mode
+		// media is empty, so this is a no-op.
 		now := time.Now()
-		for _, m := range sockets {
+		for _, m := range c.snapshotMedia() {
 			_ = m.rtpConn.SetReadDeadline(now)
 			_ = m.rtcpConn.SetReadDeadline(now)
 		}

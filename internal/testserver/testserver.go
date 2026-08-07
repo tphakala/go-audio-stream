@@ -822,17 +822,54 @@ func digestHasher(algorithm string) func(string) string {
 	}
 }
 
+// handshakeSetupUDP handles the UDP branch of one SETUP for track i, under a
+// UDP HandshakeConfig. When req proposes RTP/AVP unicast (a client_port
+// parameter), it is either bound to a server UDP socket pair via
+// acceptUDPSetup and recorded in sc.udpTracks (handled true), or, under
+// cfg.RejectUDP, answered 461 Unsupported Transport and followed by a read of
+// that same track's interleaved retry, returned as next so the caller can
+// fall through to the ordinary interleaved branch. When req is not a UDP
+// proposal at all, next is req unchanged and handled is false.
+func (sc *ServerConn) handshakeSetupUDP(cfg *HandshakeConfig, i int, req *rtsp.Request) (next *rtsp.Request, handled bool, err error) {
+	th, terr := rtsp.ParseTransport(req.Header.Get("Transport"))
+	if terr != nil || !th.HasClientPort {
+		// A malformed Transport header or one with no client_port is simply
+		// not a UDP proposal, not a request failure: fall through to the
+		// interleaved branch with req unchanged, exactly as the original
+		// combined condition (terr == nil && th.HasClientPort) did.
+		return req, false, nil //nolint:nilerr // intentional: see comment above.
+	}
+	if cfg.RejectUDP {
+		if err := sc.Respond(req, rtsp.StatusUnsupportedTransport, "Unsupported Transport", nil, nil); err != nil {
+			return nil, false, err
+		}
+		// The client falls back to this same track's TCP-interleaved SETUP on
+		// this connection; read it and let the caller fall through to the
+		// interleaved branch.
+		next, err = sc.ReadRequest()
+		if err != nil {
+			return nil, false, err
+		}
+		sc.expectMethod(next, "SETUP")
+		return next, false, nil
+	}
+	track, uerr := sc.acceptUDPSetup(cfg, i, req, th)
+	if uerr != nil {
+		return nil, false, uerr
+	}
+	sc.udpTracks = append(sc.udpTracks, track)
+	return nil, true, nil
+}
+
 // handshakeSetup reads one SETUP per m= section, assigning interleaved
 // channels from cfg.InterleavedBase, and answers each 200 with a Transport
 // and Session header. It returns the assigned channel pairs.
 //
-// For a UDP HandshakeConfig (cfg.UDP), a SETUP that proposes RTP/AVP unicast
-// (a client_port parameter) is instead bound to a server UDP socket pair via
-// acceptUDPSetup, and pairs carries a zero ChannelPair for that track;
-// UDPTracks returns the negotiated UDP tracks separately. Under cfg.RejectUDP
-// such a SETUP is answered 461 Unsupported Transport instead, and the next
-// request read is treated as that same track's interleaved retry, falling
-// through to the ordinary branch below exactly as an interleaved-only
+// For a UDP HandshakeConfig (cfg.UDP), each SETUP is first offered to
+// handshakeSetupUDP; a handled UDP SETUP contributes a zero ChannelPair here
+// (UDPTracks returns the negotiated UDP tracks separately), and an
+// unhandled one (not a UDP proposal, or rejected and retried over TCP) falls
+// through to the interleaved branch below exactly as an interleaved-only
 // handshake would.
 func (sc *ServerConn) handshakeSetup(cfg *HandshakeConfig) ([]ChannelPair, error) {
 	n := countMediaSections(cfg.SDP)
@@ -845,30 +882,15 @@ func (sc *ServerConn) handshakeSetup(cfg *HandshakeConfig) ([]ChannelPair, error
 		sc.expectMethod(req, "SETUP")
 
 		if cfg.UDP {
-			th, terr := rtsp.ParseTransport(req.Header.Get("Transport"))
-			if terr == nil && th.HasClientPort {
-				if cfg.RejectUDP {
-					if err := sc.Respond(req, rtsp.StatusUnsupportedTransport, "Unsupported Transport", nil, nil); err != nil {
-						return nil, err
-					}
-					// The client falls back to this same track's
-					// TCP-interleaved SETUP on this connection; read it and
-					// fall through to the interleaved branch below.
-					req, err = sc.ReadRequest()
-					if err != nil {
-						return nil, err
-					}
-					sc.expectMethod(req, "SETUP")
-				} else {
-					track, uerr := sc.acceptUDPSetup(cfg, i, req, th)
-					if uerr != nil {
-						return nil, uerr
-					}
-					sc.udpTracks = append(sc.udpTracks, track)
-					pairs = append(pairs, ChannelPair{})
-					continue
-				}
+			next, handled, uerr := sc.handshakeSetupUDP(cfg, i, req)
+			if uerr != nil {
+				return nil, uerr
 			}
+			if handled {
+				pairs = append(pairs, ChannelPair{})
+				continue
+			}
+			req = next
 		}
 
 		rtpCh := cfg.InterleavedBase + 2*i

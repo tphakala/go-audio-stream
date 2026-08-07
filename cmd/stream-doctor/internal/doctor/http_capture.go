@@ -138,7 +138,10 @@ func (p *httpProber) Close() error {
 // the RTSP path; only the connection-loss and orderly-end sentinels differ.
 func classifyHTTPEndReason(ctx context.Context, err error, truncated bool, frameCount int) EndReason {
 	switch {
-	case ctx.Err() != nil:
+	// Only a genuine cancellation (Ctrl-C) is EndCancelled. A parent-context
+	// deadline is the caller's own time budget elapsing, not a cancel, so it
+	// falls through to the completed/truncated handling below.
+	case errors.Is(ctx.Err(), context.Canceled):
 		return EndCancelled
 	case errors.Is(err, context.DeadlineExceeded) && !truncated:
 		return EndCompleted
