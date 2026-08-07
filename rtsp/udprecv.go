@@ -1,12 +1,10 @@
 package rtsp
 
 import (
-	"errors"
 	"fmt"
 	"net"
 	"time"
 
-	audiostream "github.com/tphakala/go-audio-stream"
 	"github.com/tphakala/go-audio-stream/rtsp/rtp"
 )
 
@@ -277,24 +275,14 @@ func (c *Client) armMediaReadDeadline(conn *net.UDPConn, watch bool, anchorUnixN
 	return true
 }
 
-// classifyMediaReadErr funnels the terminal cause of an RTP-socket read error,
-// mirroring classifyReadErr but funneling directly since the receive goroutine
-// has no framing loop to return through. When shutdown is already in progress
-// the recorded cause wins and this is a no-op. Otherwise a watchdog timeout
-// while playing is audiostream.ErrReadTimeout, and any other error is
-// ErrConnectionClosed wrapping the cause.
+// classifyMediaReadErr funnels the terminal cause of an RTP-socket read error
+// directly through initiateShutdown, since the receive goroutine has no
+// framing loop to return through: classifyReadErr does the classification
+// (the recorded cause when shutdown is already in progress, ErrReadTimeout on
+// a watchdog timeout while playing, or ErrConnectionClosed otherwise), and
+// initiateShutdown is a guaranteed no-op when shutdown has already begun.
 func (c *Client) classifyMediaReadErr(err error) {
-	select {
-	case <-c.closing:
-		return // shutdown already funneled; the recorded termErr is the cause.
-	default:
-	}
-	var nerr net.Error
-	if c.playing.Load() && errors.As(err, &nerr) && nerr.Timeout() {
-		c.initiateShutdown(audiostream.ErrReadTimeout)
-		return
-	}
-	c.initiateShutdown(fmt.Errorf("%w: %w", ErrConnectionClosed, err))
+	c.initiateShutdown(c.classifyReadErr(err))
 }
 
 // recoverReceiver turns a panic in a UDP receive goroutine into a fatal

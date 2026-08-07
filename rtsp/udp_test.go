@@ -226,17 +226,16 @@ func TestUDPInitiateShutdownArmsMediaSocketReadDeadlines(t *testing.T) {
 	started := make(chan struct{})
 	readErr := make(chan error, 1)
 	go func() {
-		close(started)
 		buf := make([]byte, maxDatagramSize)
+		close(started)
 		_, _, rerr := m.rtpConn.ReadFromUDP(buf)
 		readErr <- rerr
 	}()
 	<-started
-	// Give the goroutine a moment to actually reach the blocking read before
-	// the deadline is armed, so the assertion exercises the interrupt rather
-	// than a read that had not started yet.
-	time.Sleep(20 * time.Millisecond)
-
+	// SetReadDeadline applies to both a currently-blocked read and a future
+	// one, so there is no timing window to synchronize against here: whether
+	// initiateShutdown races ahead of ReadFromUDP or lands after it, the armed
+	// deadline still fires.
 	c.initiateShutdown(errors.New("test shutdown"))
 
 	select {
@@ -269,8 +268,8 @@ func TestUDPPublishUDPTrackRegistersMediaAndPinsTransport(t *testing.T) {
 	if !c.udpPinned.Load() {
 		t.Error("udpPinned = false, want true")
 	}
-	if c.transport != PreferUDP {
-		t.Errorf("transport = %v, want PreferUDP", c.transport)
+	if c.sessionTransport != transportPinUDP {
+		t.Errorf("sessionTransport = %q, want %q", c.sessionTransport, transportPinUDP)
 	}
 	if c.channels.Load() != nil {
 		t.Error("publishUDPTrack must not install an interleaved channel table")

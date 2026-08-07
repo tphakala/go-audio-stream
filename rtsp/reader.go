@@ -649,21 +649,11 @@ func (c *Client) teardownAndJoin() {
 	c.wg.Wait()
 }
 
-// closeMediaSockets closes every UDP socket pair Setup opened. It takes
-// mediaMu alone (never nested inside mu or deadlineMu) only long enough to
-// snapshot the map into a local slice, then releases it before calling
-// Close: Close tears down two UDP sockets through the runtime poller, and
-// mediaMu must stay a pure map-access leaf, never held across a socket call.
-// In TCP mode media is empty, so this is a no-op.
+// closeMediaSockets closes every UDP socket pair Setup opened, via
+// snapshotMedia so mediaMu stays a pure map-access leaf, never held across a
+// socket call. In TCP mode media is empty, so this is a no-op.
 func (c *Client) closeMediaSockets() {
-	c.mediaMu.Lock()
-	sockets := make([]*mediaSockets, 0, len(c.media))
-	for _, m := range c.media {
-		sockets = append(sockets, m)
-	}
-	c.mediaMu.Unlock()
-
-	for _, m := range sockets {
+	for _, m := range c.snapshotMedia() {
 		_ = m.Close()
 	}
 }

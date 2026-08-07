@@ -3,6 +3,7 @@ package testserver
 import (
 	"fmt"
 	"net"
+	"slices"
 	"sync"
 	"time"
 
@@ -157,9 +158,9 @@ func (t *UDPTrack) WaitClientRTCP(timeout time.Duration) ([]byte, bool) {
 // UDPTracks returns the per-track UDP endpoints negotiated by Handshake, in
 // SETUP order, for a UDP HandshakeConfig. Empty for an interleaved
 // handshake, and for any track whose UDP SETUP was rejected (cfg.RejectUDP)
-// and fell back to interleaved.
+// and fell back to interleaved. Freshly allocated; never the internal slice.
 func (sc *ServerConn) UDPTracks() []UDPTrack {
-	return sc.udpTracks
+	return slices.Clone(sc.udpTracks)
 }
 
 // acceptUDPSetup binds a server UDP socket pair for track i, starting at

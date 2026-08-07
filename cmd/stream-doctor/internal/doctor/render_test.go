@@ -58,6 +58,11 @@ func TestDecodable(t *testing.T) {
 	}
 }
 
+// udpTransportValue is the library's documented SessionInfo.Transport value
+// for a UDP-pinned session, shared by the fixtures below (goconst wants a
+// literal repeated this often pulled into a constant).
+const udpTransportValue = "UDP"
+
 // TestTransportStr covers the walkthrough setup-line detail: a TCP session
 // renders the interleaved channel pair (unchanged from before UDP), a UDP
 // session renders its negotiated port pairs, and a UDP session missing an
@@ -69,7 +74,7 @@ func TestTransportStr(t *testing.T) {
 		Channels:  []rtsp.ChannelPair{{TrackID: 0, RTP: 0, RTCP: 1}},
 	}
 	udp := &rtsp.SessionInfo{
-		Transport: sessionTransportUDP,
+		Transport: udpTransportValue,
 		UDPEndpoints: []rtsp.UDPEndpoint{
 			{TrackID: 0, ClientRTPPort: 40000, ClientRTCPPort: 40001, ServerRTPPort: 6970, ServerRTCPPort: 6971},
 		},
@@ -95,7 +100,7 @@ func TestReportTransport(t *testing.T) {
 		Channels:  []rtsp.ChannelPair{{TrackID: 0, RTP: 0, RTCP: 1}},
 	}
 	udp := &rtsp.SessionInfo{
-		Transport: sessionTransportUDP,
+		Transport: udpTransportValue,
 		UDPEndpoints: []rtsp.UDPEndpoint{
 			{TrackID: 0, ClientRTPPort: 40000, ClientRTCPPort: 40001, ServerRTPPort: 6970, ServerRTCPPort: 6971},
 		},

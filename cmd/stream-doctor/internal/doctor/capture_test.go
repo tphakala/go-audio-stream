@@ -67,6 +67,62 @@ func TestTransportPreference(t *testing.T) {
 	}
 }
 
+// TestRTSPProberDialConfig covers dialConfig's mapping from Options to
+// rtsp.Config, across every accepted -transport flag value: every field
+// passes through unchanged except Transport, which maps through
+// transportPreference, and UserAgent and OnFrame, which dialConfig sets
+// itself.
+func TestRTSPProberDialConfig(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		flag string
+		want rtsp.TransportPreference
+	}{
+		{"", rtsp.PreferTCP},
+		{transportTCP, rtsp.PreferTCP},
+		{transportUDP, rtsp.PreferUDP},
+		{transportUDPThenTCP, rtsp.PreferUDPThenTCP},
+	} {
+		p := newRTSPProber(Options{
+			Transport:   tc.flag,
+			URL:         "rtsp://camera.example/stream",
+			Username:    "user",
+			Password:    "pass",
+			Timeout:     7 * time.Second,
+			ReadIdle:    3 * time.Second,
+			InsecureTLS: true,
+		})
+		cfg := p.dialConfig()
+		if cfg.Transport != tc.want {
+			t.Errorf("flag %q: Transport = %v, want %v", tc.flag, cfg.Transport, tc.want)
+		}
+		if cfg.URL != p.opts.URL {
+			t.Errorf("flag %q: URL = %q, want %q", tc.flag, cfg.URL, p.opts.URL)
+		}
+		if cfg.Username != p.opts.Username {
+			t.Errorf("flag %q: Username = %q, want %q", tc.flag, cfg.Username, p.opts.Username)
+		}
+		if cfg.Password != p.opts.Password {
+			t.Errorf("flag %q: Password = %q, want %q", tc.flag, cfg.Password, p.opts.Password)
+		}
+		if cfg.Timeout != p.opts.Timeout {
+			t.Errorf("flag %q: Timeout = %v, want %v", tc.flag, cfg.Timeout, p.opts.Timeout)
+		}
+		if cfg.ReadIdle != p.opts.ReadIdle {
+			t.Errorf("flag %q: ReadIdle = %v, want %v", tc.flag, cfg.ReadIdle, p.opts.ReadIdle)
+		}
+		if cfg.InsecureTLS != p.opts.InsecureTLS {
+			t.Errorf("flag %q: InsecureTLS = %v, want %v", tc.flag, cfg.InsecureTLS, p.opts.InsecureTLS)
+		}
+		if want := "stream-doctor/" + Version; cfg.UserAgent != want {
+			t.Errorf("flag %q: UserAgent = %q, want %q", tc.flag, cfg.UserAgent, want)
+		}
+		if cfg.OnFrame == nil {
+			t.Errorf("flag %q: OnFrame = nil, want the prober's sink", tc.flag)
+		}
+	}
+}
+
 // TestRTSPProberOnFrameCopies drives the production adapter's OnFrame sink
 // directly (white-box: it needs the unexported rtspProber internals) and
 // asserts the stored frame is an owned copy, unaffected by a subsequent
@@ -197,6 +253,43 @@ func TestClassifyEndReason(t *testing.T) {
 			}
 			if got := classifyEndReason(ctx, tt.err, tt.truncated, tt.frameCount); got != tt.want {
 				t.Errorf("classifyEndReason() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestClassifyEndReasonParentContext pins the distinction the EndCancelled doc
+// promises across both the RTSP and HTTP classifiers: a Ctrl-C style cancel is
+// EndCancelled, but a parent-context deadline (the caller's own time budget, not
+// a cancel) is not, so it renders as a completed capture, or a truncated one if
+// the frame cap cut it short first.
+func TestClassifyEndReasonParentContext(t *testing.T) {
+	t.Parallel()
+	expiredDeadline := func(t *testing.T) context.Context {
+		t.Helper()
+		ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Hour))
+		t.Cleanup(cancel)
+		return ctx
+	}
+	for _, c := range []struct {
+		name     string
+		classify func(context.Context, error, bool, int) EndReason
+	}{
+		{"rtsp", classifyEndReason},
+		{"http", classifyHTTPEndReason},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			cancelled, cancel := context.WithCancel(context.Background())
+			cancel()
+			if got := c.classify(cancelled, context.Canceled, false, 10); got != EndCancelled {
+				t.Errorf("parent cancel = %v, want EndCancelled", got)
+			}
+			if got := c.classify(expiredDeadline(t), context.DeadlineExceeded, false, 10); got != EndCompleted {
+				t.Errorf("parent deadline, not truncated = %v, want EndCompleted", got)
+			}
+			if got := c.classify(expiredDeadline(t), context.DeadlineExceeded, true, 10); got != EndTruncated {
+				t.Errorf("parent deadline, truncated = %v, want EndTruncated", got)
 			}
 		})
 	}

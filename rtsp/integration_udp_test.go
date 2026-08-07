@@ -103,6 +103,7 @@ func wantTrack1(t *testing.T, tracksCh <-chan []testserver.UDPTrack) testserver.
 // RTP datagrams injected in order arrives as decoded access units in order,
 // with increasing PTS and no reported loss.
 func TestIntegrationUDPHappyPathAAC(t *testing.T) {
+	t.Parallel()
 	const n = 5
 	ssrc := uint32(0x11220001)
 	datagrams := make([][]byte, n)
@@ -115,7 +116,7 @@ func TestIntegrationUDPHappyPathAAC(t *testing.T) {
 		rtsp.PreferUDP)
 	defer closeAndWait(t, c)
 
-	if got := c.SessionInfo().Transport; got != "UDP" {
+	if got := c.SessionInfo().Transport; got != wantTransportUDP {
 		t.Fatalf("SessionInfo().Transport = %q, want UDP", got)
 	}
 	ends := c.SessionInfo().UDPEndpoints
@@ -158,6 +159,7 @@ func TestIntegrationUDPHappyPathAAC(t *testing.T) {
 // a UDP session reports duplicates the same way the TCP-interleaved path does,
 // instead of always reading ~0.
 func TestIntegrationUDPDuplicates(t *testing.T) {
+	t.Parallel()
 	ssrc := uint32(0x11220004)
 	base := uint16(4000)
 	// Wire order: in-order 0 and 1, a duplicate of 1, then 2, then a too-late
@@ -214,6 +216,7 @@ func TestIntegrationUDPDuplicates(t *testing.T) {
 // content each access unit was built with, and nothing is counted as
 // malformed or lost.
 func TestIntegrationUDPReordering(t *testing.T) {
+	t.Parallel()
 	const n = 6
 	ssrc := uint32(0x11220002)
 	datagrams := make([][]byte, n)
@@ -264,6 +267,7 @@ const lossTrailingPackets = rtp.MaxReorderWindow
 // held-back tail, asserting the first frame released after the gap reports
 // SeqGap == 1 and every later one reports no further gap.
 func TestIntegrationUDPLoss(t *testing.T) {
+	t.Parallel()
 	ssrc := uint32(0x11220003)
 	total := 1 + lossTrailingPackets
 	// i = 0 is sent, i = 1 is the deliberately omitted packet, i = 2..total
@@ -320,6 +324,7 @@ func TestIntegrationUDPLoss(t *testing.T) {
 // synchronously inside Setup (well before Play), so this also proves the
 // hole-punch/keepalive RR path end to end.
 func TestIntegrationUDPRTCPReceiverReportEmitted(t *testing.T) {
+	t.Parallel()
 	c, _, tracksCh := playAndInjectUDP(t,
 		&testserver.HandshakeConfig{SDP: aacSDP, UDP: true, ServerRTPBase: nextUDPServerBase()},
 		rtsp.PreferUDP)
@@ -347,6 +352,7 @@ func TestIntegrationUDPRTCPReceiverReportEmitted(t *testing.T) {
 // interleaved transport, and interleaved frames flow exactly as in the phase
 // 1 path. No UDPTrack is ever negotiated.
 func TestIntegrationUDPFallbackToTCP(t *testing.T) {
+	t.Parallel()
 	au := []byte{0x01, 0x02, 0x03, 0x04}
 	frames := make(chan audiostream.Frame, 8)
 	udpTracksCh := make(chan int, 1)
@@ -509,7 +515,7 @@ func TestIntegrationUDPControlWatchdogSurvivesIdleControl(t *testing.T) {
 		t.Fatalf("Dial: %v", err)
 	}
 	describeSetupPlay(t, c, nil)
-	if got := c.SessionInfo().Transport; got != "UDP" {
+	if got := c.SessionInfo().Transport; got != wantTransportUDP {
 		t.Fatalf("SessionInfo().Transport = %q, want UDP", got)
 	}
 	track := wantTrack1(t, tracksOut)

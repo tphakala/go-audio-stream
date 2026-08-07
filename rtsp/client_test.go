@@ -26,6 +26,28 @@ const testTimeout = 2 * time.Second
 // runner does not turn a slow teardown into a failure.
 const leakSettleTimeout = 5 * time.Second
 
+// TestSessionInfoIsUDP checks the exported IsUDP predicate directly: it is true
+// only for a UDP-pinned session and false for the TCP and not-yet-set-up cases.
+// The rtsp module's own suite otherwise reaches IsUDP only through stream-doctor
+// (a separate module), so an inverted comparison or a changed pin value would go
+// uncaught here without this direct case.
+func TestSessionInfoIsUDP(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name      string
+		transport string
+		want      bool
+	}{
+		{"udp", wantTransportUDP, true},
+		{"tcp", "TCP", false},
+		{"unset", "", false},
+	} {
+		if got := (rtsp.SessionInfo{Transport: tc.transport}).IsUDP(); got != tc.want {
+			t.Errorf("SessionInfo{Transport:%q}.IsUDP() = %v, want %v", tc.transport, got, tc.want)
+		}
+	}
+}
+
 // serveOptionsThenIdle answers the Dial OPTIONS probe 200 with a Public
 // header, then blocks reading until the client disconnects, so the handler
 // goroutine exits cleanly when the client closes.

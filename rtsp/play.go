@@ -2,7 +2,6 @@ package rtsp
 
 import (
 	"context"
-	"maps"
 	"strconv"
 	"strings"
 	"time"
@@ -103,9 +102,7 @@ func (c *Client) Play(ctx context.Context) error {
 // launches, so a receiver whose first read fails and funnels through
 // initiateShutdown (which also takes mediaMu) cannot deadlock against it.
 func (c *Client) startUDPReceivers(tracks []*track) {
-	c.mediaMu.Lock()
-	media := maps.Clone(c.media)
-	c.mediaMu.Unlock()
+	media := c.snapshotMedia()
 
 	// Seed each track's media-liveness clock before its receivers start. The
 	// RTP-socket watchdog anchors its deadline to tr.lastFrameUnixNano, so a
