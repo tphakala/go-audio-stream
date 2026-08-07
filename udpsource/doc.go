@@ -47,7 +47,8 @@
 //
 // Errors are matched with errors.Is against the package sentinels
 // (ErrInvalidConfig, ErrUnsupportedCodec, ErrBind, ErrConnectionClosed) and the
-// root package's audiostream.ErrClosed and audiostream.ErrReadTimeout. UDP is
+// root package's audiostream.ErrClosed and audiostream.ErrReadTimeout; Wait also
+// returns the caller's ctx.Err() when its context cancels first. UDP is
 // connectionless, so there is no orderly end-of-stream: a healthy source runs
 // until Close or the watchdog.
 package udpsource

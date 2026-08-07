@@ -95,7 +95,8 @@ var _ audiostream.Source = (*Client)(nil)
 
 // Open binds the UDP socket and returns an already-receiving source. ctx bounds
 // only the bind; it does not end the stream once Open returns (use Close for
-// that). On failure it returns ErrInvalidConfig, ErrUnsupportedCodec, or ErrBind.
+// that). On failure it returns the caller's ctx.Err() (ctx cancelled during the
+// bind), ErrInvalidConfig, ErrUnsupportedCodec, or ErrBind.
 //
 //nolint:gocritic // Config is the documented public constructor signature, so passing it by value is intentional, matching the rtsp and httpsource clients.
 func Open(ctx context.Context, cfg Config) (*Client, error) {
@@ -460,9 +461,11 @@ func (c *Client) termError() error {
 
 // Wait blocks until the stream ends and returns the terminal cause:
 // audiostream.ErrClosed after Close, ctx.Err() if ctx cancels first,
-// audiostream.ErrReadTimeout on watchdog expiry, or ErrConnectionClosed on a
-// socket failure. The first cause wins. After Wait returns, OnFrame will not be
-// called again. Do not call Wait from inside OnFrame; it deadlocks.
+// audiostream.ErrReadTimeout on watchdog expiry, ErrConnectionClosed on a socket
+// failure, or the wrapped cause of a recovered OnFrame panic. Per the Source
+// contract this set is not closed; the first cause wins. After Wait returns,
+// OnFrame will not be called again. Do not call Wait from inside OnFrame; it
+// deadlocks.
 func (c *Client) Wait(ctx context.Context) error {
 	select {
 	case <-c.done:

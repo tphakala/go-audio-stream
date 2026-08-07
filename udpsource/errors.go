@@ -3,9 +3,9 @@ package udpsource
 import "errors"
 
 // Package-typed causes, matched with errors.Is. UDP is connectionless, so there
-// is no orderly end-of-stream: a source ends only via Close (audiostream.ErrClosed),
-// the read-idle watchdog (audiostream.ErrReadTimeout), or a socket failure
-// (ErrConnectionClosed).
+// is no orderly end-of-stream: a source ends via Close (audiostream.ErrClosed),
+// the read-idle watchdog (audiostream.ErrReadTimeout), a Wait-context
+// cancellation (ctx.Err()), or a socket failure (ErrConnectionClosed).
 var (
 	// ErrInvalidConfig reports a Config that cannot bind or interpret datagrams:
 	// an empty or unparseable ListenAddr, an unparseable SourceIP, a ModeRTP
