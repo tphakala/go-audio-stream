@@ -144,6 +144,7 @@ func serveDigest(cfg *digestConfig) (*digestState, http.HandlerFunc) {
 			p["realm"] == cfg.realm &&
 			nonceIssued &&
 			strings.EqualFold(p["algorithm"], cfg.algorithm) &&
+			strings.EqualFold(p["qop"], cfg.qop) &&
 			p["uri"] == r.URL.RequestURI() &&
 			digestResponseValid(authz, r.Method, cfg.realm, cfg.algorithm, cfg.user, cfg.pass) {
 			st.mu.Lock()
@@ -451,4 +452,39 @@ func TestPlaintextBasicWarns(t *testing.T) {
 			t.Fatalf("unexpected plaintext warning over TLS: %q", sb.String())
 		}
 	})
+}
+
+// A server that answers every authorized attempt with stale=true must still
+// terminate: the client takes its single permitted stale retry and then
+// surfaces the 401 as a *StatusError rather than looping forever. The attempt
+// count pins the bound at exactly two authorized requests.
+func TestDigestAlwaysStaleTerminates(t *testing.T) {
+	st := &digestState{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.Header.Get("Authorization"), "Digest ") {
+			st.mu.Lock()
+			st.attempts++
+			st.mu.Unlock()
+			w.Header().Add("WWW-Authenticate", digestChallenge(testRealmCam, "n-stale", testAlgMD5, testQOPAuth, true))
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		w.Header().Add("WWW-Authenticate", digestChallenge(testRealmCam, "n-init", testAlgMD5, testQOPAuth, false))
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	defer srv.Close()
+
+	_, err := Open(context.Background(), Config{URL: srv.URL, Username: testUser, Password: testPass})
+	if !errors.Is(err, ErrBadStatus) {
+		t.Fatalf("Open = %v, want ErrBadStatus", err)
+	}
+	var se *StatusError
+	if !errors.As(err, &se) || se.Code != http.StatusUnauthorized {
+		t.Fatalf("StatusError = %+v, want Code 401", se)
+	}
+	// One attempt under the initial nonce, one under the single permitted stale
+	// retry, then it gives up: the retry is bounded, not a loop.
+	if got := st.attemptCount(); got != 2 {
+		t.Fatalf("authorized attempts = %d, want 2", got)
+	}
 }

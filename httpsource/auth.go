@@ -82,7 +82,7 @@ func (c *Client) digestRetry(ctx context.Context, do doFunc, prev *http.Response
 	defer func() { _ = prev.Body.Close() }()
 	cnonce, err := httpauth.NewCNonce()
 	if err != nil {
-		return nil, fmt.Errorf("%w: %w", ErrConnectionClosed, err)
+		return nil, fmt.Errorf("%w: preparing the authenticated request: %w", ErrConnectionClosed, err)
 	}
 	req, err := newRequest(ctx, cfg, tgt)
 	if err != nil {
@@ -97,7 +97,7 @@ func (c *Client) digestRetry(ctx context.Context, do doFunc, prev *http.Response
 	if err != nil {
 		// Unreachable: SelectChallenge only returns answerable challenges. If
 		// that invariant ever broke, fail the open rather than loop.
-		return nil, fmt.Errorf("%w: %w", ErrConnectionClosed, err)
+		return nil, fmt.Errorf("%w: preparing the authenticated request: %w", ErrConnectionClosed, err)
 	}
 	req.Header.Set("Authorization", value)
 	return do(req)
