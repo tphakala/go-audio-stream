@@ -19,6 +19,13 @@ func TestPayloadKindFor(t *testing.T) {
 		{"l16", audiostream.CodecL16{ClockRate: 44100, Channels: 2}, audiostream.KindPCMS16LE},
 		{"codec-unknown is opaque", audiostream.CodecUnknown{RTPMap: "X/8000"}, audiostream.KindOpaque},
 		{"nil codec defaults to unknown", nil, audiostream.KindUnknown},
+		{"pointer aac classifies like value", &audiostream.CodecAAC{}, audiostream.KindCompressed},
+		{"pointer opus classifies like value", &audiostream.CodecOpus{}, audiostream.KindCompressed},
+		{"pointer g711 classifies like value", &audiostream.CodecG711{Law: audiostream.MuLaw}, audiostream.KindPCMS16LE},
+		{"pointer l16 classifies like value", &audiostream.CodecL16{ClockRate: 44100, Channels: 2}, audiostream.KindPCMS16LE},
+		{"pointer codec-unknown is opaque", &audiostream.CodecUnknown{RTPMap: "X/8000"}, audiostream.KindOpaque},
+		{"typed-nil aac pointer is unknown", (*audiostream.CodecAAC)(nil), audiostream.KindUnknown},
+		{"typed-nil l16 pointer is unknown", (*audiostream.CodecL16)(nil), audiostream.KindUnknown},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

@@ -88,15 +88,39 @@ func (k PayloadKind) String() string {
 // must not decode an unknown kind. CodecUnknown is distinct: the library does
 // recognize the track but not its codec and delivers the raw RTP payload, so it
 // maps to KindOpaque.
+//
+// The library always uses codecs by value, but a pointer to a codec variant
+// also satisfies Codec (the variants have value-receiver isCodec methods), so a
+// caller could pass one. A non-nil pointer classifies like its value; a
+// typed-nil pointer carries no codec and returns KindUnknown.
 func PayloadKindFor(c Codec) PayloadKind {
-	switch c.(type) {
+	switch v := c.(type) {
 	case CodecG711, CodecL16:
 		return KindPCMS16LE
 	case CodecAAC, CodecOpus:
 		return KindCompressed
 	case CodecUnknown:
 		return KindOpaque
+	case *CodecG711:
+		return ptrKind(v, KindPCMS16LE)
+	case *CodecL16:
+		return ptrKind(v, KindPCMS16LE)
+	case *CodecAAC:
+		return ptrKind(v, KindCompressed)
+	case *CodecOpus:
+		return ptrKind(v, KindCompressed)
+	case *CodecUnknown:
+		return ptrKind(v, KindOpaque)
 	default: // nil, and any codec not yet classified.
 		return KindUnknown
 	}
+}
+
+// ptrKind reports k for a non-nil pointer codec and KindUnknown for a typed-nil
+// one, which carries no codec to classify.
+func ptrKind[T any](p *T, k PayloadKind) PayloadKind {
+	if p == nil {
+		return KindUnknown
+	}
+	return k
 }
