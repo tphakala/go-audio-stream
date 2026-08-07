@@ -51,8 +51,9 @@ long-running soak testing, not core functionality.
   (`audio/L16`, or an unlabeled `application/octet-stream` or `audio/pcm`) is
   resolved to a rate and channel count and delivered as little-endian s16le, the
   same frame shape the RTSP client delivers; big-endian `audio/L16` is
-  byte-swapped on the way out. A compressed MP3 response (`audio/mpeg`, as
-  Icecast and SHOUTcast serve it) is framed on MPEG frame boundaries and
+  byte-swapped on the way out. A compressed MP3 response (`audio/mpeg` or
+  `audio/mp3`, as Icecast and SHOUTcast serve it) is framed on MPEG frame
+  boundaries and
   delivered as `KindCompressed` coded frames for the consumer to decode, never
   decoded here. Other compressed and container formats (AAC, Ogg, RF64/BW64) are
   rejected at `Open` rather than mis-decoded, and Basic credentials over
