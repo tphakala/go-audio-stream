@@ -16,8 +16,9 @@ import (
 const maxChannels = 8
 
 // resolveFormat dispatches on the response Content-Type and fills the reader's
-// immutable format fields (rate, channels, frameBytes, swap, and the data
-// budget). It runs during Open, before the reader goroutine spawns, so those
+// immutable format fields: for a PCM source the rate, channels, frameBytes,
+// swap, and data budget; for a compressed source (MP3) the codec and the frame
+// scanner. It runs during Open, before the reader goroutine spawns, so those
 // fields need no synchronization afterward.
 //
 // Precedence for rate and channels is WAV header > Content-Type parameters >
@@ -31,16 +32,24 @@ func (c *Client) resolveFormat(resp *http.Response) error {
 		return c.setupWAV()
 	case "audio/l16":
 		return c.setupL16(params)
+	case "audio/mpeg", "audio/mp3":
+		// A raw MP3 (MPEG-1/2/2.5 Layer I/II/III) byte stream, as Icecast and
+		// SHOUTcast radio endpoints and progressive MP3 responses serve it. The
+		// reader frames it into coded frames; it is delivered compressed, never
+		// decoded.
+		return c.setupMP3()
 	case "application/octet-stream", "audio/pcm", "":
 		// Empty covers both an absent Content-Type and one mime.ParseMediaType
 		// could not parse (it returns "" and an error, ignored here): sniff the
-		// body for a RIFF/WAVE header, else fall back to Config.Format.
+		// body for a RIFF/WAVE header, else fall back to Config.Format. An
+		// unlabeled body is never sniffed as MP3: raw PCM can contain a byte
+		// pair that mimics a frame sync, so MP3 requires an explicit media type.
 		return c.setupSniff()
 	default:
-		// A named type this source does not carry (audio/mpeg, audio/aac,
-		// audio/ogg, ...). Failing fast here is the no-transcode contract: this
-		// source delivers PCM, never a compressed codec's bytes mislabeled as
-		// PCM.
+		// A named type this source does not carry (audio/aac, audio/ogg, ...).
+		// Failing fast here is the no-transcode contract: this source delivers
+		// PCM or a framed compressed bitstream it recognizes, never an
+		// unrecognized codec's bytes mislabeled as something it is not.
 		return fmt.Errorf("%w: %s", ErrUnsupportedFormat, mediaType)
 	}
 }

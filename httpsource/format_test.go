@@ -115,11 +115,15 @@ func TestFormatPrecedence(t *testing.T) {
 		}
 	})
 
-	t.Run("compressed media type fails Open", func(t *testing.T) {
-		srv := httptest.NewServer(serveStatic("audio/mpeg", []byte{0xFF, 0xFB, 0x00}))
-		defer srv.Close()
-		if _, err := Open(context.Background(), Config{URL: srv.URL}); !errors.Is(err, ErrUnsupportedFormat) {
-			t.Fatalf("Open = %v, want ErrUnsupportedFormat", err)
+	t.Run("unsupported compressed media type fails Open", func(t *testing.T) {
+		// audio/mpeg is now framed as MP3; audio/aac and audio/ogg remain out of
+		// scope and must still fail fast rather than deliver bytes as PCM.
+		for _, ct := range []string{"audio/aac", "audio/ogg"} {
+			srv := httptest.NewServer(serveStatic(ct, []byte{0x00, 0x01, 0x02}))
+			if _, err := Open(context.Background(), Config{URL: srv.URL}); !errors.Is(err, ErrUnsupportedFormat) {
+				t.Errorf("Open(%s) = %v, want ErrUnsupportedFormat", ct, err)
+			}
+			srv.Close()
 		}
 	})
 }
