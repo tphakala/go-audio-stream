@@ -238,8 +238,8 @@ func TestOpenWAVHappyPath(t *testing.T) {
 	if got := col.bytes(); !bytes.Equal(got, pcm) {
 		t.Fatalf("delivered %d bytes, want %d identical", len(got), len(pcm))
 	}
-	if codec := c.Codec(); codec.ClockRate != 48000 || codec.Channels != 1 {
-		t.Fatalf("Codec = %+v, want {48000 1}", codec)
+	if f := c.Format(); f.SampleRate != 48000 || f.Channels != 1 || f.Kind != audiostream.KindPCMS16LE {
+		t.Fatalf("Format = %+v, want SampleRate 48000 Channels 1 Kind pcm-s16le", f)
 	}
 
 	frames := col.snapshot()
@@ -286,8 +286,8 @@ func TestOpenRawL16BigEndian(t *testing.T) {
 	if got, want := col.bytes(), swapPairs(be); !bytes.Equal(got, want) {
 		t.Fatalf("delivered bytes are not the byte-swapped image")
 	}
-	if c.Codec().ClockRate != 24000 {
-		t.Fatalf("ClockRate = %d, want 24000", c.Codec().ClockRate)
+	if c.Format().SampleRate != 24000 {
+		t.Fatalf("SampleRate = %d, want 24000", c.Format().SampleRate)
 	}
 }
 

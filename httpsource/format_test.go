@@ -17,8 +17,8 @@ func TestFormatPrecedence(t *testing.T) {
 		var col collector
 		c := openOK(t, srv, Config{OnFrame: col.onFrame, Format: PCMFormat{SampleRate: 22050, Channels: 1}})
 		_ = waitResult(t, c, 5*time.Second)
-		if c.Codec().ClockRate != 22050 || c.Codec().Channels != 1 {
-			t.Fatalf("Codec = %+v, want {22050 1}", c.Codec())
+		if f := c.Format(); f.SampleRate != 22050 || f.Channels != 1 {
+			t.Fatalf("Format = %+v, want SampleRate 22050 Channels 1", c.Format())
 		}
 		if !bytes.Equal(col.bytes(), src) {
 			t.Fatal("L16 default byte order should be little-endian (delivered verbatim)")
@@ -30,8 +30,8 @@ func TestFormatPrecedence(t *testing.T) {
 		defer srv.Close()
 		c := openOK(t, srv, Config{Format: PCMFormat{SampleRate: 48000, Channels: 2}})
 		_ = waitResult(t, c, 5*time.Second)
-		if c.Codec().ClockRate != 8000 || c.Codec().Channels != 1 {
-			t.Fatalf("Codec = %+v, want {8000 1} (params win)", c.Codec())
+		if f := c.Format(); f.SampleRate != 8000 || f.Channels != 1 {
+			t.Fatalf("Format = %+v, want SampleRate 8000 Channels 1 (params win)", c.Format())
 		}
 	})
 
@@ -69,8 +69,8 @@ func TestFormatPrecedence(t *testing.T) {
 		var col collector
 		c := openOK(t, srv, Config{OnFrame: col.onFrame})
 		_ = waitResult(t, c, 5*time.Second)
-		if c.Codec().ClockRate != 48000 || c.Codec().Channels != 1 {
-			t.Fatalf("Codec = %+v, want {48000 1}", c.Codec())
+		if f := c.Format(); f.SampleRate != 48000 || f.Channels != 1 {
+			t.Fatalf("Format = %+v, want SampleRate 48000 Channels 1", c.Format())
 		}
 		if !bytes.Equal(col.bytes(), src) {
 			t.Fatal("esp32-style little-endian L16 should be delivered verbatim as s16le")
@@ -87,8 +87,8 @@ func TestFormatPrecedence(t *testing.T) {
 		if err := waitResult(t, c, 5*time.Second); !errors.Is(err, ErrStreamEnded) {
 			t.Fatalf("Wait = %v, want ErrStreamEnded", err)
 		}
-		if c.Codec().ClockRate != 44100 {
-			t.Fatalf("sniffed WAV ClockRate = %d, want 44100", c.Codec().ClockRate)
+		if c.Format().SampleRate != 44100 {
+			t.Fatalf("sniffed WAV SampleRate = %d, want 44100", c.Format().SampleRate)
 		}
 		if !bytes.Equal(col.bytes(), pcm) {
 			t.Fatal("sniffed WAV delivery diverged from source")

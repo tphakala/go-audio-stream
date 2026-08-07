@@ -376,12 +376,19 @@ func classifyOpenErr(ctx context.Context, err error, timedOut *atomic.Bool) erro
 	return fmt.Errorf("%w: %w", ErrConnectionClosed, err)
 }
 
-// Codec returns the source's codec identity: 16-bit linear PCM at the resolved
-// clock rate and channel count. Frames are always delivered as little-endian
-// s16le regardless of the source byte order. It is immutable after Open and
-// safe from any goroutine, including from inside OnFrame.
-func (c *Client) Codec() audiostream.CodecL16 {
-	return audiostream.CodecL16{ClockRate: c.rate, Channels: c.channels}
+// Format returns the source's audio format descriptor: 16-bit linear PCM
+// (KindPCMS16LE) at the resolved sample rate and channel count. Frames are
+// always delivered as little-endian s16le regardless of the source byte order,
+// so SampleRate and Channels are always populated. It is immutable after Open
+// and safe from any goroutine, including from inside OnFrame.
+func (c *Client) Format() audiostream.AudioFormat {
+	codec := audiostream.CodecL16{ClockRate: c.rate, Channels: c.channels}
+	return audiostream.AudioFormat{
+		Codec:      codec,
+		Kind:       audiostream.PayloadKindFor(codec),
+		SampleRate: c.rate,
+		Channels:   c.channels,
+	}
 }
 
 // Wait blocks until the stream ends and returns the terminal cause: ErrStreamEnded
