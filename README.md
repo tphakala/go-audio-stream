@@ -11,9 +11,10 @@ timestamped frames. Its primary source is an RTSP client for IP cameras and
 restreamers: it runs the DESCRIBE / SETUP / PLAY handshake and pulls RTP over
 interleaved TCP or, opt-in, unicast UDP, depacketizes AAC, Opus, G.711 and L16
 PCM, and delivers codec frames. A
-second source, the `httpsource` package, pulls linear PCM off an HTTP(S)
-progressive endpoint, a WAV response or raw L16/PCM, and delivers it as the same
-s16le frames. Both sources satisfy one `Source` interface, so a consumer can
+second source, the `httpsource` package, pulls audio off an HTTP(S)
+progressive endpoint: a WAV response or raw L16/PCM delivered as the same s16le
+frames, or a compressed MP3 (Icecast/SHOUTcast) stream framed and delivered as
+coded frames. Both sources satisfy one `Source` interface, so a consumer can
 drive either uniformly. No cgo, no runtime dependencies.
 
 Where the rest of the family reads and writes files, this library brings audio
@@ -45,14 +46,17 @@ long-running soak testing, not core functionality.
   discard, Basic and Digest authentication (answered and retried automatically,
   including a stale-nonce rotation), `rtsps` TLS, session keepalive, and RTCP
   Receiver Reports.
-- **HTTP progressive source** (`httpsource`): a single GET against an endpoint
-  that streams linear PCM. A WAV response (its `fmt` chunk authoritative) or a
-  raw response (`audio/L16`, or an unlabeled `application/octet-stream` or
-  `audio/pcm`) is resolved to a rate and channel count and delivered as
-  little-endian s16le, the same frame shape the RTSP client delivers. Big-endian
-  `audio/L16` is byte-swapped on the way out. Compressed and container formats
-  (MP3, AAC, Ogg, RF64/BW64) are rejected at `Open` rather than mis-decoded, and
-  Basic credentials over plaintext http are refused unless explicitly allowed.
+- **HTTP progressive source** (`httpsource`): a single GET against an audio
+  endpoint. A WAV response (its `fmt` chunk authoritative) or a raw response
+  (`audio/L16`, or an unlabeled `application/octet-stream` or `audio/pcm`) is
+  resolved to a rate and channel count and delivered as little-endian s16le, the
+  same frame shape the RTSP client delivers; big-endian `audio/L16` is
+  byte-swapped on the way out. A compressed MP3 response (`audio/mpeg`, as
+  Icecast and SHOUTcast serve it) is framed on MPEG frame boundaries and
+  delivered as `KindCompressed` coded frames for the consumer to decode, never
+  decoded here. Other compressed and container formats (AAC, Ogg, RF64/BW64) are
+  rejected at `Open` rather than mis-decoded, and Basic credentials over
+  plaintext http are refused unless explicitly allowed.
 - **Depacketizers**: AAC (RFC 3640 AAC-hbr), Opus (RFC 7587), G.711 mu-law and
   A-law, and L16 linear PCM (RFC 3551, from an `L16` rtpmap or the static
   payload types 10 and 11). G.711 and L16 are delivered as little-endian s16le

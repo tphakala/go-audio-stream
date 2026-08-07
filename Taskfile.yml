@@ -63,6 +63,8 @@ tasks:
       - go test -run '^$' -fuzz '^FuzzParseSession$' -fuzztime=2m ./rtsp
       - go test -run '^$' -fuzz '^FuzzParseRTPInfoEntry$' -fuzztime=2m ./rtsp
       - go test -run '^$' -fuzz '^FuzzParseWAVHeader$' -fuzztime=2m ./httpsource
+      - go test -run '^$' -fuzz '^FuzzMP3Stream$' -fuzztime=2m ./httpsource
+      - go test -run '^$' -fuzz '^FuzzParse$' -fuzztime=2m ./internal/mp3
 
   tidy:
     desc: Tidy and verify go.mod

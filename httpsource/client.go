@@ -34,7 +34,7 @@ const maxPTSSeconds = math.MaxInt64 / int64(time.Second)
 // Config.OnFrame on its reader goroutine until the stream ends, Close is
 // called, or the read-idle watchdog fires.
 //
-// Close, Wait, Stats, Info and Codec are safe from any goroutine; of those, all
+// Close, Wait, Stats, Info and Format are safe from any goroutine; of those, all
 // but Wait may be called from inside OnFrame, because Wait blocks until the
 // reader goroutine has finished and would deadlock it.
 type Client struct {
@@ -55,6 +55,15 @@ type Client struct {
 	channels   int
 	frameBytes int
 	swap       bool
+
+	// Compressed-source state, set by resolveFormat during Open and owned by the
+	// reader afterward. codec is non-nil for a compressed source (MP3), which
+	// makes Format report KindCompressed and the reader frame the body through
+	// framer rather than deliver fixed-width PCM. mediaPTS is the running
+	// presentation time, advanced one frame's duration per delivered frame.
+	codec    audiostream.Codec
+	framer   *mp3Stream
+	mediaPTS time.Duration
 
 	// Data budget, set during Open and owned by the reader afterward. When
 	// bounded, remaining counts down the declared WAV data-chunk bytes and the
@@ -376,12 +385,21 @@ func classifyOpenErr(ctx context.Context, err error, timedOut *atomic.Bool) erro
 	return fmt.Errorf("%w: %w", ErrConnectionClosed, err)
 }
 
-// Format returns the source's audio format descriptor: 16-bit linear PCM
-// (KindPCMS16LE) at the resolved sample rate and channel count. Frames are
-// always delivered as little-endian s16le regardless of the source byte order,
-// so SampleRate and Channels are always populated. It is immutable after Open
-// and safe from any goroutine, including from inside OnFrame.
+// Format returns the source's audio format descriptor. A compressed source
+// (MP3) reports its codec with Kind KindCompressed and, per the AudioFormat
+// contract, SampleRate and Channels 0: the true geometry is the consumer's
+// decoder's to determine (each delivered frame's header also carries it). A PCM
+// source (WAV or raw/L16) reports KindPCMS16LE at the resolved sample rate and
+// channel count; those frames are always little-endian s16le regardless of the
+// source byte order, so SampleRate and Channels are populated. It is immutable
+// after Open and safe from any goroutine, including from inside OnFrame.
 func (c *Client) Format() audiostream.AudioFormat {
+	if c.codec != nil {
+		return audiostream.AudioFormat{
+			Codec: c.codec,
+			Kind:  audiostream.PayloadKindFor(c.codec),
+		}
+	}
 	codec := audiostream.CodecL16{ClockRate: c.rate, Channels: c.channels}
 	return audiostream.AudioFormat{
 		Codec:      codec,
@@ -418,8 +436,11 @@ func (c *Client) Close() error {
 }
 
 // Stats returns a snapshot of the source's receive counters in a freshly
-// allocated map keyed by the single track ID 0. PayloadBytes is the PCM
-// delivered and Malformed the count of dropped partial sample-frames;
+// allocated map keyed by the single track ID 0. PayloadBytes is the delivered
+// payload (PCM bytes for a PCM source, coded-frame bytes for a compressed one)
+// and Malformed counts data that could not be delivered as a whole frame: a
+// dropped partial sample-frame on the PCM path, or a resync discard (leading
+// garbage, a false sync, or a truncated final frame) on the compressed path.
 // LastFrameAt is the last read time and Stats.CapturedAt the snapshot time.
 // WireBytes stays zero, since this source does not meter transport framing
 // apart from the payload, as do the other counters it has no equivalent for.
@@ -497,11 +518,17 @@ func (c *Client) recoverReader() {
 	}
 }
 
-// readLoop accumulates body bytes into rbuf and delivers each whole sample-frame
-// prefix, carrying the sub-frame remainder across reads so a frame split by a
-// read boundary is never delivered half. It runs until a terminal condition,
-// whose shutdown it funnels before returning.
+// readLoop drives delivery for the source's life. A compressed source (MP3) is
+// delegated to readMP3, which frames the body into coded frames. Otherwise it
+// runs the PCM path: accumulate body bytes into rbuf and deliver each whole
+// sample-frame prefix, carrying the sub-frame remainder across reads so a frame
+// split by a read boundary is never delivered half. It runs until a terminal
+// condition, whose shutdown it funnels before returning.
 func (c *Client) readLoop() {
+	if c.framer != nil {
+		c.readMP3()
+		return
+	}
 	fill := 0
 	for {
 		select {

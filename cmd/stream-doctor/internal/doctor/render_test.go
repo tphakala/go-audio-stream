@@ -18,6 +18,7 @@ func TestCodecName(t *testing.T) {
 	}{
 		{"aac", audiostream.CodecAAC{}, "AAC"},
 		{"opus", audiostream.CodecOpus{}, "Opus"},
+		{"mp3", audiostream.CodecMP3{}, "MP3"},
 		{"g711 mu-law", audiostream.CodecG711{Law: audiostream.MuLaw}, "PCMU (G.711 mu-law)"},
 		{"g711 a-law", audiostream.CodecG711{Law: audiostream.ALaw}, "PCMA (G.711 A-law)"},
 		{"l16", audiostream.CodecL16{ClockRate: 8000, Channels: 1}, "L16"},
@@ -31,6 +32,24 @@ func TestCodecName(t *testing.T) {
 				t.Errorf("codecName(%T) = %q, want %q", tc.codec, got, tc.want)
 			}
 		})
+	}
+}
+
+func TestOpenDetail(t *testing.T) {
+	t.Parallel()
+	// A PCM source renders a concrete s16le shape.
+	pcm := openDetail(rtsp.Track{Codec: audiostream.CodecL16{ClockRate: 8000, Channels: 1}, ClockRate: 8000, Channels: 1}, "")
+	if !strings.Contains(pcm, "s16le") || !strings.Contains(pcm, "8000 Hz") {
+		t.Errorf("PCM openDetail = %q, want an s16le 8000 Hz shape", pcm)
+	}
+	// A compressed source names the codec and does not assert a PCM shape (the
+	// synthesized MP3 track has ClockRate 0, which must not surface as "0 Hz").
+	mp3 := openDetail(rtsp.Track{Codec: audiostream.CodecMP3{}, ClockRate: 0, Channels: 0}, "")
+	if strings.Contains(mp3, "s16le") || strings.Contains(mp3, "0 Hz") {
+		t.Errorf("compressed openDetail = %q, must not claim a PCM shape", mp3)
+	}
+	if !strings.Contains(mp3, "MP3") {
+		t.Errorf("compressed openDetail = %q, want the codec name", mp3)
 	}
 }
 

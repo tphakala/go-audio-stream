@@ -20,6 +20,18 @@ type CodecOpus struct{}
 
 func (CodecOpus) isCodec() {}
 
+// CodecMP3 is MPEG-1/2/2.5 Audio Layer III (and the Layer I/II frames that
+// share the same framing). httpsource frames a raw MP3 byte stream (an Icecast
+// or SHOUTcast radio endpoint, or a progressive MP3 response) into individual
+// coded frames; the library never decodes them, so a CodecMP3 track is
+// delivered as KindCompressed for the consumer to decode. It carries no
+// parameters: an MP3 frame is self-describing (its 4-byte header names the
+// sample rate, channel mode, and bitrate), unlike AAC, whose decoder needs the
+// out-of-band AudioSpecificConfig.
+type CodecMP3 struct{}
+
+func (CodecMP3) isCodec() {}
+
 // CodecG711 is G.711 audio; Law distinguishes PCMU from PCMA.
 type CodecG711 struct {
 	Law Law

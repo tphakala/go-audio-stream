@@ -129,7 +129,7 @@ type Config struct {
 	// channels parameters, or an unlabeled raw stream. See PCMFormat.
 	Format PCMFormat
 	// OnFrame receives every delivered frame on the reader goroutine. It must
-	// not block and must not call Wait (Close, Stats, Info and Codec are the
+	// not block and must not call Wait (Close, Stats, Info and Format are the
 	// callback-safe ones). Frame.Data is valid only for the duration of the
 	// call; consumers that retain audio must copy.
 	//

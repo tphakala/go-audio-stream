@@ -70,6 +70,8 @@ func codecName(c audiostream.Codec) string {
 		return "AAC"
 	case audiostream.CodecOpus:
 		return "Opus"
+	case audiostream.CodecMP3:
+		return "MP3"
 	case audiostream.CodecG711:
 		if v.Law == audiostream.ALaw {
 			return "PCMA (G.711 A-law)"
@@ -338,11 +340,19 @@ func dialDetail(si *rtsp.SessionInfo) string {
 	return d
 }
 
-// openDetail summarizes the HTTP OPEN step: the resolved PCM shape and, when
-// the server sent one, the (already scrubbed) Server header. httpsource always
-// delivers little-endian s16le, so the shape reads "s16le <rate> Hz <layout>".
+// openDetail summarizes the HTTP OPEN step and, when the server sent one, the
+// (already scrubbed) Server header. A PCM source (WAV or raw/L16) resolves to a
+// concrete s16le shape, so the detail reads "s16le <rate> Hz <layout>". A
+// compressed source (MP3) is framed but not decoded, so its true rate and
+// channel count come from the consumer's decoder, not the transport: the detail
+// names the codec instead of asserting a PCM shape it does not have.
 func openDetail(track rtsp.Track, server string) string {
-	d := fmt.Sprintf("s16le %d Hz %s", track.ClockRate, channelsLabel(track.Channels))
+	var d string
+	if audiostream.PayloadKindFor(track.Codec) == audiostream.KindPCMS16LE {
+		d = fmt.Sprintf("s16le %d Hz %s", track.ClockRate, channelsLabel(track.Channels))
+	} else {
+		d = codecName(track.Codec) + " (compressed, geometry from decoder)"
+	}
 	if server != "" {
 		d += ", server " + server
 	}
