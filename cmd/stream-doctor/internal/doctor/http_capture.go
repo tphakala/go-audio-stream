@@ -67,13 +67,13 @@ func (p *httpProber) Open(ctx context.Context) error {
 	}
 	p.client = client
 
-	codec := client.Codec()
+	f := client.Format()
 	p.track = rtsp.Track{
 		ID:          0,
 		Media:       audiostream.MediaAudio,
-		Codec:       codec,
-		ClockRate:   codec.ClockRate,
-		Channels:    codec.Channels,
+		Codec:       f.Codec,
+		ClockRate:   f.SampleRate,
+		Channels:    f.Channels,
 		PayloadType: -1,
 	}
 	return nil
