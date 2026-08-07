@@ -160,23 +160,35 @@ func TestHTTP401IsAuth(t *testing.T) {
 	}
 }
 
-// TestHTTPPlaintextCredentialsRefused asserts that credentials on a plaintext
-// http URL without -insecure-auth are refused before connecting: ExitUsage with
-// the flag hint. With -insecure-auth the same credentials are allowed through.
+// TestHTTPPlaintextCredentialsRefused asserts that a Basic challenge over a
+// plaintext http URL is declined without -insecure-auth: the source sends the
+// first request bare, and rather than answer Basic in the clear it refuses with
+// ExitUsage and the flag hint, transmitting no credentials. With -insecure-auth
+// the same credentials are sent preemptively and allowed through.
 func TestHTTPPlaintextCredentialsRefused(t *testing.T) {
 	t.Parallel()
 	var gotAuth atomic.Bool
 	body := wavTestBody(t, 16000, 1, rampSamples(1000))
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if _, _, ok := r.BasicAuth(); ok {
+		// A Basic-auth server: challenge an unauthenticated request and serve
+		// the stream once valid credentials arrive. The bare first request the
+		// source sends over plaintext draws the 401, which the source declines
+		// without -insecure-auth instead of answering Basic in the clear.
+		u, p, ok := r.BasicAuth()
+		if ok {
 			gotAuth.Store(true)
+		}
+		if !ok || u != "u" || p != "p" {
+			w.Header().Set("WWW-Authenticate", `Basic realm="doctor"`)
+			w.WriteHeader(http.StatusUnauthorized)
+			return
 		}
 		w.Header().Set("Content-Type", "audio/wav")
 		_, _ = w.Write(body)
 	}))
 	defer srv.Close()
 
-	// Refused: credentials over plaintext http, no opt-in.
+	// Refused: a Basic challenge over plaintext http, no opt-in.
 	refuseOpts := Options{URL: srv.URL, Username: "u", Password: "p", Duration: 5 * time.Second, Report: true}
 	got, code := runHTTP(t, refuseOpts)
 	if code != ExitUsage {

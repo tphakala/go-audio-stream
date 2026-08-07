@@ -54,9 +54,12 @@ var (
 	// (which wraps io.ErrUnexpectedEOF).
 	ErrMalformedWAV = errors.New("httpsource: malformed WAV stream")
 	// ErrInsecureAuth reports that Open refused to send Basic credentials over a
-	// plaintext http connection. Credentials on a plaintext connection travel in
-	// the clear, so this source refuses by default; set Config.AllowInsecureAuth
-	// to permit it (for a trusted local network), or use https.
+	// plaintext http connection: the server answered the bare request with a
+	// Basic challenge and Config.AllowInsecureAuth was not set. Basic credentials
+	// on a plaintext connection travel in the clear, so this source refuses by
+	// default; set Config.AllowInsecureAuth to permit it (for a trusted local
+	// network), or use https. A Digest challenge is answered without this opt-in,
+	// since Digest never puts the password on the wire.
 	ErrInsecureAuth = errors.New("httpsource: refusing to send credentials over a plaintext http connection; set Config.AllowInsecureAuth to allow")
 )
 
