@@ -392,9 +392,9 @@ func TestConcurrentSendersPreserveNonceOrder(t *testing.T) {
 				Scheme: AuthDigest,
 				Realm:  "test-realm",
 				Params: map[string]string{
-					paramNonce:     "server-nonce",
-					paramQOP:       "auth",
-					paramAlgorithm: algMD5,
+					"nonce":     "server-nonce",
+					"qop":       "auth",
+					"algorithm": "MD5",
 				},
 			},
 			creds:  Credentials{Username: "alice", Password: "s3cr3t"},

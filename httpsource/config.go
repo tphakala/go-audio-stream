@@ -84,9 +84,13 @@ type Config struct {
 	// userinfo. This package never logs it, but Config has no String method, so
 	// printing a Config with %v exposes both the userinfo and Password verbatim.
 	URL string
-	// Username and Password supply HTTP Basic credentials when URL has no
-	// userinfo. Ignored when the URL carries userinfo. Never logged. Digest and
-	// other schemes are out of scope.
+	// Username and Password supply HTTP credentials when the URL carries no
+	// non-empty userinfo; a non-empty URL userinfo overrides them (a wholly
+	// empty userinfo, "http://@host", is treated as absent and does not).
+	// Never logged. They answer either a Basic (RFC 7617) or a Digest (RFC 7616,
+	// with RFC 2069 legacy) challenge: Basic is sent preemptively when the
+	// connection permits it (see AllowInsecureAuth), Digest is computed in
+	// response to the server's WWW-Authenticate challenge.
 	Username string
 	Password string
 	// Timeout bounds the whole open phase: the TCP connect, the TLS handshake
@@ -108,11 +112,15 @@ type Config struct {
 	// (self-signed endpoints). Ignored when TLSConfig is non-nil.
 	InsecureTLS bool
 	// AllowInsecureAuth permits sending Basic credentials over a plaintext http
-	// connection. It is false by default, which is secure: with credentials
-	// present (URL userinfo or Username/Password) on an http URL, Open returns
-	// ErrInsecureAuth rather than transmitting them in the clear. Credentials
-	// over https are always allowed and unaffected by this flag. Set it only for
-	// a trusted network where plaintext is acceptable.
+	// connection. It is false by default, which is secure: over plaintext http
+	// the first request is sent bare, and if the server answers with a Basic
+	// challenge, Open returns ErrInsecureAuth rather than transmitting the
+	// password in the clear. Setting it lets Basic go out (sent preemptively,
+	// with a warning logged). Credentials over https are always allowed and
+	// unaffected by this flag. This gate covers only Basic: a Digest challenge
+	// is always answered, over plaintext included, because Digest never puts the
+	// password on the wire. Set it only for a trusted network where plaintext
+	// Basic is acceptable.
 	AllowInsecureAuth bool
 	// UserAgent is sent on the request. Empty uses DefaultUserAgent.
 	UserAgent string

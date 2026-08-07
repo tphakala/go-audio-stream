@@ -666,9 +666,16 @@ func TestInsecureAuthPolicy(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write(stdWAVHeader(wavFormatPCM, 1, 8000, 16, 0, 0xFFFFFFFF))
 	}
+	// basicChallenge demands Basic auth. Over plaintext without the opt-in the
+	// source sends the first request bare and then refuses to answer this
+	// challenge rather than put the password on the wire in the clear.
+	basicChallenge := func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("WWW-Authenticate", `Basic realm="camera"`)
+		w.WriteHeader(http.StatusUnauthorized)
+	}
 
 	t.Run("http config creds refused by default", func(t *testing.T) {
-		srv := httptest.NewServer(http.HandlerFunc(handler))
+		srv := httptest.NewServer(http.HandlerFunc(basicChallenge))
 		defer srv.Close()
 		_, err := Open(context.Background(), Config{URL: srv.URL, Username: testUser, Password: testPass})
 		if !errors.Is(err, ErrInsecureAuth) {
@@ -677,7 +684,7 @@ func TestInsecureAuthPolicy(t *testing.T) {
 	})
 
 	t.Run("http userinfo creds refused by default", func(t *testing.T) {
-		srv := httptest.NewServer(http.HandlerFunc(handler))
+		srv := httptest.NewServer(http.HandlerFunc(basicChallenge))
 		defer srv.Close()
 		u := "http://bob:pw@" + srv.Listener.Addr().String() + "/s"
 		if _, err := Open(context.Background(), Config{URL: u}); !errors.Is(err, ErrInsecureAuth) {

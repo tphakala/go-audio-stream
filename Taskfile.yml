@@ -56,7 +56,7 @@ tasks:
       - go test -run '^$' -fuzz '^FuzzParseResponse$' -fuzztime=2m ./rtsp
       - go test -run '^$' -fuzz '^FuzzParseRequest$' -fuzztime=2m ./rtsp
       - go test -run '^$' -fuzz '^FuzzParseInterleaved$' -fuzztime=2m ./rtsp
-      - go test -run '^$' -fuzz '^FuzzParseChallenges$' -fuzztime=2m ./rtsp
+      - go test -run '^$' -fuzz '^FuzzParseChallenges$' -fuzztime=2m ./internal/httpauth
       - go test -run '^$' -fuzz '^FuzzResolveControlURL$' -fuzztime=2m ./rtsp
       - go test -run '^$' -fuzz '^FuzzResolveBaseURL$' -fuzztime=2m ./rtsp
       - go test -run '^$' -fuzz '^FuzzParseTransport$' -fuzztime=2m ./rtsp

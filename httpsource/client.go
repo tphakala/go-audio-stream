@@ -124,8 +124,9 @@ var _ audiostream.Source = (*Client)(nil)
 // *audiostream.RedirectError (a 3xx, matching audiostream.ErrRedirect),
 // *StatusError (any other non-200, matching ErrBadStatus), ErrUnsupportedFormat
 // (a media type or WAV shape this source will not decode), ErrFormatUnknown
-// (raw audio whose rate and channels could not be resolved), or ErrMalformedWAV
-// (a broken WAV header).
+// (raw audio whose rate and channels could not be resolved), ErrMalformedWAV
+// (a broken WAV header), or ErrInsecureAuth (the server answered with a Basic
+// challenge over plaintext http and Config.AllowInsecureAuth was not set).
 //
 //nolint:gocyclo,gocritic // The open handshake is a linear sequence of guarded steps; splitting it would scatter the shared teardown defer. Config is the documented public constructor signature, so hugeParam does not apply to a per-source entry point.
 func Open(ctx context.Context, cfg Config) (*Client, error) {
@@ -138,9 +139,6 @@ func Open(ctx context.Context, cfg Config) (*Client, error) {
 	// depending on the AfterFunc winning a race against the dial below.
 	if cerr := ctx.Err(); cerr != nil {
 		return nil, cerr
-	}
-	if aerr := checkInsecureAuth(&cfg, &tgt); aerr != nil {
-		return nil, aerr
 	}
 
 	c := &Client{
@@ -201,13 +199,35 @@ func Open(ctx context.Context, cfg Config) (*Client, error) {
 	})
 	defer timer.Stop()
 
+	// do issues an open-phase request and classifies a transport failure. The
+	// challenge-response retry (authorize) shares it, so every attempt is bound
+	// by the same open-phase timeout and caller-context cancellation.
+	do := func(r *http.Request) (*http.Response, error) {
+		resp, derr := c.httpc.Do(r) //nolint:bodyclose // On success the reader owns c.body and closes it in teardown; on failure the defer above (or authorize, for a superseded 401) closes it.
+		if derr != nil {
+			return nil, classifyOpenErr(ctx, derr, &timedOut)
+		}
+		return resp, nil
+	}
+
 	req, err := buildRequest(reqCtx, &cfg, &tgt)
 	if err != nil {
 		return nil, err
 	}
-	resp, err := c.httpc.Do(req) //nolint:bodyclose // On success the reader owns c.body and closes it in teardown; on failure the defer above closes it.
+	resp, err := do(req) //nolint:bodyclose // resp.Body transfers to the reader (c.body) on success or is closed by the deferred cleanup on failure; the challenge-response path closes any superseded 401.
 	if err != nil {
-		return nil, classifyOpenErr(ctx, err, &timedOut)
+		return nil, err
+	}
+	// A 401 with credentials on hand triggers the challenge-response exchange:
+	// a Digest challenge is answered (over plaintext too, since Digest never
+	// puts the password on the wire), a Basic challenge only where preemptive
+	// Basic was already permitted. Without credentials the 401 falls through to
+	// responseStatusError as a *StatusError, unchanged.
+	if resp.StatusCode == http.StatusUnauthorized && (tgt.username != "" || tgt.password != "") {
+		resp, err = c.authorize(reqCtx, do, resp, &cfg, &tgt) //nolint:bodyclose // authorize returns the response to proceed with (owned by the reader or closed by the deferred cleanup) and closes every 401 it supersedes.
+		if err != nil {
+			return nil, err
+		}
 	}
 	c.body = resp.Body
 	c.server = resp.Header.Get("Server")
@@ -284,34 +304,42 @@ func tlsConfigFor(cfg *Config, tgt *target) *tls.Config {
 	}
 }
 
-// checkInsecureAuth enforces the secure-by-default credential policy: Basic
-// credentials over a plaintext http connection are refused with ErrInsecureAuth
-// unless the caller opted in with Config.AllowInsecureAuth, in which case a
-// warning is logged (the URL is already credential-stripped). Credentials over
-// https, and requests without credentials, are always allowed.
-func checkInsecureAuth(cfg *Config, tgt *target) error {
-	if tgt.tls || (tgt.username == "" && tgt.password == "") {
-		return nil
-	}
-	if !cfg.AllowInsecureAuth {
-		return ErrInsecureAuth
-	}
-	if cfg.Logger != nil {
-		cfg.Logger.Warn("httpsource: sending Basic credentials over a plaintext http connection", "url", tgt.requestURL)
-	}
-	return nil
-}
-
-// buildRequest constructs the GET, sets the User-Agent, and attaches Basic auth
-// when a credential was resolved (URL userinfo or Config).
-func buildRequest(ctx context.Context, cfg *Config, tgt *target) (*http.Request, error) {
+// newRequest builds the bare GET (method, target URL, User-Agent) shared by the
+// initial request and every challenge-response retry. It attaches no
+// credentials; buildRequest adds preemptive Basic and the Digest retry sets its
+// own Authorization.
+func newRequest(ctx context.Context, cfg *Config, tgt *target) (*http.Request, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, tgt.requestURL, http.NoBody)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrInvalidURL, err)
 	}
 	req.Header.Set("User-Agent", cfg.UserAgent)
-	if tgt.username != "" || tgt.password != "" {
+	return req, nil
+}
+
+// buildRequest constructs the initial GET. It attaches preemptive Basic auth
+// when a credential was resolved (URL userinfo or Config) AND the connection is
+// safe to send it on: TLS, or Config.AllowInsecureAuth for plaintext http.
+// Over plaintext without that opt-in it sends the request bare, so the password
+// is never put on the wire before the server asks for it. The secure-by-default
+// policy is then enforced at the challenge: a Digest challenge is answered
+// regardless (Digest never sends the password in the clear), while a Basic
+// challenge over unopted plaintext is refused with ErrInsecureAuth (see
+// authorize). Attaching Basic over plaintext (opt-in) logs a warning; the URL
+// is already credential-stripped.
+func buildRequest(ctx context.Context, cfg *Config, tgt *target) (*http.Request, error) {
+	req, err := newRequest(ctx, cfg, tgt)
+	if err != nil {
+		return nil, err
+	}
+	if tgt.username == "" && tgt.password == "" {
+		return req, nil
+	}
+	if tgt.tls || cfg.AllowInsecureAuth {
 		req.SetBasicAuth(tgt.username, tgt.password)
+		if !tgt.tls && cfg.Logger != nil {
+			cfg.Logger.Warn("httpsource: sending Basic credentials over a plaintext http connection", "url", tgt.requestURL)
+		}
 	}
 	return req, nil
 }

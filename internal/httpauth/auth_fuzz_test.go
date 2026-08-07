@@ -1,9 +1,9 @@
-package rtsp_test
+package httpauth_test
 
 import (
 	"testing"
 
-	"github.com/tphakala/go-audio-stream/rtsp"
+	"github.com/tphakala/go-audio-stream/internal/httpauth"
 )
 
 // challengeSeeds are WWW-Authenticate values exercising the challenge
@@ -32,8 +32,8 @@ func FuzzParseChallenges(f *testing.F) {
 	f.Fuzz(func(t *testing.T, s string) {
 		// The contract is total: parsing any single header value never
 		// panics. A well-formed challenge must carry a usable scheme.
-		for _, c := range rtsp.ParseChallenges([]string{s}) {
-			if c.Scheme != rtsp.AuthBasic && c.Scheme != rtsp.AuthDigest {
+		for _, c := range httpauth.ParseChallenges([]string{s}) {
+			if c.Scheme != httpauth.AuthBasic && c.Scheme != httpauth.AuthDigest {
 				t.Fatalf("ParseChallenges(%q) returned unusable scheme %v", s, c.Scheme)
 			}
 		}
