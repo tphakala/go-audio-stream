@@ -76,6 +76,27 @@ func extractBitsInto(dst, buf []byte, start, n int) []byte {
 	return dst
 }
 
+// appendBits grows dst by n bits worth of bytes (via append, which
+// zero-fills a newly grown region on its own) and OR's in n bits from buf
+// starting at bit offset start (MSB first), left-justified into that
+// freshly appended region. Unlike extractBitsInto, appendBits never
+// re-zeros its destination: the region it writes into is always newly
+// appended, so it is already zero, and dst's prior content (if any) is left
+// untouched. The caller guarantees start+n <= len(buf)*8.
+func appendBits(dst, buf []byte, start, n int) []byte {
+	size := (n + 7) / 8
+	base := len(dst)
+	dst = append(dst, make([]byte, size)...)
+	for i := range n {
+		bit := start + i
+		if buf[bit/8]&(1<<uint(7-bit%8)) == 0 {
+			continue
+		}
+		dst[base+i/8] |= 1 << uint(7-i%8)
+	}
+	return dst
+}
+
 // streamMuxConfig holds the mux parameters this package retains from a
 // parsed StreamMuxConfig. audioMuxVersion, allStreamsSameTimeFraming,
 // numProgram, and numLayer are validated during parse and not retained,

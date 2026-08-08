@@ -137,8 +137,8 @@ func (d *Depacketizer) depacketizeInBand(payload []byte) ([]AU, error) {
 		}
 
 		start := len(d.inBandData)
-		d.inBandData = append(d.inBandData, make([]byte, length)...)
-		data := extractBitsInto(d.inBandData[start:], payload, br.pos, length*8)
+		d.inBandData = appendBits(d.inBandData, payload, br.pos, length*8)
+		data := d.inBandData[start:]
 		br.pos += length * 8
 
 		d.aus = append(d.aus, AU{Data: data, RTPOffset: uint32(i) * frameLenTicks})
