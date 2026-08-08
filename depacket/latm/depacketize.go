@@ -1,5 +1,7 @@
 package latm
 
+import "fmt"
+
 // readMuxSlot reads one PayloadLengthInfo / PayloadMux pair starting at
 // payload[offset]: MuxSlotLengthBytes as a byte sum (each 0xFF byte adds
 // 255 and continues the sum; the terminating byte below 0xFF adds its own
@@ -28,17 +30,19 @@ func readMuxSlot(payload []byte, offset int) (data []byte, next int, err error) 
 }
 
 // Depacketize processes one RTP payload (one AudioMuxElement) and returns the
-// access units it carries, in order: one for the single-subframe case, several
-// for a multi-subframe AudioMuxElement. Any malformed input returns a sentinel
+// access units it carries, in order: one for the single-subframe case,
+// numSubFrames+1 for a multi-subframe AudioMuxElement. Each AU's RTPOffset is
+// i times the per-frame RTP tick count, i being the AU's subframe index:
+// Config.SamplesPerFrame when nonzero, otherwise the frame length derived
+// from the ASC's frameLengthFlag. Any malformed input returns a sentinel
 // error and never panics. marker and rtpTime are accepted for signature
 // parity with the AAC depacketizer; LATM does not fragment across packets, so
 // they are unused by the transform (the caller owns the absolute clock).
 //
-// This package currently covers the single-subframe case, both out-of-band
-// (Config.MuxConfigPresent == false, payload starts directly at
-// PayloadLengthInfo, byte-aligned) and in-band (Config.MuxConfigPresent ==
-// true, payload starts at useSameStreamMux, not byte-aligned). Multi-subframe
-// AudioMuxElements return ErrUnsupportedMux until a later task adds them.
+// This package covers both out-of-band (Config.MuxConfigPresent == false,
+// payload starts directly at PayloadLengthInfo, byte-aligned) and in-band
+// (Config.MuxConfigPresent == true, payload starts at useSameStreamMux, not
+// byte-aligned).
 func (d *Depacketizer) Depacketize(payload []byte, marker bool, rtpTime uint32) ([]AU, error) {
 	_ = marker  // LATM does not fragment across packets; unused by the transform.
 	_ = rtpTime // relative offsets only; the caller owns the absolute clock.
@@ -49,16 +53,25 @@ func (d *Depacketizer) Depacketize(payload []byte, marker bool, rtpTime uint32) 
 	if !d.haveSMC {
 		return nil, ErrNoConfig
 	}
-	if d.smc.numSubFrames > 0 {
-		return nil, ErrUnsupportedMux // multi-subframe: a later task.
+	if d.smc.numSubFrames+1 > MaxSubFrames {
+		return nil, fmt.Errorf("%w: numSubFrames %d exceeds cap", ErrUnsupportedMux, d.smc.numSubFrames)
 	}
 
-	data, _, err := readMuxSlot(payload, 0)
-	if err != nil {
-		return nil, err
+	frameLenTicks := uint32(d.cfg.SamplesPerFrame)
+	if frameLenTicks == 0 {
+		frameLenTicks = d.frameLength
 	}
 
-	d.aus = append(d.aus[:0], AU{Data: data, RTPOffset: 0})
+	d.aus = d.aus[:0]
+	offset := 0
+	for i := 0; i <= d.smc.numSubFrames; i++ {
+		data, next, err := readMuxSlot(payload, offset)
+		if err != nil {
+			return nil, err
+		}
+		offset = next
+		d.aus = append(d.aus, AU{Data: data, RTPOffset: uint32(i) * frameLenTicks})
+	}
 	return d.aus, nil
 }
 
@@ -67,12 +80,12 @@ func (d *Depacketizer) Depacketize(payload []byte, marker bool, rtpTime uint32) 
 // bitReader rather than treated as byte-aligned. It reads useSameStreamMux;
 // when 0 it parses and retains the inline StreamMuxConfig, when 1 it
 // requires a previously retained one (ErrNoConfig otherwise). It then reads
-// the single subframe's PayloadLengthInfo as a bit-level byte sum and
-// extracts that many bytes of payload from the current bit position,
-// repacked MSB-first into d.inBandData since the bytes are not aligned to
-// the input's byte boundaries and cannot alias it directly. Multi-subframe
-// AudioMuxElements (numSubFrames > 0) return ErrUnsupportedMux until a
-// later task adds them.
+// numSubFrames+1 PayloadLengthInfo/payload pairs as bit-level byte sums,
+// repacking each subframe's payload bytes MSB-first into a distinct region
+// of d.inBandData: the bytes are not aligned to the input's byte boundaries
+// and cannot alias it directly, and every AU returned from one call must
+// stay simultaneously valid, so each subframe is appended onto the shared
+// buffer rather than overwriting the previous one.
 func (d *Depacketizer) depacketizeInBand(payload []byte) ([]AU, error) {
 	br := &bitReader{buf: payload}
 
@@ -93,32 +106,44 @@ func (d *Depacketizer) depacketizeInBand(payload []byte) ([]AU, error) {
 		return nil, ErrNoConfig
 	}
 
-	if d.smc.numSubFrames > 0 {
-		return nil, ErrUnsupportedMux // multi-subframe: a later task.
+	if d.smc.numSubFrames+1 > MaxSubFrames {
+		return nil, fmt.Errorf("%w: numSubFrames %d exceeds cap", ErrUnsupportedMux, d.smc.numSubFrames)
 	}
 
-	length := 0
-	for {
-		b, ok := br.read(8)
-		if !ok {
-			return nil, ErrTruncated
+	frameLenTicks := uint32(d.cfg.SamplesPerFrame)
+	if frameLenTicks == 0 {
+		frameLenTicks = d.frameLength
+	}
+
+	d.aus = d.aus[:0]
+	d.inBandData = d.inBandData[:0]
+	for i := 0; i <= d.smc.numSubFrames; i++ {
+		length := 0
+		for {
+			b, ok := br.read(8)
+			if !ok {
+				return nil, ErrTruncated
+			}
+			length += int(b)
+			if length > MaxMuxSlotBytes {
+				return nil, ErrPayloadOverflow
+			}
+			if b != 0xFF {
+				break
+			}
 		}
-		length += int(b)
-		if length > MaxMuxSlotBytes {
+		if br.pos+length*8 > len(payload)*8 {
 			return nil, ErrPayloadOverflow
 		}
-		if b != 0xFF {
-			break
-		}
-	}
-	if br.pos+length*8 > len(payload)*8 {
-		return nil, ErrPayloadOverflow
-	}
 
-	d.inBandData = extractBitsInto(d.inBandData[:0], payload, br.pos, length*8)
-	br.pos += length * 8
+		start := len(d.inBandData)
+		d.inBandData = append(d.inBandData, make([]byte, length)...)
+		data := extractBitsInto(d.inBandData[start:], payload, br.pos, length*8)
+		br.pos += length * 8
+
+		d.aus = append(d.aus, AU{Data: data, RTPOffset: uint32(i) * frameLenTicks})
+	}
 	br.byteAlign()
 
-	d.aus = append(d.aus[:0], AU{Data: d.inBandData, RTPOffset: 0})
 	return d.aus, nil
 }
