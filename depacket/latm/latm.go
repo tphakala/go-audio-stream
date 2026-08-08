@@ -16,8 +16,11 @@ const (
 	// PayloadLengthInfo byte-sum may declare. A larger value yields
 	// ErrPayloadOverflow before any buffering.
 	MaxMuxSlotBytes = 64 * 1024
-	// MaxStreamMuxConfigBytes bounds an out-of-band or in-band
-	// StreamMuxConfig parse, so a malformed config cannot loop unbounded.
+	// MaxStreamMuxConfigBytes caps the out-of-band StreamMuxConfig parse:
+	// parseStreamMuxConfig truncates its input to this many bytes before
+	// parsing, so a malformed escape-coded field cannot loop unbounded. The
+	// in-band parse reads from the RTP payload buffer instead and is bounded by
+	// the payload length, so this cap does not apply there.
 	MaxStreamMuxConfigBytes = 512
 )
 

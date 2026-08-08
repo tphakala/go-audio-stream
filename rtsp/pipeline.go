@@ -616,9 +616,17 @@ func (tr *track) ptsOf(ts uint64) time.Duration {
 	return time.Duration(sec)*time.Second + time.Duration(frac)
 }
 
-// resetDepacketizer clears any codec reassembly state on an SSRC change or a
-// sequence gap, so a lost fragment cannot corrupt the next access unit. Only
-// AAC and LATM carry cross-packet state; the other codecs are stateless.
+// resetDepacketizer clears codec reassembly state. AAC reassembly state is
+// cleared on BOTH a gap and an SSRC change (regardless of onSSRCChange), so a
+// lost fragment cannot corrupt the next access unit: AAC fragments an access
+// unit across packets, so a hole leaves partial state that must be dropped.
+// LATM does not fragment across packets, so it carries no cross-packet fragment
+// state, only a retained StreamMuxConfig. That config must SURVIVE a gap and be
+// reset only on an SSRC change (onSSRCChange true), where a new source may use a
+// different config. Clearing it on a gap would silence an in-band sender that
+// transmits the config once and thereafter sets useSameStreamMux (RFC 3016
+// permits this): a single lost packet would leave every later packet
+// ErrNoConfig for the rest of the session.
 //
 // The nil checks are here and not in deliverAAC/deliverLATM, which
 // dereference tr.aac/tr.latm directly, because the two are asking different
@@ -627,22 +635,22 @@ func (tr *track) ptsOf(ts uint64) time.Duration {
 // field in the same two lines, so there it cannot be nil. This function runs
 // for EVERY track on every gap, most of which have no depacketizer at all.
 //
-// tr.latmASC is re-seeded from whatever survives tr.latm.Reset(), rather than
-// cleared unconditionally, so an SSRC change re-announces the resolved config
-// for an in-band track without spuriously refiring one for an out-of-band
-// track. latm.Depacketizer.Reset documents the asymmetry this relies on: it
-// clears an in-band config (Reset sets its ASC back to nil), but leaves an
-// out-of-band one untouched (Reset is a no-op there, so the ASC survives
-// unchanged). Re-seeding after Reset therefore lands on nil for in-band,
-// so the next resolved config's deliverLATM sees no snapshot to compare
-// against and reports it through OnCodecUpdate again, and on the same
-// unchanged bytes for out-of-band, so the next packet's deliverLATM sees no
-// change and never fires.
-func (tr *track) resetDepacketizer() {
+// On an SSRC change tr.latmASC is re-seeded from whatever survives
+// tr.latm.Reset(), rather than cleared unconditionally, so the change
+// re-announces the resolved config for an in-band track without spuriously
+// refiring one for an out-of-band track. latm.Depacketizer.Reset documents the
+// asymmetry this relies on: it clears an in-band config (Reset sets its ASC
+// back to nil), but leaves an out-of-band one untouched (Reset is a no-op
+// there, so the ASC survives unchanged). Re-seeding after Reset therefore lands
+// on nil for in-band, so the next resolved config's deliverLATM sees no
+// snapshot to compare against and reports it through OnCodecUpdate again, and on
+// the same unchanged bytes for out-of-band, so the next packet's deliverLATM
+// sees no change and never fires.
+func (tr *track) resetDepacketizer(onSSRCChange bool) {
 	if tr.aac != nil {
 		tr.aac.Reset()
 	}
-	if tr.latm != nil {
+	if onSSRCChange && tr.latm != nil {
 		tr.latm.Reset()
 		tr.latmASC = nil
 		if asc := tr.latm.AudioSpecificConfig(); asc != nil {

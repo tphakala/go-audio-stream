@@ -386,7 +386,7 @@ func (c *Client) process(tr *track, pkt rtp.Packet, now time.Time) bool {
 	if up.SSRCReset {
 		tr.ssrcResets.Add(1)
 		tr.baseSet.Store(false)
-		tr.resetDepacketizer()
+		tr.resetDepacketizer(true)
 		// The RTP-to-NTP correspondence is per SSRC: the previous source's
 		// pair must not convert the new source's timestamps.
 		tr.srClock.Store(nil)
@@ -405,7 +405,7 @@ func (c *Client) process(tr *track, pkt rtp.Packet, now time.Time) bool {
 	}
 	if up.Gap > 0 {
 		tr.seqGaps.Add(uint64(up.Gap))
-		tr.resetDepacketizer()
+		tr.resetDepacketizer(false)
 	}
 
 	// LATM is routed around the generic dispatcher rather than through it,

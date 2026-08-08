@@ -31,6 +31,14 @@ var v1ExplicitRate = []byte{0x40, 0x00, 0x2F, 0x00, 0xBB, 0x80, 0x20, 0x3F, 0xC0
 // rejects before reading any further ASC fields.
 var v1UnsupportedAOT = []byte{0x40, 0x00, 0x50}
 
+// v1ExtensionFlag is v1 with the ASC extensionFlag bit set to 1 instead of 0.
+// In v1 that bit is bit 30 of the config (the last bit of the 16-bit ASC): the
+// 6-bit position within byte3, whose value 1<<(7-6) == 0x02, so byte3 flips
+// from 0x20 to 0x22. Everything else matches v1 (AAC-LC, 44.1 kHz, stereo).
+// parseASC must reject it with ErrUnsupportedASC rather than mis-parse the
+// unconsumed GASpecificConfig bits it announces.
+var v1ExtensionFlag = []byte{0x40, 0x00, 0x24, 0x22, 0x3F, 0xC0}
+
 // v4 is the in-band AudioMuxElement test vector (hand-verified,
 // docs/plans/2026-07-23-phase2-latm-plan.md, vector V4): useSameStreamMux
 // 0, an inline StreamMuxConfig equal to v1, PayloadLengthInfo 03, payload
@@ -177,4 +185,80 @@ func TestASCExtraction(t *testing.T) {
 			t.Fatalf("err = %v, want ErrUnsupportedASC", err)
 		}
 	})
+
+	t.Run("extensionFlag set", func(t *testing.T) {
+		t.Parallel()
+		_, _, _, err := parseStreamMuxConfig(v1ExtensionFlag)
+		if !errors.Is(err, ErrUnsupportedASC) {
+			t.Fatalf("err = %v, want ErrUnsupportedASC", err)
+		}
+	})
+}
+
+// TestParseStreamMuxConfigRejects covers every ErrUnsupportedMux trigger in
+// parseStreamMuxConfigBits reachable by flipping bits in v1
+// (40 00 24 20 3F C0). numProgram != 0 is already covered by latm.New's
+// TestNewRejects, so it is not repeated here. Each variant must be rejected
+// with ErrUnsupportedMux.
+func TestParseStreamMuxConfigRejects(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		buf  []byte
+	}{
+		// audioMuxVersion is bit 0 (v1 byte0 0x40 = 0b01000000); set it -> 0xC0.
+		{"audioMuxVersion", []byte{0xC0, 0x00, 0x24, 0x20, 0x3F, 0xC0}},
+		// allStreamsSameTimeFraming is bit 1 (the set bit of 0x40); clear it -> 0x00.
+		{"allStreamsSameTimeFraming", []byte{0x00, 0x00, 0x24, 0x20, 0x3F, 0xC0}},
+		// numLayer is bits 12-14, in byte1; set bit 14 (0x02) -> numLayer 1,
+		// leaving numProgram (bits 8-11) still 0.
+		{"numLayer", []byte{0x40, 0x02, 0x24, 0x20, 0x3F, 0xC0}},
+		// frameLengthType is bits 31-33 (spanning byte3/byte4), read after the
+		// ASC; set bit 33 (byte4 0x3F -> 0x7F) -> frameLengthType 1. The ASC
+		// bytes are untouched, so parseASC still succeeds before the reject.
+		{"frameLengthType", []byte{0x40, 0x00, 0x24, 0x20, 0x7F, 0xC0}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			_, _, _, err := parseStreamMuxConfig(tc.buf)
+			if !errors.Is(err, ErrUnsupportedMux) {
+				t.Fatalf("err = %v, want ErrUnsupportedMux", err)
+			}
+		})
+	}
+}
+
+// TestParseStreamMuxConfigTruncated covers a StreamMuxConfig that ends
+// mid-field inside parseASC: v1 truncated to 2 bytes consumes the 15 mux-header
+// bits, leaving one bit before audioObjectType's 5-bit read runs off the end.
+func TestParseStreamMuxConfigTruncated(t *testing.T) {
+	t.Parallel()
+	_, _, _, err := parseStreamMuxConfig(v1[:2])
+	if !errors.Is(err, ErrTruncated) {
+		t.Fatalf("err = %v, want ErrTruncated", err)
+	}
+}
+
+// TestParseStreamMuxConfigCoreCoderDelay parses buildStreamMuxConfigCoreCoderDelay
+// (dependsOnCoreCoder 1, coreCoderDelay 0x123) deterministically, asserting the
+// success path: the extracted ASC and derived frameLength, not just no-panic
+// under the fuzzer. The 14 coreCoderDelay bits land inside the ASC, so this is
+// the only test that pins the exact ASC bytes for that branch.
+func TestParseStreamMuxConfigCoreCoderDelay(t *testing.T) {
+	t.Parallel()
+	smc, asc, frameLength, err := parseStreamMuxConfig(buildStreamMuxConfigCoreCoderDelay())
+	if err != nil {
+		t.Fatalf("parseStreamMuxConfig: %v", err)
+	}
+	wantASC := []byte{0x12, 0x12, 0x09, 0x18}
+	if !bytes.Equal(asc, wantASC) {
+		t.Errorf("asc = % x, want % x", asc, wantASC)
+	}
+	if frameLength != 1024 {
+		t.Errorf("frameLength = %d, want 1024", frameLength)
+	}
+	if smc.numSubFrames != 0 {
+		t.Errorf("numSubFrames = %d, want 0", smc.numSubFrames)
+	}
 }

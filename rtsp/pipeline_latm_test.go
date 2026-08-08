@@ -334,7 +334,7 @@ func TestResetDepacketizerClearsLATMState(t *testing.T) {
 		t.Fatal("latmASC not seeded after the first in-band resolution")
 	}
 
-	tr.resetDepacketizer()
+	tr.resetDepacketizer(true)
 	if tr.latmASC != nil {
 		t.Errorf("latmASC = % x after resetDepacketizer, want nil", tr.latmASC)
 	}
@@ -367,7 +367,7 @@ func TestResetDepacketizerLATMOutOfBandNeverRefires(t *testing.T) {
 	pkt := rtp.Packet{Header: rtp.Header{Timestamp: 0, Marker: true}, Payload: latmV2}
 	tr.deliverLATM(pkt, rtp.Update{Timestamp: 0}, time.Unix(1, 0), rec.onFrame, rec.onCodecUpdate)
 
-	tr.resetDepacketizer()
+	tr.resetDepacketizer(true)
 	if !bytes.Equal(tr.latmASC, latmASC) {
 		t.Fatalf("latmASC = % x after resetDepacketizer, want the out-of-band ASC % x to survive", tr.latmASC, latmASC)
 	}
@@ -378,5 +378,71 @@ func TestResetDepacketizerLATMOutOfBandNeverRefires(t *testing.T) {
 		if e == latmEventUpdate {
 			t.Fatalf("OnCodecUpdate fired for an out-of-band track after an SSRC reset: events = %v", rec.events)
 		}
+	}
+}
+
+// TestResetDepacketizerInBandConfigSurvivesGap is the regression test for the
+// gap-vs-SSRC bug: a sequence gap must NOT drop an in-band LATM track's retained
+// StreamMuxConfig. LATM does not fragment across packets, so a gap leaves no
+// reassembly state to corrupt; a sender that transmits the config once
+// (useSameStreamMux 0, V4) and thereafter reuses it (useSameStreamMux 1, V5)
+// must keep decoding after a lost packet. Before the fix resetDepacketizer reset
+// the LATM depacketizer on every gap, so the V5 packet went permanently
+// ErrNoConfig. resetDepacketizer(false) is the gap path.
+func TestResetDepacketizerInBandConfigSurvivesGap(t *testing.T) {
+	t.Parallel()
+	tr := newInBandLATMTrack(t)
+
+	// V4 carries the StreamMuxConfig inline (useSameStreamMux 0) and resolves it.
+	pkt4 := rtp.Packet{Header: rtp.Header{Timestamp: 0, Marker: true}, Payload: latmV4}
+	n := 0
+	tr.deliverLATM(pkt4, rtp.Update{Timestamp: 0}, time.Unix(1, 0), func(audiostream.Frame) { n++ }, nil)
+	if n != 1 {
+		t.Fatalf("V4 delivered %d frames, want 1", n)
+	}
+
+	// A sequence gap. AAC would reset its reassembly here, but LATM's retained
+	// config must survive.
+	tr.resetDepacketizer(false)
+
+	// V5 reuses the retained config (useSameStreamMux 1). It must still decode
+	// one AU and not be counted malformed.
+	before := tr.malformed.Load()
+	pkt5 := rtp.Packet{Header: rtp.Header{Timestamp: 1024, Marker: true}, Payload: latmV5}
+	n = 0
+	tr.deliverLATM(pkt5, rtp.Update{Timestamp: 1024}, time.Unix(1, 0), func(audiostream.Frame) { n++ }, nil)
+	if n != 1 {
+		t.Fatalf("V5 delivered %d frames after a gap, want 1 (config must survive the gap)", n)
+	}
+	if got := tr.malformed.Load(); got != before {
+		t.Errorf("malformed = %d after V5, want %d (a lost config would make V5 ErrNoConfig)", got, before)
+	}
+}
+
+// TestResetDepacketizerInBandConfigClearedOnSSRCChange is the paired assertion:
+// resetDepacketizer(true) (the SSRC-change path) DOES clear an in-band track's
+// retained config, because a new source may use a different one. The V5 reuse
+// packet must then fail (ErrNoConfig), delivering nothing and counting one
+// malformed, until a config-bearing packet re-announces.
+func TestResetDepacketizerInBandConfigClearedOnSSRCChange(t *testing.T) {
+	t.Parallel()
+	tr := newInBandLATMTrack(t)
+
+	pkt4 := rtp.Packet{Header: rtp.Header{Timestamp: 0, Marker: true}, Payload: latmV4}
+	tr.deliverLATM(pkt4, rtp.Update{Timestamp: 0}, time.Unix(1, 0), func(audiostream.Frame) {}, nil)
+
+	// An SSRC change: a new source that may carry a different config, so the
+	// retained one is cleared.
+	tr.resetDepacketizer(true)
+
+	before := tr.malformed.Load()
+	pkt5 := rtp.Packet{Header: rtp.Header{Timestamp: 1024, Marker: true}, Payload: latmV5}
+	n := 0
+	tr.deliverLATM(pkt5, rtp.Update{Timestamp: 1024}, time.Unix(1, 0), func(audiostream.Frame) { n++ }, nil)
+	if n != 0 {
+		t.Fatalf("V5 delivered %d frames after an SSRC change, want 0 (config must be cleared)", n)
+	}
+	if got := tr.malformed.Load(); got != before+1 {
+		t.Errorf("malformed = %d after V5, want %d (cleared config -> ErrNoConfig)", got, before+1)
 	}
 }

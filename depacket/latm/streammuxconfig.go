@@ -224,13 +224,13 @@ func parseStreamMuxConfigBits(r *bitReader) (smc streamMuxConfig, asc []byte, fr
 // parseASC reads an AudioSpecificConfig from r starting at its current bit
 // position, for the GA object types this package supports (1, 2, 3, 4, 6,
 // 7). audioObjectType and samplingFrequencyIndex read their respective
-// escape codes (31 and 15), but this minimal parse does not interpret the
-// SBR/PS extension config that some object types carry beyond the plain GA
-// fields; those still decode correctly here since the extension bits are
-// not read, matching the object types this package targets (AAC-LC and its
-// GA siblings, whose extensionFlag is 0). It returns the ASC bits repacked
-// MSB-first into a fresh byte-aligned slice, and the per-AU sample count
-// derived from frameLengthFlag (1024 or 960).
+// escape codes (31 and 15). This minimal parse reads only the plain GA fields
+// that AAC-LC and its GA siblings carry, whose extensionFlag is 0; an ASC that
+// sets extensionFlag (additional GASpecificConfig bits this parse does not
+// consume) is rejected with ErrUnsupportedASC rather than mis-parsed, matching
+// the audioObjectType rejection. It returns the ASC bits repacked MSB-first
+// into a fresh byte-aligned slice, and the per-AU sample count derived from
+// frameLengthFlag (1024 or 960).
 func parseASC(r *bitReader) (asc []byte, frameLength uint32, err error) {
 	start := r.pos
 
@@ -281,8 +281,18 @@ func parseASC(r *bitReader) (asc []byte, frameLength uint32, err error) {
 		}
 	}
 
-	if _, ok := r.read(1); !ok { // extensionFlag.
+	extensionFlag, ok := r.read(1)
+	if !ok {
 		return nil, 0, ErrTruncated
+	}
+	if extensionFlag == 1 {
+		// ISO 14496-3: extensionFlag == 1 means additional GASpecificConfig
+		// bits follow (for the AAC-scalable / ER object types, or the AOT-22
+		// extension) that this minimal parse does not consume. Reading on would
+		// leave the extracted ASC short and misalign the following
+		// frameLengthType read, so reject it outright, matching the AOT 5/29
+		// rejection philosophy above.
+		return nil, 0, fmt.Errorf("%w: extensionFlag set", ErrUnsupportedASC)
 	}
 
 	frameLength = 1024

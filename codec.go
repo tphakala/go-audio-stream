@@ -63,8 +63,10 @@ func (CodecUnknown) isCodec() {}
 // CodecMP4ALATM is MPEG-4 AAC carried in MP4A-LATM (RFC 3016).
 // StreamMuxConfig holds the raw StreamMuxConfig bytes from the SDP config=
 // (which for LATM is a StreamMuxConfig, not a bare AudioSpecificConfig), and
-// MuxConfigPresent mirrors the fmtp cpresent parameter. A nil StreamMuxConfig
-// with MuxConfigPresent true means the config is carried in-band.
+// MuxConfigPresent mirrors the fmtp cpresent parameter. MuxConfigPresent alone
+// selects the mode: true means each AudioMuxElement carries the StreamMuxConfig
+// in-band (StreamMuxConfig here is then typically nil), false means it is
+// out-of-band in StreamMuxConfig.
 //
 // AudioSpecificConfig is the AAC ASC bytes a decoder needs. For an
 // out-of-band config it is filled in at Describe time (extracted from

@@ -74,9 +74,42 @@ func FuzzParseStreamMuxConfig(f *testing.F) {
 	})
 }
 
+// assertAUInvariants checks the invariants every success-path Depacketize
+// return must satisfy, so the fuzz targets assert more than no-panic: the
+// subframe count fits MaxSubFrames, each AU fits MaxMuxSlotBytes, and the AUs'
+// RTPOffsets increase by a constant per-frame step (au[i].RTPOffset == i*step),
+// the multi-subframe timing contract Depacketize documents. All subframes use
+// one frame-length tick count, so the step read from au[1] must hold for every
+// index.
+func assertAUInvariants(t *testing.T, aus []AU) {
+	t.Helper()
+	if len(aus) > MaxSubFrames {
+		t.Fatalf("AU count %d exceeds MaxSubFrames %d", len(aus), MaxSubFrames)
+	}
+	if len(aus) == 0 {
+		return
+	}
+	if aus[0].RTPOffset != 0 {
+		t.Fatalf("aus[0].RTPOffset = %d, want 0", aus[0].RTPOffset)
+	}
+	var step uint32
+	if len(aus) > 1 {
+		step = aus[1].RTPOffset
+	}
+	for i := range aus {
+		if len(aus[i].Data) > MaxMuxSlotBytes {
+			t.Fatalf("aus[%d].Data length %d exceeds MaxMuxSlotBytes %d", i, len(aus[i].Data), MaxMuxSlotBytes)
+		}
+		if want := uint32(i) * step; aus[i].RTPOffset != want {
+			t.Fatalf("aus[%d].RTPOffset = %d, want %d (i*step, step=%d)", i, aus[i].RTPOffset, want, step)
+		}
+	}
+}
+
 // FuzzDepacketizeOutOfBand drives the out-of-band Depacketize path with a
 // fixed valid StreamMuxConfig (v1) and arbitrary AudioMuxElement bytes and
-// marker bit. It must never panic.
+// marker bit. It must never panic, and on the success path the returned AUs
+// must satisfy assertAUInvariants.
 func FuzzDepacketizeOutOfBand(f *testing.F) {
 	d, err := New(Config{MuxConfigPresent: false, StreamMuxConfig: v1})
 	if err != nil {
@@ -90,7 +123,11 @@ func FuzzDepacketizeOutOfBand(f *testing.F) {
 		f.Add(buf, true)
 	}
 	f.Fuzz(func(t *testing.T, payload []byte, marker bool) {
-		_, _ = d.Depacketize(payload, marker, 0)
+		aus, err := d.Depacketize(payload, marker, 0)
+		if err != nil {
+			return
+		}
+		assertAUInvariants(t, aus)
 	})
 }
 
@@ -98,8 +135,9 @@ func FuzzDepacketizeOutOfBand(f *testing.F) {
 // two-call sequence with arbitrary payloads and marker bits, exercising the
 // retained-config path and useSameStreamMux. It must never panic on either
 // call, including the second call against whatever state the first call left
-// behind. d.Reset() at the top of each fuzz execution keeps iterations
-// independent of one another, mirroring depacket/aac's FuzzDepacketize.
+// behind, and each call's success-path AUs must satisfy assertAUInvariants.
+// d.Reset() at the top of each fuzz execution keeps iterations independent of
+// one another, mirroring depacket/aac's FuzzDepacketize.
 func FuzzDepacketizeInBand(f *testing.F) {
 	d, err := New(Config{MuxConfigPresent: true})
 	if err != nil {
@@ -111,7 +149,11 @@ func FuzzDepacketizeInBand(f *testing.F) {
 
 	f.Fuzz(func(t *testing.T, p1 []byte, m1 bool, p2 []byte, m2 bool) {
 		d.Reset()
-		_, _ = d.Depacketize(p1, m1, 0)
-		_, _ = d.Depacketize(p2, m2, 0)
+		if aus, err := d.Depacketize(p1, m1, 0); err == nil {
+			assertAUInvariants(t, aus)
+		}
+		if aus, err := d.Depacketize(p2, m2, 0); err == nil {
+			assertAUInvariants(t, aus)
+		}
 	})
 }

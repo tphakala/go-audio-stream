@@ -94,6 +94,9 @@ func TestDescribeLATMInBandASCUnknownAtDescribe(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Describe: %v", err)
 	}
+	if len(tracks) != 1 {
+		t.Fatalf("track count = %d, want 1", len(tracks))
+	}
 
 	latm, ok := tracks[0].Codec.(audiostream.CodecMP4ALATM)
 	if !ok {
@@ -104,6 +107,52 @@ func TestDescribeLATMInBandASCUnknownAtDescribe(t *testing.T) {
 	}
 	if latm.AudioSpecificConfig != nil {
 		t.Errorf("AudioSpecificConfig = % x, want nil before the stream carries it", latm.AudioSpecificConfig)
+	}
+}
+
+// latmOutOfBandMalformedSDP declares an out-of-band MP4A-LATM track (cpresent=0)
+// whose config= is valid hex but an unsupported StreamMuxConfig: 400050 has
+// audioObjectType 5, which latm.New rejects. It exercises resolveLATMASC's error
+// branch.
+const latmOutOfBandMalformedSDP = "v=0\r\n" +
+	"o=- 0 0 IN IP4 127.0.0.1\r\n" +
+	"s=Stream\r\n" +
+	"m=audio 0 RTP/AVP 96\r\n" +
+	"a=rtpmap:96 MP4A-LATM/44100/2\r\n" +
+	"a=fmtp:96 cpresent=0;object=2;config=400050\r\n" +
+	"a=control:audio\r\n"
+
+// TestDescribeLATMOutOfBandMalformedConfigASCNil covers resolveLATMASC's error
+// branch: an out-of-band track whose StreamMuxConfig latm.New cannot parse still
+// describes successfully, with AudioSpecificConfig left nil rather than failing
+// the whole Describe. The track sets up and falls back to raw delivery later.
+func TestDescribeLATMOutOfBandMalformedConfigASCNil(t *testing.T) {
+	s := testserver.New(t, testserver.Options{Handle: func(sc *testserver.ServerConn) {
+		serve(t, sc, methodOptions, 200, "OK", publicHeader(), nil)
+		serve(t, sc, methodDescribe, 200, "OK", sdpHeaders(""), []byte(latmOutOfBandMalformedSDP))
+		drainRequests(sc)
+	}})
+
+	c := dialIdle(t, s.URL("/stream"))
+	defer closeAndWait(t, c)
+
+	tracks, err := c.Describe(context.Background())
+	if err != nil {
+		t.Fatalf("Describe: %v", err)
+	}
+	if len(tracks) != 1 {
+		t.Fatalf("track count = %d, want 1", len(tracks))
+	}
+
+	latm, ok := tracks[0].Codec.(audiostream.CodecMP4ALATM)
+	if !ok {
+		t.Fatalf("Codec = %T, want CodecMP4ALATM", tracks[0].Codec)
+	}
+	if latm.MuxConfigPresent {
+		t.Error("MuxConfigPresent = true, want false")
+	}
+	if latm.AudioSpecificConfig != nil {
+		t.Errorf("AudioSpecificConfig = % x, want nil (malformed StreamMuxConfig, resolveLATMASC error branch)", latm.AudioSpecificConfig)
 	}
 }
 

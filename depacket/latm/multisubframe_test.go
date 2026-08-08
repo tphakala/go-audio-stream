@@ -255,6 +255,102 @@ func TestSubframeCountCap(t *testing.T) {
 	})
 }
 
+// writeV1HeaderInBand writes useSameStreamMux 0 followed by a StreamMuxConfig
+// whose fields match v1 (a single subframe): the same layout writeV3Header
+// packs but with numSubFrames 0, so exactly one PayloadLengthInfo/payload pair
+// follows.
+func writeV1HeaderInBand(w *bitWriter) {
+	w.write(0, 1)    // useSameStreamMux
+	w.write(0, 1)    // audioMuxVersion
+	w.write(1, 1)    // allStreamsSameTimeFraming
+	w.write(0, 6)    // numSubFrames
+	w.write(0, 4)    // numProgram
+	w.write(0, 3)    // numLayer
+	w.write(2, 5)    // audioObjectType
+	w.write(4, 4)    // samplingFrequencyIndex
+	w.write(2, 4)    // channelConfiguration
+	w.write(0, 1)    // frameLengthFlag
+	w.write(0, 1)    // dependsOnCoreCoder
+	w.write(0, 1)    // extensionFlag
+	w.write(0, 3)    // frameLengthType
+	w.write(0xFF, 8) // latmBufferFullness
+	w.write(0, 1)    // otherDataPresent
+	w.write(0, 1)    // crcCheckPresent
+}
+
+// buildInBandLengthEscape packs a single-subframe in-band AudioMuxElement whose
+// PayloadLengthInfo uses the 0xFF continuation byte-sum to declare payloadLen
+// payload bytes: floor(payloadLen/255) bytes of 0xFF, then payloadLen mod 255
+// as the terminating byte, then payloadLen payload bytes 00 01 02 ... A
+// payloadLen >= 255 forces at least one 0xFF continuation.
+func buildInBandLengthEscape(payloadLen int) []byte {
+	w := &bitWriter{}
+	writeV1HeaderInBand(w)
+	for rem := payloadLen; ; {
+		if rem >= 255 {
+			w.write(0xFF, 8)
+			rem -= 255
+			continue
+		}
+		w.write(uint64(rem), 8)
+		break
+	}
+	for i := 0; i < payloadLen; i++ {
+		w.write(uint64(i&0xFF), 8)
+	}
+	w.byteAlign()
+	return w.bytes()
+}
+
+// buildInBandTruncatedLength packs a single-subframe in-band AudioMuxElement
+// whose PayloadLengthInfo ends on a 0xFF continuation byte with nothing after
+// it, so the byte-sum read runs off the end of the element mid-length.
+func buildInBandTruncatedLength() []byte {
+	w := &bitWriter{}
+	writeV1HeaderInBand(w)
+	w.write(0xFF, 8) // continuation byte, but the element ends here.
+	w.byteAlign()
+	return w.bytes()
+}
+
+func TestInBandLengthEscape(t *testing.T) {
+	t.Parallel()
+	const payloadLen = 300 // > 255, so PayloadLengthInfo needs a 0xFF continuation.
+	d, err := New(Config{MuxConfigPresent: true})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	aus, err := d.Depacketize(buildInBandLengthEscape(payloadLen), true, 0)
+	if err != nil {
+		t.Fatalf("Depacketize: %v", err)
+	}
+	if len(aus) != 1 {
+		t.Fatalf("AU count = %d, want 1", len(aus))
+	}
+	if len(aus[0].Data) != payloadLen {
+		t.Fatalf("AU length = %d, want %d (0xFF length-escape byte-sum)", len(aus[0].Data), payloadLen)
+	}
+	for i := range aus[0].Data {
+		if want := byte(i & 0xFF); aus[0].Data[i] != want {
+			t.Fatalf("AU byte %d = %#x, want %#x", i, aus[0].Data[i], want)
+		}
+	}
+}
+
+func TestInBandLengthEscapeTruncated(t *testing.T) {
+	t.Parallel()
+	d, err := New(Config{MuxConfigPresent: true})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	_, err = d.Depacketize(buildInBandTruncatedLength(), true, 0)
+	if !errors.Is(err, ErrTruncated) {
+		t.Fatalf("err = %v, want ErrTruncated", err)
+	}
+}
+
 func TestMultiSubframeTruncated(t *testing.T) {
 	t.Parallel()
 

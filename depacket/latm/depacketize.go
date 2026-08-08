@@ -50,6 +50,8 @@ func (d *Depacketizer) Depacketize(payload []byte, marker bool, rtpTime uint32) 
 	if d.cfg.MuxConfigPresent {
 		return d.depacketizeInBand(payload)
 	}
+	// Defensive: New always sets haveSMC on out-of-band success, so this is
+	// structurally unreachable here, like the numSubFrames cap guard below.
 	if !d.haveSMC {
 		return nil, ErrNoConfig
 	}

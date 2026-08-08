@@ -116,3 +116,39 @@ func TestCodecsLATMInBandDefaultCpresent(t *testing.T) {
 		t.Errorf("LATMParams.Config = % x, want nil", p.Config)
 	}
 }
+
+// TestCodecsLATMInvalidHexConfig covers a config= parameter that is present but
+// not valid hex ("zz" is not a hex byte): parseLATMFmtp promises a non-hex
+// config yields a nil Config rather than a partial or empty non-nil slice, so
+// both LATMParams.Config and the codec's StreamMuxConfig must stay nil.
+func TestCodecsLATMInvalidHexConfig(t *testing.T) {
+	t.Parallel()
+	body := []byte("v=0\r\n" +
+		"m=audio 0 RTP/AVP 96\r\n" +
+		"a=rtpmap:96 MP4A-LATM/44100/2\r\n" +
+		"a=fmtp:96 cpresent=0;object=2;config=zz00zz\r\n")
+	s, err := sdp.Parse(body)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	tracks := s.Codecs()
+	if len(tracks) != 1 {
+		t.Fatalf("track count = %d, want 1", len(tracks))
+	}
+
+	p := tracks[0].LATM
+	if p == nil {
+		t.Fatal("DescribedTrack.LATM is nil, want the parsed fmtp parameters")
+	}
+	if p.Config != nil {
+		t.Errorf("LATMParams.Config = % x, want nil for a non-hex config= value", p.Config)
+	}
+
+	latm, ok := tracks[0].Codec.(audiostream.CodecMP4ALATM)
+	if !ok {
+		t.Fatalf("Codec = %T, want CodecMP4ALATM", tracks[0].Codec)
+	}
+	if latm.StreamMuxConfig != nil {
+		t.Errorf("StreamMuxConfig = % x, want nil for a non-hex config= value", latm.StreamMuxConfig)
+	}
+}
