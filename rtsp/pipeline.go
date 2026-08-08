@@ -89,8 +89,10 @@ type track struct {
 	// Config.OnCodecUpdate (or, for an out-of-band track, the ASC newTrack
 	// seeded from Describe to suppress a redundant first callback). It is
 	// reader-owned: only deliverLATM and resetDepacketizer touch it, both on
-	// the delivery goroutine, so it needs no lock. resetDepacketizer clears
-	// it on an SSRC change, so the next resolved config re-announces.
+	// the delivery goroutine, so it needs no lock. resetDepacketizer
+	// re-seeds it from whatever survives an SSRC reset, so an in-band track
+	// re-announces its next resolved config while an out-of-band track
+	// (whose ASC survives the reset unchanged) never spuriously refires.
 	latmASC []byte
 	// wirePayloadType is the payload type this track has settled on and
 	// wirePTSet says whether it has settled. Until it settles, ptCandidate and
@@ -378,6 +380,10 @@ func (tr *track) deliver(pkt rtp.Packet, up rtp.Update, now time.Time, onFrame f
 	case deliverL16:
 		tr.deliverL16(pkt, up, now, onFrame)
 	case deliverLATM:
+		// nil onCodecUpdate: this generic dispatch has no Config to read one
+		// from, so it is test-only for LATM. Production delivery routes
+		// through Client.process, which calls tr.deliverLATM directly with
+		// cfg.OnCodecUpdate; see reader.go.
 		tr.deliverLATM(pkt, up, now, onFrame, nil)
 	default: // deliverRaw, and any kind a future codec adds without a path here.
 		tr.deliverRaw(pkt, up, now, onFrame)
@@ -621,10 +627,17 @@ func (tr *track) ptsOf(ts uint64) time.Duration {
 // field in the same two lines, so there it cannot be nil. This function runs
 // for EVERY track on every gap, most of which have no depacketizer at all.
 //
-// tr.latmASC is cleared alongside tr.latm.Reset() so an SSRC change
-// re-announces the resolved config: the next packet's deliverLATM sees no
-// snapshot to compare against and, once it resolves one, reports it through
-// OnCodecUpdate again.
+// tr.latmASC is re-seeded from whatever survives tr.latm.Reset(), rather than
+// cleared unconditionally, so an SSRC change re-announces the resolved config
+// for an in-band track without spuriously refiring one for an out-of-band
+// track. latm.Depacketizer.Reset documents the asymmetry this relies on: it
+// clears an in-band config (Reset sets its ASC back to nil), but leaves an
+// out-of-band one untouched (Reset is a no-op there, so the ASC survives
+// unchanged). Re-seeding after Reset therefore lands on nil for in-band,
+// so the next resolved config's deliverLATM sees no snapshot to compare
+// against and reports it through OnCodecUpdate again, and on the same
+// unchanged bytes for out-of-band, so the next packet's deliverLATM sees no
+// change and never fires.
 func (tr *track) resetDepacketizer() {
 	if tr.aac != nil {
 		tr.aac.Reset()
@@ -632,6 +645,9 @@ func (tr *track) resetDepacketizer() {
 	if tr.latm != nil {
 		tr.latm.Reset()
 		tr.latmASC = nil
+		if asc := tr.latm.AudioSpecificConfig(); asc != nil {
+			tr.latmASC = append([]byte(nil), asc...)
+		}
 	}
 }
 

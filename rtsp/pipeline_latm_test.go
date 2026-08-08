@@ -339,3 +339,44 @@ func TestResetDepacketizerClearsLATMState(t *testing.T) {
 		t.Errorf("latmASC = % x after resetDepacketizer, want nil", tr.latmASC)
 	}
 }
+
+// TestResetDepacketizerLATMOutOfBandNeverRefires is the regression test for the
+// bug resetDepacketizer previously had: it cleared tr.latmASC unconditionally
+// on every SSRC reset, but latm.Depacketizer.Reset is a no-op for an
+// out-of-band config (the ASC is fixed for the session, not learned from the
+// stream), so the next packet's unchanged ASC compared against a just-cleared
+// nil snapshot looked like a change and fired a spurious OnCodecUpdate with
+// the wrong MuxConfigPresent:true. resetDepacketizer must re-seed tr.latmASC
+// from whatever tr.latm.AudioSpecificConfig() reports right after Reset, so
+// an out-of-band track's snapshot survives the reset unchanged and never
+// refires, across any number of resets and deliveries.
+func TestResetDepacketizerLATMOutOfBandNeverRefires(t *testing.T) {
+	t.Parallel()
+	desc := describedTrack{
+		codec:     audiostream.CodecMP4ALATM{StreamMuxConfig: latmV1, MuxConfigPresent: false},
+		clockRate: 44100,
+		media:     audiostream.MediaAudio,
+	}
+	tr := newTrack(0, desc, SetupOptions{}, 1, nil)
+	if tr.kind != deliverLATM {
+		t.Fatalf("kind = %d, want deliverLATM", tr.kind)
+	}
+	tr.baseSet.Store(true)
+	var rec codecUpdateRecording
+
+	pkt := rtp.Packet{Header: rtp.Header{Timestamp: 0, Marker: true}, Payload: latmV2}
+	tr.deliverLATM(pkt, rtp.Update{Timestamp: 0}, time.Unix(1, 0), rec.onFrame, rec.onCodecUpdate)
+
+	tr.resetDepacketizer()
+	if !bytes.Equal(tr.latmASC, latmASC) {
+		t.Fatalf("latmASC = % x after resetDepacketizer, want the out-of-band ASC % x to survive", tr.latmASC, latmASC)
+	}
+
+	tr.deliverLATM(pkt, rtp.Update{Timestamp: 0}, time.Unix(1, 0), rec.onFrame, rec.onCodecUpdate)
+
+	for _, e := range rec.events {
+		if e == latmEventUpdate {
+			t.Fatalf("OnCodecUpdate fired for an out-of-band track after an SSRC reset: events = %v", rec.events)
+		}
+	}
+}
