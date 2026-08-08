@@ -446,17 +446,16 @@ func (tr *track) deliverLATM(pkt rtp.Packet, up rtp.Update, now time.Time,
 	}
 
 	if asc := tr.latm.AudioSpecificConfig(); asc != nil && !bytes.Equal(asc, tr.latmASC) {
-		// One copy, not aliasing tr.latm's internal buffer, and shared as
-		// both the retained snapshot and the callback's payload: tr.latmASC
-		// is only ever replaced wholesale (never mutated in place, see the
-		// field doc), so handing the same backing array to onCodecUpdate
-		// cannot corrupt a later comparison.
-		resolved := append([]byte(nil), asc...)
-		tr.latmASC = resolved
+		// Retain an independent snapshot for the change comparison above.
+		tr.latmASC = append([]byte(nil), asc...)
 		if onCodecUpdate != nil {
+			// Hand the callback a SEPARATE copy. The OnCodecUpdate contract
+			// documents the slice as read-only, but a consumer that mutates it
+			// in place must not be able to reach back into tr.latmASC and skew
+			// a later comparison.
 			onCodecUpdate(tr.id, audiostream.CodecMP4ALATM{
 				MuxConfigPresent:    true,
-				AudioSpecificConfig: resolved,
+				AudioSpecificConfig: append([]byte(nil), asc...),
 			})
 		}
 	}

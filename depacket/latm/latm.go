@@ -24,8 +24,9 @@ const (
 	MaxStreamMuxConfigBytes = 512
 )
 
-// Sentinel errors. New and Depacketize return one of these (never any other
-// error value) and never panic.
+// Sentinel errors. New and Depacketize return one of these, matched with
+// errors.Is (a returned error may wrap a sentinel for context via fmt.Errorf
+// with %w), and never panic.
 var (
 	// ErrConfigInvalid is returned by New when Config is inconsistent: an
 	// out-of-band mode with an empty or unparseable StreamMuxConfig, or a

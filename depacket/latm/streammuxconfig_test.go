@@ -39,6 +39,13 @@ var v1UnsupportedAOT = []byte{0x40, 0x00, 0x50}
 // unconsumed GASpecificConfig bits it announces.
 var v1ExtensionFlag = []byte{0x40, 0x00, 0x24, 0x22, 0x3F, 0xC0}
 
+// v1ChannelConfigZero is v1 with the ASC channelConfiguration field set to 0
+// (byte3 0x20 -> 0x00, clearing the one set bit of the 4-bit field). Per ISO
+// 14496-3 that signals the channel layout comes from a program_config_element
+// this minimal parse does not decode, so parseASC must reject it with
+// ErrUnsupportedASC rather than mis-parse the PCE bits as later mux fields.
+var v1ChannelConfigZero = []byte{0x40, 0x00, 0x24, 0x00, 0x3F, 0xC0}
+
 // v4 is the in-band AudioMuxElement test vector (hand-verified,
 // docs/plans/2026-07-23-phase2-latm-plan.md, vector V4): useSameStreamMux
 // 0, an inline StreamMuxConfig equal to v1, PayloadLengthInfo 03, payload
@@ -189,6 +196,14 @@ func TestASCExtraction(t *testing.T) {
 	t.Run("extensionFlag set", func(t *testing.T) {
 		t.Parallel()
 		_, _, _, err := parseStreamMuxConfig(v1ExtensionFlag)
+		if !errors.Is(err, ErrUnsupportedASC) {
+			t.Fatalf("err = %v, want ErrUnsupportedASC", err)
+		}
+	})
+
+	t.Run("channelConfiguration zero", func(t *testing.T) {
+		t.Parallel()
+		_, _, _, err := parseStreamMuxConfig(v1ChannelConfigZero)
 		if !errors.Is(err, ErrUnsupportedASC) {
 			t.Fatalf("err = %v, want ErrUnsupportedASC", err)
 		}

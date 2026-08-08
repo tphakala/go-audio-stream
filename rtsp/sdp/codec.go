@@ -24,8 +24,8 @@ type DescribedTrack struct {
 	// from (the first entry of the m= format list), or -1 if the section
 	// listed no formats.
 	PayloadType int
-	// Codec is the resolved codec: CodecAAC, CodecOpus, CodecG711, CodecL16,
-	// or CodecUnknown. Never nil.
+	// Codec is the resolved codec: CodecAAC, CodecMP4ALATM, CodecOpus,
+	// CodecG711, CodecL16, or CodecUnknown. Never nil.
 	Codec audiostream.Codec
 	// ClockRate is the RTP clock rate in Hz, 0 if unknown.
 	ClockRate int

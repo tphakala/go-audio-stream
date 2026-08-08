@@ -262,8 +262,18 @@ func parseASC(r *bitReader) (asc []byte, frameLength uint32, err error) {
 		}
 	}
 
-	if _, ok := r.read(4); !ok { // channelConfiguration.
+	channelConfiguration, ok := r.read(4)
+	if !ok {
 		return nil, 0, ErrTruncated
+	}
+	if channelConfiguration == 0 {
+		// ISO 14496-3: channelConfiguration == 0 means the channel layout is
+		// carried in a program_config_element() that GASpecificConfig parses
+		// immediately after extensionFlag. This minimal parse does not decode
+		// the PCE, so reading on would interpret its bits as frameLengthType
+		// and the following mux fields. Reject it, matching the AOT 5/29 and
+		// extensionFlag rejections.
+		return nil, 0, fmt.Errorf("%w: channelConfiguration 0 (program_config_element)", ErrUnsupportedASC)
 	}
 
 	frameLengthFlag, ok := r.read(1)
