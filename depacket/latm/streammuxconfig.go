@@ -95,6 +95,10 @@ func parseStreamMuxConfig(buf []byte) (smc streamMuxConfig, asc []byte, frameLen
 	if !ok {
 		return streamMuxConfig{}, nil, 0, ErrTruncated
 	}
+	// numSubFrames is a 6-bit field, so numSubFrames+1 tops out at 64,
+	// exactly MaxSubFrames: this guard is currently a structural no-op. It
+	// stays as defensive coding against the named constant, so a future
+	// widening of the field (or a lowered MaxSubFrames) stays enforced.
 	if numSubFrames+1 > MaxSubFrames {
 		return streamMuxConfig{}, nil, 0, fmt.Errorf("%w: numSubFrames %d exceeds cap", ErrUnsupportedMux, numSubFrames)
 	}
