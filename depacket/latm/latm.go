@@ -68,8 +68,13 @@ type Config struct {
 // AU is one depacketized access unit: the AAC bytes and this AU's RTP
 // timestamp offset from the packet timestamp, in RTP clock ticks. The first
 // subframe has RTPOffset 0; each subsequent subframe adds the AAC frame
-// length. Data may alias the input payload or an internal buffer and is valid
-// only until the next Depacketize or Reset call; copy to retain.
+// length. In out-of-band mode (Config.MuxConfigPresent == false) Data
+// aliases the input payload passed to Depacketize. In in-band mode Data
+// aliases the Depacketizer's internal buffer instead: the in-band payload
+// bytes are bit-misaligned in the AudioMuxElement, so they are repacked
+// MSB-first into that buffer and cannot alias the input directly. Either
+// way, Data is valid only until the next Depacketize or Reset call; copy to
+// retain.
 type AU struct {
 	// Data is the raw AAC access-unit bytes, ready for an AAC decoder such as
 	// github.com/tphakala/go-aac.
@@ -89,7 +94,8 @@ type Depacketizer struct {
 	haveSMC     bool
 	asc         []byte
 	frameLength uint32
-	aus         []AU // reused scratch across calls
+	inBandData  []byte // reused scratch for in-band AU bytes repacked MSB-first from the bit-misaligned payload
+	aus         []AU   // reused scratch across calls
 }
 
 // New validates cfg and returns a Depacketizer. For the out-of-band mode it
