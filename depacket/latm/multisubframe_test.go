@@ -213,11 +213,14 @@ func TestSubframeCountCap(t *testing.T) {
 	t.Parallel()
 
 	// numSubFrames is a plain 6-bit StreamMuxConfig field (0..63), so
-	// numSubFrames+1 can never exceed MaxSubFrames (64) through any real
-	// bitstream: the cap is unreachable via New's public parse path. Both
-	// subtests force the retained smc directly (this file is package latm)
-	// to exercise the defensive guard Depacketize/depacketizeInBand apply
-	// before allocating any per-subframe AU.
+	// numSubFrames+1 tops out at 64, exactly MaxSubFrames: like the
+	// parse-time guard in parseStreamMuxConfigBits (see the "structural
+	// no-op" comment there), this cap is unreachable through any real
+	// bitstream, out-of-band or in-band. Both subtests force the retained
+	// smc past the cap directly (this file is package latm) to exercise
+	// the defensive guard Depacketize/depacketizeInBand apply before
+	// allocating any per-subframe AU, since New's public parse path can
+	// never drive numSubFrames there.
 
 	t.Run("out-of-band", func(t *testing.T) {
 		t.Parallel()
