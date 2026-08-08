@@ -102,6 +102,25 @@ type Config struct {
 	// The zero value, PreferTCP, reproduces the phase 1 TCP-interleaved
 	// behavior exactly.
 	Transport TransportPreference
+	// OnCodecUpdate, when non-nil, is called on the delivery goroutine (the
+	// reader goroutine in TCP mode, or the per-track UDP receive goroutine
+	// when the M6 UDP transport is in use) the first time a track's codec
+	// configuration is resolved from the media stream, and again if it
+	// changes mid-stream. Its purpose is to hand the consumer a codec value
+	// whose AudioSpecificConfig is now known when it was not known at
+	// Describe time, as happens for in-band MP4A-LATM (cpresent=1). It does
+	// NOT fire for a config already known at Describe (out-of-band LATM or
+	// MPEG4-GENERIC AAC), where the ASC is already on the Track.
+	//
+	// Ordering guarantee: for a given track, OnCodecUpdate fires BEFORE the
+	// OnFrame call for the first access unit decoded under the newly
+	// resolved config, so a consumer can initialize its decoder before the
+	// first frame reaches it. Like OnFrame, it runs on the delivery
+	// goroutine, must not block, and must not call Describe, Setup, Play, or
+	// Wait (Close and Stats are callback-safe). The codec value and any
+	// slices it carries are owned by the callee only for the duration of the
+	// call; copy AudioSpecificConfig to retain it.
+	OnCodecUpdate func(trackID int, codec audiostream.Codec)
 }
 
 // applyDefaults fills a zero or negative Timeout and a zero UserAgent with

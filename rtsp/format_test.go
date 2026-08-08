@@ -23,6 +23,13 @@ func TestTrackFormat(t *testing.T) {
 			wantChan: 0,
 		},
 		{
+			name:     "mp4a-latm zeroes geometry even when rtpmap present",
+			track:    Track{Codec: audiostream.CodecMP4ALATM{AudioSpecificConfig: []byte{0x12, 0x10}}, ClockRate: 44100, Channels: 2},
+			wantKind: audiostream.KindCompressed,
+			wantRate: 0,
+			wantChan: 0,
+		},
+		{
 			name:     "opus zeroes geometry",
 			track:    Track{Codec: audiostream.CodecOpus{}, ClockRate: 48000, Channels: 2},
 			wantKind: audiostream.KindCompressed,

@@ -59,3 +59,23 @@ type CodecUnknown struct {
 }
 
 func (CodecUnknown) isCodec() {}
+
+// CodecMP4ALATM is MPEG-4 AAC carried in MP4A-LATM (RFC 3016).
+// StreamMuxConfig holds the raw StreamMuxConfig bytes from the SDP config=
+// (which for LATM is a StreamMuxConfig, not a bare AudioSpecificConfig), and
+// MuxConfigPresent mirrors the fmtp cpresent parameter. A nil StreamMuxConfig
+// with MuxConfigPresent true means the config is carried in-band.
+//
+// AudioSpecificConfig is the AAC ASC bytes a decoder needs. For an
+// out-of-band config it is filled in at Describe time (extracted from
+// StreamMuxConfig); for an in-band config it is nil on the Track returned by
+// Describe and is delivered later through Config.OnCodecUpdate, whose codec
+// value carries the resolved ASC. This mirrors CodecAAC.AudioSpecificConfig,
+// so a consumer handles both codecs the same way once the field is populated.
+type CodecMP4ALATM struct {
+	StreamMuxConfig     []byte
+	MuxConfigPresent    bool
+	AudioSpecificConfig []byte
+}
+
+func (CodecMP4ALATM) isCodec() {}

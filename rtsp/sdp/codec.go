@@ -41,6 +41,9 @@ type DescribedTrack struct {
 	// AAC holds the parsed MPEG4-GENERIC fmtp parameters when Codec is a
 	// CodecAAC, and is nil for every other codec.
 	AAC *AACParams
+	// LATM holds the parsed MP4A-LATM fmtp parameters when Codec is a
+	// CodecMP4ALATM, and is nil for every other codec.
+	LATM *LATMParams
 }
 
 // AACParams holds the RFC 3640 MPEG4-GENERIC fmtp parameters the AAC
@@ -60,6 +63,23 @@ type AACParams struct {
 	// Config is the decoded AudioSpecificConfig from the config= hex, the
 	// same bytes stored in CodecAAC.AudioSpecificConfig.
 	Config []byte
+}
+
+// LATMParams holds the RFC 3016 MP4A-LATM fmtp parameters. Config is the
+// decoded StreamMuxConfig from the config= hex (nil when absent or not valid
+// hex); Cpresent mirrors the cpresent parameter (default true when absent);
+// Object is the audio object type from object= (0 when absent).
+type LATMParams struct {
+	// Config is the decoded StreamMuxConfig from the config= hex, the same
+	// bytes stored in CodecMP4ALATM.StreamMuxConfig.
+	Config []byte
+	// Cpresent mirrors the fmtp cpresent parameter: true means each
+	// AudioMuxElement carries its StreamMuxConfig in-band, false means it is
+	// carried out-of-band in Config. Absent defaults to true (RFC 3016).
+	Cpresent bool
+	// Object is the audio object type from the fmtp object= parameter, 0
+	// when absent.
+	Object int
 }
 
 // Codecs resolves every media section to a DescribedTrack. It never
@@ -135,6 +155,10 @@ func describeTrack(m *Media) DescribedTrack {
 		params := parseAACFmtp(m.FMTPs[pt])
 		t.Codec = audiostream.CodecAAC{AudioSpecificConfig: params.Config}
 		t.AAC = params
+	case "MP4A-LATM":
+		params := parseLATMFmtp(m.FMTPs[pt])
+		t.Codec = audiostream.CodecMP4ALATM{StreamMuxConfig: params.Config, MuxConfigPresent: params.Cpresent}
+		t.LATM = params
 	case "OPUS":
 		t.Codec = audiostream.CodecOpus{}
 	case "PCMU":
@@ -196,6 +220,43 @@ func parseAACFmtp(params string) *AACParams {
 			}
 		case "mode":
 			p.Mode = value
+		case "config":
+			if b, err := hex.DecodeString(value); err == nil {
+				p.Config = b
+			}
+		}
+	}
+	return p
+}
+
+// parseLATMFmtp parses a semicolon-separated MP4A-LATM fmtp parameter list,
+// mirroring parseAACFmtp: keys are matched case-insensitively, unknown keys
+// are ignored, and a bare flag with no '=' is skipped rather than indexed out
+// of range. It never fails: a missing or non-hex config yields a nil Config,
+// a missing or non-numeric object stays 0, and a missing or non-numeric
+// cpresent leaves the RFC 3016 default of present (true).
+func parseLATMFmtp(params string) *LATMParams {
+	p := &LATMParams{Cpresent: true}
+	for _, elem := range strings.Split(params, ";") {
+		// BINDING TOTALITY RULE (split guard): a bare flag parameter with no
+		// '=' splits to a single element and must be skipped, never indexed
+		// at [1].
+		kv := strings.SplitN(elem, "=", 2)
+		if len(kv) < 2 {
+			continue
+		}
+		key := strings.ToLower(strings.TrimSpace(kv[0]))
+		value := strings.TrimSpace(kv[1])
+
+		switch key {
+		case "cpresent":
+			if n, err := strconv.Atoi(value); err == nil {
+				p.Cpresent = n != 0
+			}
+		case "object":
+			if n, err := strconv.Atoi(value); err == nil {
+				p.Object = n
+			}
 		case "config":
 			if b, err := hex.DecodeString(value); err == nil {
 				p.Config = b

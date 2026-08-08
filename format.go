@@ -97,7 +97,7 @@ func PayloadKindFor(c Codec) PayloadKind {
 	switch v := c.(type) {
 	case CodecG711, CodecL16:
 		return KindPCMS16LE
-	case CodecAAC, CodecOpus, CodecMP3:
+	case CodecAAC, CodecMP4ALATM, CodecOpus, CodecMP3:
 		return KindCompressed
 	case CodecUnknown:
 		return KindOpaque
@@ -106,6 +106,8 @@ func PayloadKindFor(c Codec) PayloadKind {
 	case *CodecL16:
 		return ptrKind(v, KindPCMS16LE)
 	case *CodecAAC:
+		return ptrKind(v, KindCompressed)
+	case *CodecMP4ALATM:
 		return ptrKind(v, KindCompressed)
 	case *CodecOpus:
 		return ptrKind(v, KindCompressed)
