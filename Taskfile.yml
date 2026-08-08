@@ -53,6 +53,9 @@ tasks:
       - go test -run '^$' -fuzz '^FuzzReorderer$' -fuzztime=2m ./rtsp/rtp
       - go test -run '^$' -fuzz '^FuzzParseAUHeaders$' -fuzztime=2m ./depacket/aac
       - go test -run '^$' -fuzz '^FuzzDepacketize$' -fuzztime=2m ./depacket/aac
+      - go test -run '^$' -fuzz '^FuzzParseStreamMuxConfig$' -fuzztime=2m ./depacket/latm
+      - go test -run '^$' -fuzz '^FuzzDepacketizeOutOfBand$' -fuzztime=2m ./depacket/latm
+      - go test -run '^$' -fuzz '^FuzzDepacketizeInBand$' -fuzztime=2m ./depacket/latm
       - go test -run '^$' -fuzz '^FuzzParseResponse$' -fuzztime=2m ./rtsp
       - go test -run '^$' -fuzz '^FuzzParseRequest$' -fuzztime=2m ./rtsp
       - go test -run '^$' -fuzz '^FuzzParseInterleaved$' -fuzztime=2m ./rtsp

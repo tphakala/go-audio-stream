@@ -1,6 +1,7 @@
 package rtsp
 
 import (
+	"bytes"
 	"log/slog"
 	"maps"
 	"math"
@@ -11,6 +12,7 @@ import (
 	audiostream "github.com/tphakala/go-audio-stream"
 	"github.com/tphakala/go-audio-stream/depacket/aac"
 	"github.com/tphakala/go-audio-stream/depacket/g711"
+	"github.com/tphakala/go-audio-stream/depacket/latm"
 	"github.com/tphakala/go-audio-stream/depacket/opus"
 	"github.com/tphakala/go-audio-stream/rtsp/rtp"
 	"github.com/tphakala/go-audio-stream/rtsp/sdp"
@@ -48,6 +50,8 @@ const (
 	deliverG711
 	// deliverL16 byte-swaps big-endian L16 linear PCM to s16le.
 	deliverL16
+	// deliverLATM runs the RFC 3016 MP4A-LATM depacketizer.
+	deliverLATM
 )
 
 // track is one set-up track's pipeline state. Setup fully initializes it and
@@ -80,6 +84,16 @@ type track struct {
 	// Reader-owned, non-atomic. Valid to touch only after publication.
 	stream rtp.Stream
 	aac    *aac.Depacketizer
+	latm   *latm.Depacketizer
+	// latmASC is the last AudioSpecificConfig deliverLATM reported through
+	// Config.OnCodecUpdate (or, for an out-of-band track, the ASC newTrack
+	// seeded from Describe to suppress a redundant first callback). It is
+	// reader-owned: only deliverLATM and resetDepacketizer touch it, both on
+	// the delivery goroutine, so it needs no lock. resetDepacketizer
+	// re-seeds it from whatever survives an SSRC reset, so an in-band track
+	// re-announces its next resolved config while an out-of-band track
+	// (whose ASC survives the reset unchanged) never spuriously refires.
+	latmASC []byte
 	// wirePayloadType is the payload type this track has settled on and
 	// wirePTSet says whether it has settled. Until it settles, ptCandidate and
 	// ptRun track the current run of one undeclared type, so a track adopts a
@@ -184,6 +198,8 @@ func newTrack(id int, desc describedTrack, opts SetupOptions, rtcpCh int, logger
 	switch codec := desc.codec.(type) {
 	case audiostream.CodecAAC:
 		tr.configureAAC(desc.aac, logger)
+	case audiostream.CodecMP4ALATM:
+		tr.configureLATM(codec, logger)
 	case audiostream.CodecOpus:
 		tr.kind = deliverOpus
 	case audiostream.CodecG711:
@@ -253,6 +269,37 @@ func modeOf(params *sdp.AACParams) string {
 		return ""
 	}
 	return params.Mode
+}
+
+// configureLATM selects the MP4A-LATM depacketizer for a CodecMP4ALATM track,
+// falling back to raw delivery when latm.New rejects the config (an
+// out-of-band track with an unparseable or unsupported StreamMuxConfig; an
+// in-band track always succeeds here, since it learns its config from the
+// stream rather than from Setup).
+//
+// For an out-of-band track the depacketizer already knows its
+// AudioSpecificConfig from New, equal to what Describe already put on the
+// Track (see resolveLATMASC), so tr.latmASC is seeded with it here: the first
+// call to deliverLATM then sees no change and never fires OnCodecUpdate,
+// matching the documented "does not fire for a config already known at
+// Describe" contract. An in-band track has no config yet, so
+// dp.AudioSpecificConfig() is nil and tr.latmASC stays nil until the first
+// packet resolves one.
+func (tr *track) configureLATM(codec audiostream.CodecMP4ALATM, logger *slog.Logger) {
+	dp, err := latm.New(latm.Config{
+		MuxConfigPresent: codec.MuxConfigPresent,
+		StreamMuxConfig:  codec.StreamMuxConfig,
+	})
+	if err != nil {
+		tr.kind = deliverRaw
+		logWarn(logger, "latm fmtp invalid; delivering raw payloads", "error", err)
+		return
+	}
+	tr.kind = deliverLATM
+	tr.latm = dp
+	if asc := dp.AudioSpecificConfig(); asc != nil {
+		tr.latmASC = append([]byte(nil), asc...)
+	}
 }
 
 // ptAdoptThreshold is how many consecutive packets of one undeclared payload
@@ -332,6 +379,12 @@ func (tr *track) deliver(pkt rtp.Packet, up rtp.Update, now time.Time, onFrame f
 		tr.deliverG711(pkt, up, now, onFrame)
 	case deliverL16:
 		tr.deliverL16(pkt, up, now, onFrame)
+	case deliverLATM:
+		// nil onCodecUpdate: this generic dispatch has no Config to read one
+		// from, so it is test-only for LATM. Production delivery routes
+		// through Client.process, which calls tr.deliverLATM directly with
+		// cfg.OnCodecUpdate; see reader.go.
+		tr.deliverLATM(pkt, up, now, onFrame, nil)
 	default: // deliverRaw, and any kind a future codec adds without a path here.
 		tr.deliverRaw(pkt, up, now, onFrame)
 	}
@@ -348,6 +401,65 @@ func (tr *track) deliverAAC(pkt rtp.Packet, up rtp.Update, now time.Time, onFram
 		tr.malformed.Add(1)
 		return
 	}
+	if onFrame == nil {
+		return
+	}
+	for i := range aus {
+		gap := 0
+		if i == 0 {
+			gap = up.Gap
+		}
+		onFrame(audiostream.Frame{
+			TrackID:    tr.id,
+			Data:       aus[i].Data,
+			RTPTime:    pkt.Header.Timestamp,
+			PTS:        tr.ptsOf(up.Timestamp + uint64(aus[i].RTPOffset)),
+			ReceivedAt: now,
+			SeqGap:     gap,
+		})
+	}
+}
+
+// deliverLATM runs the RFC 3016 MP4A-LATM depacketizer and delivers one
+// frame per access unit, exactly like deliverAAC: RTPTime is the packet
+// timestamp for every AU, PTS interpolates by the AU's RTP offset, and SeqGap
+// is reported on the first AU only. A malformed packet counts as malformed
+// and yields no frame.
+//
+// Unlike the other codecs, it also carries the OnCodecUpdate integration
+// point: onCodecUpdate is called from HERE, between Depacketize and the AU
+// delivery loop below, which is what gives Config.OnCodecUpdate its ordering
+// guarantee (it precedes the OnFrame call for the first AU decoded under the
+// newly resolved config). The resolution runs on every packet, in-band or
+// out-of-band, but only fires the callback when the depacketizer's ASC is
+// now non-nil and differs from the tr.latmASC snapshot; configureLATM seeds
+// that snapshot for an out-of-band track, so this path is a no-op there.
+// onCodecUpdate may be nil (deliver()'s generic dispatch passes nil, since it
+// has no Config to read one from; Client.process passes cfg.OnCodecUpdate).
+func (tr *track) deliverLATM(pkt rtp.Packet, up rtp.Update, now time.Time,
+	onFrame func(audiostream.Frame), onCodecUpdate func(trackID int, codec audiostream.Codec),
+) {
+	aus, err := tr.latm.Depacketize(pkt.Payload, pkt.Header.Marker, pkt.Header.Timestamp)
+	if err != nil {
+		tr.malformed.Add(1)
+		return
+	}
+
+	if asc := tr.latm.AudioSpecificConfig(); asc != nil && !bytes.Equal(asc, tr.latmASC) {
+		// Retain an independent snapshot for the change comparison above.
+		tr.latmASC = append([]byte(nil), asc...)
+		if onCodecUpdate != nil {
+			// Hand the callback a SEPARATE copy. The OnCodecUpdate contract
+			// documents the slice as read-only, but a consumer that mutates it
+			// in place must not be able to reach back into tr.latmASC and skew
+			// a later comparison.
+			onCodecUpdate(tr.id, audiostream.CodecMP4ALATM{
+				MuxConfigPresent:    true,
+				AudioSpecificConfig: append([]byte(nil), asc...),
+			})
+		}
+	}
+
 	if onFrame == nil {
 		return
 	}
@@ -503,18 +615,46 @@ func (tr *track) ptsOf(ts uint64) time.Duration {
 	return time.Duration(sec)*time.Second + time.Duration(frac)
 }
 
-// resetDepacketizer clears any codec reassembly state on an SSRC change or a
-// sequence gap, so a lost fragment cannot corrupt the next access unit. Only
-// AAC carries cross-packet state; the other codecs are stateless.
+// resetDepacketizer clears codec reassembly state. AAC reassembly state is
+// cleared on BOTH a gap and an SSRC change (regardless of onSSRCChange), so a
+// lost fragment cannot corrupt the next access unit: AAC fragments an access
+// unit across packets, so a hole leaves partial state that must be dropped.
+// LATM does not fragment across packets, so it carries no cross-packet fragment
+// state, only a retained StreamMuxConfig. That config must SURVIVE a gap and be
+// reset only on an SSRC change (onSSRCChange true), where a new source may use a
+// different config. Clearing it on a gap would silence an in-band sender that
+// transmits the config once and thereafter sets useSameStreamMux (RFC 3016
+// permits this): a single lost packet would leave every later packet
+// ErrNoConfig for the rest of the session.
 //
-// The nil check is here and not in deliverAAC, which dereferences tr.aac
-// directly, because the two are asking different questions. deliverAAC runs only
-// for kind == deliverAAC, and configureAAC is the only writer of that kind and
-// sets tr.aac in the same two lines, so there it cannot be nil. This function
-// runs for EVERY track on every gap, most of which have no depacketizer at all.
-func (tr *track) resetDepacketizer() {
+// The nil checks are here and not in deliverAAC/deliverLATM, which
+// dereference tr.aac/tr.latm directly, because the two are asking different
+// questions. Those methods run only for their own kind, and configureAAC/
+// configureLATM are the only writers of that kind, setting the depacketizer
+// field in the same two lines, so there it cannot be nil. This function runs
+// for EVERY track on every gap, most of which have no depacketizer at all.
+//
+// On an SSRC change tr.latmASC is re-seeded from whatever survives
+// tr.latm.Reset(), rather than cleared unconditionally, so the change
+// re-announces the resolved config for an in-band track without spuriously
+// refiring one for an out-of-band track. latm.Depacketizer.Reset documents the
+// asymmetry this relies on: it clears an in-band config (Reset sets its ASC
+// back to nil), but leaves an out-of-band one untouched (Reset is a no-op
+// there, so the ASC survives unchanged). Re-seeding after Reset therefore lands
+// on nil for in-band, so the next resolved config's deliverLATM sees no
+// snapshot to compare against and reports it through OnCodecUpdate again, and on
+// the same unchanged bytes for out-of-band, so the next packet's deliverLATM
+// sees no change and never fires.
+func (tr *track) resetDepacketizer(onSSRCChange bool) {
 	if tr.aac != nil {
 		tr.aac.Reset()
+	}
+	if onSSRCChange && tr.latm != nil {
+		tr.latm.Reset()
+		tr.latmASC = nil
+		if asc := tr.latm.AudioSpecificConfig(); asc != nil {
+			tr.latmASC = append([]byte(nil), asc...)
+		}
 	}
 }
 

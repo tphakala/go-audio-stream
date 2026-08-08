@@ -386,7 +386,7 @@ func (c *Client) process(tr *track, pkt rtp.Packet, now time.Time) bool {
 	if up.SSRCReset {
 		tr.ssrcResets.Add(1)
 		tr.baseSet.Store(false)
-		tr.resetDepacketizer()
+		tr.resetDepacketizer(true)
 		// The RTP-to-NTP correspondence is per SSRC: the previous source's
 		// pair must not convert the new source's timestamps.
 		tr.srClock.Store(nil)
@@ -405,10 +405,20 @@ func (c *Client) process(tr *track, pkt rtp.Packet, now time.Time) bool {
 	}
 	if up.Gap > 0 {
 		tr.seqGaps.Add(uint64(up.Gap))
-		tr.resetDepacketizer()
+		tr.resetDepacketizer(false)
 	}
 
-	tr.deliver(pkt, up, now, c.cfg.OnFrame)
+	// LATM is routed around the generic dispatcher rather than through it,
+	// because it is the one codec whose delivery needs a second Client-level
+	// callback (OnCodecUpdate) alongside OnFrame: tr.deliver's signature is
+	// shared by every codec and carries only OnFrame, so a LATM track calls
+	// tr.deliverLATM directly here, where c.cfg is in scope. Every other kind
+	// still goes through tr.deliver unchanged.
+	if tr.kind == deliverLATM {
+		tr.deliverLATM(pkt, up, now, c.cfg.OnFrame, c.cfg.OnCodecUpdate)
+	} else {
+		tr.deliver(pkt, up, now, c.cfg.OnFrame)
+	}
 	tr.packets.Add(1)
 	tr.payloadBytes.Add(uint64(len(pkt.Payload)))
 	tr.publishRRSnapshot()

@@ -13,6 +13,7 @@ func TestPayloadKindFor(t *testing.T) {
 		want  audiostream.PayloadKind
 	}{
 		{"aac", audiostream.CodecAAC{}, audiostream.KindCompressed},
+		{"mp4a-latm", audiostream.CodecMP4ALATM{}, audiostream.KindCompressed},
 		{"opus", audiostream.CodecOpus{}, audiostream.KindCompressed},
 		{"g711 mu-law", audiostream.CodecG711{Law: audiostream.MuLaw}, audiostream.KindPCMS16LE},
 		{"g711 a-law", audiostream.CodecG711{Law: audiostream.ALaw}, audiostream.KindPCMS16LE},
@@ -20,11 +21,13 @@ func TestPayloadKindFor(t *testing.T) {
 		{"codec-unknown is opaque", audiostream.CodecUnknown{RTPMap: "X/8000"}, audiostream.KindOpaque},
 		{"nil codec defaults to unknown", nil, audiostream.KindUnknown},
 		{"pointer aac classifies like value", &audiostream.CodecAAC{}, audiostream.KindCompressed},
+		{"pointer mp4a-latm classifies like value", &audiostream.CodecMP4ALATM{}, audiostream.KindCompressed},
 		{"pointer opus classifies like value", &audiostream.CodecOpus{}, audiostream.KindCompressed},
 		{"pointer g711 classifies like value", &audiostream.CodecG711{Law: audiostream.MuLaw}, audiostream.KindPCMS16LE},
 		{"pointer l16 classifies like value", &audiostream.CodecL16{ClockRate: 44100, Channels: 2}, audiostream.KindPCMS16LE},
 		{"pointer codec-unknown is opaque", &audiostream.CodecUnknown{RTPMap: "X/8000"}, audiostream.KindOpaque},
 		{"typed-nil aac pointer is unknown", (*audiostream.CodecAAC)(nil), audiostream.KindUnknown},
+		{"typed-nil mp4a-latm pointer is unknown", (*audiostream.CodecMP4ALATM)(nil), audiostream.KindUnknown},
 		{"typed-nil l16 pointer is unknown", (*audiostream.CodecL16)(nil), audiostream.KindUnknown},
 	}
 	for _, tt := range tests {

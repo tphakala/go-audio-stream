@@ -4,9 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 
 	audiostream "github.com/tphakala/go-audio-stream"
+	"github.com/tphakala/go-audio-stream/depacket/latm"
 	"github.com/tphakala/go-audio-stream/rtsp/sdp"
 )
 
@@ -82,7 +84,7 @@ func (c *Client) Describe(ctx context.Context) ([]Track, error) {
 		return nil, cerr
 	}
 
-	tracks, base, described, rerr := resolveTracks(describeURL, resp)
+	tracks, base, described, rerr := resolveTracks(describeURL, resp, c.cfg.Logger)
 	if rerr != nil {
 		return nil, rerr
 	}
@@ -130,8 +132,9 @@ func checkSDPContentType(value string) error {
 // plus the internal descriptor slice from a DESCRIBE response. The session base
 // is Content-Base (or Content-Location, or the request URL) further resolved
 // against a non-"*" session-level a=control. Each track's control is resolved
-// against that base.
-func resolveTracks(describeURL string, resp *Response) ([]Track, string, []describedTrack, error) {
+// against that base. logger receives a warning when an out-of-band LATM
+// track's StreamMuxConfig cannot be parsed; see resolveLATMASC.
+func resolveTracks(describeURL string, resp *Response, logger *slog.Logger) ([]Track, string, []describedTrack, error) {
 	headerBase, err := ResolveBaseURL(describeURL, resp.Header.Get("Content-Base"), resp.Header.Get("Content-Location"))
 	if err != nil {
 		return nil, "", nil, err
@@ -159,10 +162,11 @@ func resolveTracks(describeURL string, resp *Response) ([]Track, string, []descr
 		if cerr != nil {
 			return nil, "", nil, cerr
 		}
+		codec := resolveLATMASC(dt.Codec, logger)
 		tracks = append(tracks, Track{
 			ID:          i,
 			Media:       dt.Media,
-			Codec:       dt.Codec,
+			Codec:       codec,
 			ClockRate:   dt.ClockRate,
 			Channels:    dt.Channels,
 			PayloadType: dt.PayloadType,
@@ -171,7 +175,7 @@ func resolveTracks(describeURL string, resp *Response) ([]Track, string, []descr
 		})
 		described = append(described, describedTrack{
 			control:     control,
-			codec:       dt.Codec,
+			codec:       codec,
 			payloadType: dt.PayloadType,
 			clockRate:   dt.ClockRate,
 			media:       dt.Media,
@@ -179,4 +183,32 @@ func resolveTracks(describeURL string, resp *Response) ([]Track, string, []descr
 		})
 	}
 	return tracks, base, described, nil
+}
+
+// resolveLATMASC extracts the out-of-band AudioSpecificConfig for a
+// CodecMP4ALATM track whose config is carried in the SDP config= rather than
+// in-band, so the Track Describe returns already carries the ASC a consumer
+// needs to initialize its decoder, without waiting for OnCodecUpdate. Every
+// other codec, and an in-band LATM track (MuxConfigPresent true), is returned
+// unchanged: an in-band ASC is not known until the stream carries it.
+//
+// This is the only place rtsp/describe.go touches depacket/latm: rtsp/sdp
+// does not parse the StreamMuxConfig itself, to keep the SDP parser free of
+// that dependency. A StreamMuxConfig latm.New cannot parse (an unsupported or
+// malformed out-of-band config) logs a warning and returns codec unchanged,
+// with AudioSpecificConfig left nil; the track still sets up and falls back
+// to raw delivery at newTrack (configureLATM makes the same latm.New call and
+// hits the same error).
+func resolveLATMASC(codec audiostream.Codec, logger *slog.Logger) audiostream.Codec {
+	lc, ok := codec.(audiostream.CodecMP4ALATM)
+	if !ok || lc.MuxConfigPresent || len(lc.StreamMuxConfig) == 0 {
+		return codec
+	}
+	dp, err := latm.New(latm.Config{MuxConfigPresent: false, StreamMuxConfig: lc.StreamMuxConfig})
+	if err != nil {
+		logWarn(logger, "latm out-of-band StreamMuxConfig invalid; AudioSpecificConfig unavailable at Describe", "error", err)
+		return codec
+	}
+	lc.AudioSpecificConfig = append([]byte(nil), dp.AudioSpecificConfig()...)
+	return lc
 }
