@@ -9,13 +9,15 @@
 A pure-Go library for pulling audio off the network and handing the consumer
 timestamped frames. Its primary source is an RTSP client for IP cameras and
 restreamers: it runs the DESCRIBE / SETUP / PLAY handshake and pulls RTP over
-interleaved TCP or, opt-in, unicast UDP, depacketizes AAC, Opus, G.711 and L16
-PCM, and delivers codec frames. A
-second source, the `httpsource` package, pulls audio off an HTTP(S)
-progressive endpoint: a WAV response or raw L16/PCM delivered as the same s16le
-frames, or a compressed MP3 (Icecast/SHOUTcast) stream framed and delivered as
-coded frames. Both sources satisfy one `Source` interface, so a consumer can
-drive either uniformly. No cgo, no runtime dependencies.
+interleaved TCP or, opt-in, unicast UDP, depacketizes AAC (including MP4A-LATM),
+Opus, G.711 and L16 PCM, and delivers codec frames. A second source, the
+`httpsource` package, pulls audio off an HTTP(S) progressive endpoint: a WAV
+response or raw L16/PCM delivered as the same s16le frames, or a compressed MP3
+or ADTS AAC (Icecast/SHOUTcast) stream framed and delivered as coded frames. A
+third source, `udpsource`, receives raw `udp://` / `rtp://` audio that no RTSP
+session negotiated, framing either RTP packets or interleaved s16 PCM datagrams
+the caller describes. All three satisfy one `Source` interface, so a consumer
+can drive any of them uniformly. No cgo, no runtime dependencies.
 
 Where the rest of the family reads and writes files, this library brings audio
 in off the network, so it sits one step upstream of them: the frames it delivers
@@ -36,8 +38,9 @@ Requires Go 1.26 or newer.
 
 ## Status
 
-**Phase 1 shipped.** The RTSP client and the HTTP progressive source both
-deliver frames; what remains is broad live-camera interop across vendors and
+**Core shipped.** The RTSP client, the HTTP progressive source, and the raw
+UDP source all deliver frames, with RTP/AVP unicast UDP transport and MP4A-LATM
+in the RTSP path. What remains is broad live-camera interop across vendors and
 long-running soak testing, not core functionality.
 
 - **RTSP 1.0 client**: the full DESCRIBE / SETUP / PLAY lifecycle over the
@@ -53,23 +56,35 @@ long-running soak testing, not core functionality.
   same frame shape the RTSP client delivers; big-endian `audio/L16` is
   byte-swapped on the way out. A compressed MP3 response (`audio/mpeg` or
   `audio/mp3`, as Icecast and SHOUTcast serve it) is framed on MPEG frame
-  boundaries and
-  delivered as `KindCompressed` coded frames for the consumer to decode, never
-  decoded here. Other compressed and container formats (AAC, Ogg, RF64/BW64) are
-  rejected at `Open` rather than mis-decoded, and Basic credentials over
-  plaintext http are refused unless explicitly allowed.
-- **Depacketizers**: AAC (RFC 3640 AAC-hbr), Opus (RFC 7587), G.711 mu-law and
-  A-law, and L16 linear PCM (RFC 3551, from an `L16` rtpmap or the static
-  payload types 10 and 11). G.711 and L16 are delivered as little-endian s16le
-  PCM, so a consumer gets PCM in one byte order regardless of which of the two
-  it received. An unrecognized codec, a non-audio track, or an AAC mode this
-  milestone does not decode degrades to raw payload delivery rather than
-  failing the session.
-- **Source interface**: both `rtsp.Client` and `httpsource.Client` implement the
-  root package's `audiostream.Source` (`Wait`, `Close`, `Stats`, `Info`), so a
-  supervisor can hold an `audiostream.Source` and drive any source's lifecycle,
-  read its statistics, and read its source-neutral identity (`SourceInfo`)
-  without importing the concrete package. Frame delivery is not part of the
+  boundaries, and an ADTS AAC response (`audio/aac` or `audio/aacp`) is framed
+  on ADTS frame boundaries with a synthesized AudioSpecificConfig, matching an
+  RTSP AAC track; both are delivered as `KindCompressed` coded frames for the
+  consumer to decode, never decoded here. Other compressed and container formats
+  (Ogg, RF64/BW64) are rejected at `Open` rather than mis-decoded, and Basic
+  credentials over plaintext http are refused unless explicitly allowed.
+- **Raw UDP source** (`udpsource`): one bound UDP socket for audio pushed
+  directly over UDP with no RTSP session. `ModeRTP` parses each datagram as an
+  RTP packet (sequence tracking, SSRC re-baseline, timestamp unwrap) and
+  depacketizes it by the caller-supplied payload type; `ModePCM` reads each
+  datagram as interleaved s16 PCM. Because there is no SDP, the caller supplies
+  the codec, clock rate, and channel count. G.711, L16, and Opus are framed
+  today; AAC over raw RTP, RTP reordering, and RTCP are deferred, so an
+  out-of-order datagram is dropped and surfaces as a sequence gap. An optional
+  source-IP filter and a read-idle watchdog bound what it accepts and how long a
+  silent sender keeps the session open.
+- **Depacketizers**: AAC (RFC 3640 AAC-hbr) and MP4A-LATM (RFC 3016, out-of-band
+  and in-band StreamMuxConfig), Opus (RFC 7587), G.711 mu-law and A-law, and L16
+  linear PCM (RFC 3551, from an `L16` rtpmap or the static payload types 10 and
+  11). G.711 and L16 are delivered as little-endian s16le PCM, so a consumer gets
+  PCM in one byte order regardless of which of the two it received. An
+  unrecognized codec, a non-audio track, or an AAC mode this milestone does not
+  decode degrades to raw payload delivery rather than failing the session.
+- **Source interface**: `rtsp.Client`, `httpsource.Client` and
+  `udpsource.Client` all implement the root package's `audiostream.Source`
+  (`Wait`, `Close`, `Stats`, `Info`), so a supervisor can hold an
+  `audiostream.Source` and drive any source's lifecycle, read its statistics,
+  and read its source-neutral identity (`SourceInfo`) without importing the
+  concrete package. Frame delivery is not part of the
   interface: each source registers `OnFrame` at construction, so delivery is
   race-free no matter how early the peer starts sending.
 - **Frame delivery**: each frame carries its track ID, a presentation time, the
@@ -78,10 +93,13 @@ long-running soak testing, not core functionality.
   from the RTP clock, the RTP timestamp is the packet's, and the lost-packet
   count comes from sequence-number tracking. The HTTP progressive source has no
   RTP clock: it derives the presentation time from the running delivered-sample
-  count and reports the RTP timestamp and the lost-packet count as 0. Per-track
-  receive statistics are available through `Stats`: accepted packets, payload
-  bytes (compressed audio) and wire bytes (network bandwidth), sequence gaps,
-  duplicates, malformed drops, SSRC resets, the wall-clock time of the last
+  count and reports the RTP timestamp and the lost-packet count as 0. The raw
+  UDP source mirrors whichever it resembles: `ModeRTP` carries the packet's RTP
+  timestamp and sequence-derived loss like the RTSP source, `ModePCM` derives
+  the presentation time from the delivered-sample count like the HTTP source.
+  Per-track receive statistics are available through `Stats`: accepted packets,
+  payload bytes (compressed audio) and wire bytes (network bandwidth), sequence
+  gaps, duplicates, malformed drops, SSRC resets, the wall-clock time of the last
   frame, and, on an RTCP-bearing source, the RTP-to-wall-clock `SenderClock`
   mapping from the most recent Sender Report. The snapshot is stamped with
   `CapturedAt`.
@@ -190,11 +208,48 @@ does not end the stream, `Close` does. For a raw L16/PCM endpoint whose media
 type does not carry a rate and channel count, supply them through
 `Config.Format`.
 
-### One interface over both
+### UDP
 
-`rtsp.Dial` and `httpsource.Open` both return a value that satisfies
-`audiostream.Source`, so code that does not care which kind it holds can take the
-interface and call `Wait`, `Close`, `Stats` and `Info` on it:
+`udpsource.Open` binds one UDP socket and returns an already-receiving source.
+There is no SDP, so for `ModeRTP` the caller supplies the payload type and its
+codec, clock rate, and channel count; `ModePCM` instead reads each datagram as
+interleaved s16 PCM described by `Config.Format`:
+
+```go
+import (
+    "context"
+
+    audiostream "github.com/tphakala/go-audio-stream"
+    "github.com/tphakala/go-audio-stream/udpsource"
+)
+
+ctx := context.Background()
+src, err := udpsource.Open(ctx, udpsource.Config{
+    ListenAddr:  ":5004",
+    Mode:        udpsource.ModeRTP,
+    PayloadType: 0, // PCMU
+    Codec:       audiostream.CodecG711{Law: audiostream.MuLaw},
+    ClockRate:   8000,
+    Channels:    1,
+    OnFrame: func(f audiostream.Frame) {
+        // Same frame shape as the other sources; f.Data aliases library memory
+        // and is valid only for this call, so copy it to keep it.
+        _ = f
+    },
+})
+if err != nil {
+    // handle
+}
+defer src.Close()
+
+err = src.Wait(ctx)
+```
+
+### One interface over all three
+
+`rtsp.Dial`, `httpsource.Open` and `udpsource.Open` each return a value that
+satisfies `audiostream.Source`, so code that does not care which kind it holds
+can take the interface and call `Wait`, `Close`, `Stats` and `Info` on it:
 
 ```go
 func drain(ctx context.Context, s audiostream.Source) error {
@@ -209,8 +264,9 @@ func drain(ctx context.Context, s audiostream.Source) error {
   `MediaKind`, `Stats`) and the source-agnostic `Source` interface with its
   `SourceInfo`.
 - `rtsp/`: the RTSP client, with the `rtsp/sdp/` and `rtsp/rtp/` wire parsers.
-- `httpsource/`: the HTTP(S) progressive PCM source (WAV and raw L16/PCM).
-- `depacket/`: the RTP payload depacketizers (`aac`, `opus`, `g711`).
+- `httpsource/`: the HTTP(S) progressive source (WAV, raw L16/PCM, MP3, ADTS AAC).
+- `udpsource/`: the raw `udp://` / `rtp://` source (RTP or interleaved-PCM datagrams).
+- `depacket/`: the RTP payload depacketizers (`aac`, `latm`, `opus`, `g711`).
 - `cmd/stream-doctor/`: the diagnostic CLI (a separate module; see Status).
 
 ## License
