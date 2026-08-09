@@ -68,6 +68,8 @@ func codecName(c audiostream.Codec) string {
 	switch v := c.(type) {
 	case audiostream.CodecAAC:
 		return "AAC"
+	case audiostream.CodecMP4ALATM:
+		return "AAC (MP4A-LATM)"
 	case audiostream.CodecOpus:
 		return "Opus"
 	case audiostream.CodecMP3:
@@ -90,14 +92,14 @@ func codecName(c audiostream.Codec) string {
 }
 
 // decodable reports whether the doctor can turn a track's audio into a WAV:
-// true for CodecAAC, CodecOpus, CodecG711, and CodecL16; false for
-// CodecUnknown and any non-audio track.
+// true for CodecAAC, CodecMP4ALATM (AAC access units), CodecOpus, CodecG711,
+// and CodecL16; false for CodecUnknown and any non-audio track.
 func decodable(t rtsp.Track) bool {
 	if t.Media != audiostream.MediaAudio {
 		return false
 	}
 	switch t.Codec.(type) {
-	case audiostream.CodecAAC, audiostream.CodecOpus, audiostream.CodecG711, audiostream.CodecL16:
+	case audiostream.CodecAAC, audiostream.CodecMP4ALATM, audiostream.CodecOpus, audiostream.CodecG711, audiostream.CodecL16:
 		return true
 	default:
 		return false
@@ -105,15 +107,24 @@ func decodable(t rtsp.Track) bool {
 }
 
 // ascHex returns the AAC AudioSpecificConfig as lowercase hex, or "" for a
-// non-AAC codec or an AAC track whose ASC was absent. The ASC encodes the
-// object type, sample rate, and channel configuration a maintainer needs to
-// reproduce an AAC decode issue. Hex only, so it carries no PII.
+// codec that carries no ASC or a track whose ASC was absent. Both CodecAAC and
+// CodecMP4ALATM (AAC in MP4A-LATM) carry one; an in-band LATM track has none
+// until its config is learned from a packet, so it renders "" at describe time.
+// The ASC encodes the object type, sample rate, and channel configuration a
+// maintainer needs to reproduce an AAC decode issue. Hex only, so it carries no
+// PII.
 func ascHex(c audiostream.Codec) string {
-	aac, ok := c.(audiostream.CodecAAC)
-	if !ok || len(aac.AudioSpecificConfig) == 0 {
+	var asc []byte
+	switch v := c.(type) {
+	case audiostream.CodecAAC:
+		asc = v.AudioSpecificConfig
+	case audiostream.CodecMP4ALATM:
+		asc = v.AudioSpecificConfig
+	}
+	if len(asc) == 0 {
 		return ""
 	}
-	return hex.EncodeToString(aac.AudioSpecificConfig)
+	return hex.EncodeToString(asc)
 }
 
 // writeTracksSection writes the "tracks" block: one labeled line per track and,

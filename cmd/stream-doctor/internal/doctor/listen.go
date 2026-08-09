@@ -19,8 +19,8 @@ import (
 
 // unsupportedListenReason is the ListenResult.SkipReason for a track whose
 // codec the listen check does not handle: CodecUnknown, and any non-audio
-// track, since only CodecAAC, CodecOpus, CodecG711, and CodecL16 have a
-// decode or pass-through path to PCM.
+// track, since only CodecAAC, CodecMP4ALATM, CodecOpus, CodecG711, and CodecL16
+// have a decode or pass-through path to PCM.
 const unsupportedListenReason = "codec not supported for the listen check"
 
 // opusMaxFrameSamples bounds a decode buffer for one Opus frame: 120 ms at
@@ -28,8 +28,9 @@ const unsupportedListenReason = "codec not supported for the listen check"
 const opusMaxFrameSamples = 5760
 
 // writeWAV decodes or passes through the captured frames for track and
-// writes a WAV to w. It dispatches on the track codec: AAC via go-aac,
-// Opus via go-opus, G.711 and L16 pass-through, all written with go-wav.
+// writes a WAV to w. It dispatches on the track codec: AAC (and MP4A-LATM,
+// which delivers AAC access units) via go-aac, Opus via go-opus, G.711 and L16
+// pass-through, all written with go-wav.
 // It returns a ListenResult describing what was written, or Skipped with a
 // reason when the track's codec or stream configuration cannot be turned
 // into PCM at all (an unsupported codec, or input a decoder refuses to
@@ -45,6 +46,8 @@ func writeWAV(w io.Writer, track rtsp.Track, frames []CapturedFrame, senderStart
 		return writeWAVOpus(w, track, frames, senderStart)
 	case audiostream.CodecAAC:
 		return writeWAVAAC(w, track, frames, senderStart)
+	case audiostream.CodecMP4ALATM:
+		return writeWAVLATM(w, track, frames, senderStart)
 	default:
 		return ListenResult{Skipped: true, SkipReason: unsupportedListenReason}, nil
 	}
@@ -141,19 +144,55 @@ func writeWAVOpus(w io.Writer, track rtsp.Track, frames []CapturedFrame, senderS
 // can length-prefix (a 2-byte big-endian field).
 const aacLengthPrefixMax = math.MaxUint16
 
-// writeWAVAAC rebuilds a length-prefixed raw AAC stream from the captured
-// access units (go-aac/pcm's raw-stream framing contract: a 2-byte
-// big-endian length followed by the access unit, repeated) and decodes it
-// against the track's AudioSpecificConfig. A decoder that refuses to
-// construct against the ASC (ErrUnsupported or ErrCorruptStream) is a
-// quirk of the source stream, not a tool failure, and is reported as
-// Skipped; any other failure to construct the decoder is a genuine error.
+// writeWAVAAC decodes a CodecAAC track's captured access units to WAV.
 func writeWAVAAC(w io.Writer, track rtsp.Track, frames []CapturedFrame, senderStart time.Time) (ListenResult, error) {
 	codec, ok := track.Codec.(audiostream.CodecAAC)
 	if !ok {
 		return ListenResult{Skipped: true, SkipReason: unsupportedListenReason}, nil
 	}
+	return decodeAACAccessUnits(w, frames, senderStart, codec.AudioSpecificConfig, "aac")
+}
 
+// writeWAVLATM decodes a CodecMP4ALATM track's captured access units to WAV.
+// MP4A-LATM (RFC 3016) delivers AAC access units, so the doctor decodes them
+// exactly like AAC using the ASC the depacketizer extracted from the
+// StreamMuxConfig. A track that carries no ASC at describe time is Skipped with
+// the reason naming the cause that applies, the same graceful degradation as a
+// quirky AAC ASC.
+func writeWAVLATM(w io.Writer, track rtsp.Track, frames []CapturedFrame, senderStart time.Time) (ListenResult, error) {
+	codec, ok := track.Codec.(audiostream.CodecMP4ALATM)
+	if !ok {
+		return ListenResult{Skipped: true, SkipReason: unsupportedListenReason}, nil
+	}
+	if len(codec.AudioSpecificConfig) == 0 {
+		// A CodecMP4ALATM track reaches describe time with no ASC in two
+		// families, and the diagnostic names the one that applies rather than
+		// handing the AAC decoder an empty config. In-band (cpresent=1, or
+		// absent, which defaults to in-band) learns its config from a later
+		// packet via OnCodecUpdate, which the doctor does not capture.
+		// Out-of-band (cpresent=0) resolves its ASC from the SDP StreamMuxConfig
+		// at Describe (rtsp.resolveLATMASC); a config that is missing or fails
+		// to parse leaves the ASC nil.
+		reason := "latm: no AudioSpecificConfig (in-band config not yet learned)"
+		if !codec.MuxConfigPresent {
+			reason = "latm: no AudioSpecificConfig (out-of-band StreamMuxConfig missing or did not parse)"
+		}
+		return ListenResult{Skipped: true, SkipReason: reason}, nil
+	}
+	return decodeAACAccessUnits(w, frames, senderStart, codec.AudioSpecificConfig, "latm")
+}
+
+// decodeAACAccessUnits rebuilds a length-prefixed raw AAC stream from the
+// captured access units (go-aac/pcm's raw-stream framing contract: a 2-byte
+// big-endian length followed by the access unit, repeated) and decodes it
+// against asc, the AudioSpecificConfig. reasonPrefix ("aac" or "latm") labels
+// the codec in a Skipped result's reason. A decoder that refuses to construct
+// against the ASC (ErrUnsupported or ErrCorruptStream, which includes an absent
+// ASC) is a quirk of the source stream, not a tool failure, and is reported as
+// Skipped; any other failure to construct the decoder is a genuine error.
+// Shared by the CodecAAC and CodecMP4ALATM paths, which differ only in where
+// the ASC comes from.
+func decodeAACAccessUnits(w io.Writer, frames []CapturedFrame, senderStart time.Time, asc []byte, reasonPrefix string) (ListenResult, error) {
 	var raw bytes.Buffer
 	for i := range frames {
 		data := frames[i].Data
@@ -169,10 +208,10 @@ func writeWAVAAC(w io.Writer, track rtsp.Track, frames []CapturedFrame, senderSt
 		raw.Write(data)
 	}
 
-	dec, err := aacpcm.NewDecoder(bytes.NewReader(raw.Bytes()), aacpcm.WithRawStream(codec.AudioSpecificConfig))
+	dec, err := aacpcm.NewDecoder(bytes.NewReader(raw.Bytes()), aacpcm.WithRawStream(asc))
 	if err != nil {
 		if errors.Is(err, aacpcm.ErrUnsupported) || errors.Is(err, aacpcm.ErrCorruptStream) {
-			return ListenResult{Skipped: true, SkipReason: "aac: " + err.Error()}, nil
+			return ListenResult{Skipped: true, SkipReason: reasonPrefix + ": " + err.Error()}, nil
 		}
 		return ListenResult{}, err
 	}
