@@ -264,6 +264,19 @@ func (r *runner) play() bool {
 func (r *runner) capture() {
 	audio := r.audio
 	cr, _ := r.prober.Collect(r.ctx, audio, r.opts.Duration)
+	// Adopt an in-band codec config the capture learned after Describe (an
+	// MP4A-LATM cpresent=1 AudioSpecificConfig delivered via OnCodecUpdate), so
+	// the tracks block renders its asc and the listen check can decode it.
+	// Nothing is learned for out-of-band LATM or any other source, and r.audio
+	// is left untouched in that case.
+	if cr.LearnedCodec != nil {
+		r.applyLearnedCodec(cr.LearnedCodec)
+		// Re-sync the local from the merged track so any later reader here sees
+		// the resolved ASC. decodable and computeStats below are unaffected (the
+		// codec type and clock rate do not change), so this is for consistency,
+		// not correctness today.
+		audio = r.audio
+	}
 	stats := computeStats(cr.Frames, &cr.Stats, audio.ClockRate, cr.Elapsed, cr.CapturedAt)
 
 	r.frames = cr.Frames
@@ -283,6 +296,37 @@ func (r *runner) capture() {
 		detail = fmt.Sprintf("%d frames, %s", len(cr.Frames), cr.Reason)
 	}
 	r.report.Steps = append(r.report.Steps, HandshakeStep{Name: stepCapture, OK: ok, Elapsed: cr.Elapsed, Detail: detail})
+}
+
+// applyLearnedCodec overlays a codec the capture learned after Describe onto
+// the three copies of the audio track the report holds. Two are read for their
+// codec: the selected audio track r.audio (decoded by the listen check) and the
+// matching r.report.Tracks entry (rendered in the tracks block). The third,
+// r.report.AudioTrack, is kept in sync defensively even though only its ID is
+// consumed today, so the copies never disagree. It merges only the learned
+// AudioSpecificConfig into the existing MP4A-LATM codec, preserving every other
+// resolved field, so nothing camera-controlled bypasses the Describe-time
+// scrubber (the ASC is raw bytes rendered as hex, with no PII). A learned codec
+// that is not MP4A-LATM or carries no ASC, or an audio track that is not
+// MP4A-LATM, is ignored: only an in-band LATM track learns a config today.
+func (r *runner) applyLearnedCodec(learned audiostream.Codec) {
+	lat, ok := learned.(audiostream.CodecMP4ALATM)
+	if !ok || len(lat.AudioSpecificConfig) == 0 {
+		return
+	}
+	cur, ok := r.audio.Codec.(audiostream.CodecMP4ALATM)
+	if !ok {
+		return
+	}
+	cur.AudioSpecificConfig = lat.AudioSpecificConfig
+	r.audio.Codec = cur
+	r.report.AudioTrack.Codec = cur
+	for i := range r.report.Tracks {
+		if r.report.Tracks[i].ID == r.audio.ID {
+			r.report.Tracks[i].Codec = cur
+			break
+		}
+	}
 }
 
 // finish sets the Report result phrase from the capture outcome. The ordering

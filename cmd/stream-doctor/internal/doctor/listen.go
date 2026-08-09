@@ -23,6 +23,17 @@ import (
 // have a decode or pass-through path to PCM.
 const unsupportedListenReason = "codec not supported for the listen check"
 
+// latmInBandUnlearnedReason and latmOutOfBandMissingReason are the two
+// ListenResult.SkipReason strings for an MP4A-LATM track that reached the listen
+// check with no AudioSpecificConfig, naming which family left it empty. They are
+// exported to the package (rather than inline literals) so a test can assert the
+// exact reason against the same constant the production path emits, turning a
+// reword into a build break rather than a silent string-compare drift.
+const (
+	latmInBandUnlearnedReason  = "latm: no AudioSpecificConfig (in-band config not yet learned)"
+	latmOutOfBandMissingReason = "latm: no AudioSpecificConfig (out-of-band StreamMuxConfig missing or did not parse)"
+)
+
 // opusMaxFrameSamples bounds a decode buffer for one Opus frame: 120 ms at
 // 48 kHz, the longest frame duration RFC 6716 defines.
 const opusMaxFrameSamples = 5760
@@ -165,17 +176,19 @@ func writeWAVLATM(w io.Writer, track rtsp.Track, frames []CapturedFrame, senderS
 		return ListenResult{Skipped: true, SkipReason: unsupportedListenReason}, nil
 	}
 	if len(codec.AudioSpecificConfig) == 0 {
-		// A CodecMP4ALATM track reaches describe time with no ASC in two
+		// A CodecMP4ALATM track reaches the listen check with no ASC in two
 		// families, and the diagnostic names the one that applies rather than
 		// handing the AAC decoder an empty config. In-band (cpresent=1, or
 		// absent, which defaults to in-band) learns its config from a later
-		// packet via OnCodecUpdate, which the doctor does not capture.
+		// packet via OnCodecUpdate; the doctor captures that (see
+		// rtspProber.onCodecUpdate) and overlays it, so the ASC is empty here
+		// only when no packet resolved the config within the capture window.
 		// Out-of-band (cpresent=0) resolves its ASC from the SDP StreamMuxConfig
 		// at Describe (rtsp.resolveLATMASC); a config that is missing or fails
 		// to parse leaves the ASC nil.
-		reason := "latm: no AudioSpecificConfig (in-band config not yet learned)"
+		reason := latmInBandUnlearnedReason
 		if !codec.MuxConfigPresent {
-			reason = "latm: no AudioSpecificConfig (out-of-band StreamMuxConfig missing or did not parse)"
+			reason = latmOutOfBandMissingReason
 		}
 		return ListenResult{Skipped: true, SkipReason: reason}, nil
 	}
