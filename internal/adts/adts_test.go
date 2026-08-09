@@ -175,7 +175,9 @@ func TestParseRejects(t *testing.T) {
 		{"sampling index 15 escape", buildADTS(adtsFields{profile: 1, srIdx: 15, chanCfg: 2, frameLen: 100})},
 		{"channel config 0 (PCE)", buildADTS(adtsFields{profile: 1, srIdx: 4, chanCfg: 0, frameLen: 100})},
 		{"frame length below header", buildADTS(adtsFields{profile: 1, srIdx: 4, chanCfg: 2, frameLen: MinHeaderLen - 1})},
+		{"frame length equals header (empty AU)", buildADTS(adtsFields{profile: 1, srIdx: 4, chanCfg: 2, frameLen: MinHeaderLen})},
 		{"frame length below CRC header", buildADTS(adtsFields{crc: true, profile: 1, srIdx: 4, chanCfg: 2, frameLen: CRCHeaderLen - 1})},
+		{"frame length equals CRC header (empty AU)", buildADTS(adtsFields{crc: true, profile: 1, srIdx: 4, chanCfg: 2, frameLen: CRCHeaderLen})},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()

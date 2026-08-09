@@ -32,8 +32,8 @@ func FuzzParse(f *testing.F) {
 		if h.HeaderLen != MinHeaderLen && h.HeaderLen != CRCHeaderLen {
 			t.Fatalf("HeaderLen %d is neither %d nor %d", h.HeaderLen, MinHeaderLen, CRCHeaderLen)
 		}
-		if h.FrameLen < h.HeaderLen {
-			t.Fatalf("FrameLen %d < HeaderLen %d with nil error", h.FrameLen, h.HeaderLen)
+		if h.FrameLen <= h.HeaderLen {
+			t.Fatalf("FrameLen %d <= HeaderLen %d with nil error (empty AU not rejected)", h.FrameLen, h.HeaderLen)
 		}
 		if asc := h.AudioSpecificConfig(); len(asc) != 2 {
 			t.Fatalf("AudioSpecificConfig len %d, want 2", len(asc))

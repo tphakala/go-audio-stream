@@ -378,19 +378,16 @@ func TestAACFramerCountsTruncatedTail(t *testing.T) {
 	}
 }
 
-func TestAACFramerEmptyPayload(t *testing.T) {
-	// A frame whose length equals its header (a zero-length access unit) is
-	// delivered as an empty AU, exercising the frameLen==headerLen boundary.
-	f1, _ := adtsFrame(1, 0)
+func TestAACFramerRejectsEmptyFrame(t *testing.T) {
+	// A frame whose length equals its header carries a zero-length access unit,
+	// which the parser rejects, so the framer never delivers an empty AU: such a
+	// "frame" is treated as a false sync during resync.
+	f1, _ := adtsFrame(1, 0) // frameLen == MinHeaderLen
 	f2, _ := adtsFrame(2, 0)
 	s := &adtsStream{}
 	s.feed(append(append([]byte(nil), f1...), f2...))
 	s.setEOF()
-	got := drainAll(s)
-	if len(got) != 2 {
-		t.Fatalf("empty-payload frames: got %d AUs, want 2", len(got))
-	}
-	if len(got[0]) != 0 || len(got[1]) != 0 {
-		t.Errorf("empty-payload AU lengths = %d/%d, want 0/0", len(got[0]), len(got[1]))
+	if got := drainAll(s); len(got) != 0 {
+		t.Fatalf("delivered %d AUs from zero-length frames, want 0 (empty frames rejected)", len(got))
 	}
 }

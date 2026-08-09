@@ -26,7 +26,8 @@ const SamplesPerFrame = 1024
 // field not 00, the sampling-frequency index reserved (13, 14) or the escape
 // value (15) whose explicit frequency a 2-byte ASC cannot express, the channel
 // configuration 0 (its layout is carried by an in-band program_config_element a
-// 2-byte ASC cannot express), or the frame length shorter than its own header.
+// 2-byte ASC cannot express), or a frame length no greater than its own header,
+// which would carry a zero-length access unit.
 var ErrInvalidHeader = errors.New("adts: invalid frame header")
 
 // sampleRateHz maps the 4-bit sampling_frequency_index to a rate in Hz. Indices
@@ -114,7 +115,10 @@ func Parse(b []byte) (Header, error) {
 	if !protectionAbsent {
 		headerLen = CRCHeaderLen
 	}
-	if frameLen < headerLen {
+	if frameLen <= headerLen {
+		// A frame no longer than its header carries a zero-length access unit,
+		// which a real AAC encoder never emits: reject it rather than deliver an
+		// empty frame (and treat it as a false sync during resync).
 		return Header{}, ErrInvalidHeader
 	}
 
