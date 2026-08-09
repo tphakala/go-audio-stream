@@ -42,6 +42,7 @@ type udpHandshakeResult struct {
 func bindFakeClientUDPPair(t *testing.T) (rtpConn, rtcpConn *net.UDPConn) {
 	t.Helper()
 	const maxAttempts = 20
+	var lastErr error
 	for range maxAttempts {
 		rtp, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
 		if err != nil {
@@ -52,7 +53,10 @@ func bindFakeClientUDPPair(t *testing.T) (rtpConn, rtcpConn *net.UDPConn) {
 		if err != nil {
 			// P+1 is already bound (or out of range at the top of the ephemeral
 			// space). Drop this RTP socket and try a fresh ephemeral port rather
-			// than failing on the assumption that P+1 is free.
+			// than failing on the assumption that P+1 is free. Keep the last
+			// error so a persistent non-collision failure (e.g. FD exhaustion)
+			// is reported rather than hidden behind the attempt count.
+			lastErr = err
 			_ = rtp.Close()
 			continue
 		}
@@ -60,7 +64,7 @@ func bindFakeClientUDPPair(t *testing.T) (rtpConn, rtcpConn *net.UDPConn) {
 		t.Cleanup(func() { _ = rtcp.Close() })
 		return rtp, rtcp
 	}
-	t.Fatalf("bindFakeClientUDPPair: no adjacent free UDP port pair after %d attempts", maxAttempts)
+	t.Fatalf("bindFakeClientUDPPair: no adjacent free UDP port pair after %d attempts; last RTCP bind error: %v", maxAttempts, lastErr)
 	return nil, nil // unreachable: t.Fatalf ends the test
 }
 
