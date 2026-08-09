@@ -28,23 +28,44 @@ type udpHandshakeResult struct {
 	pairs []ChannelPair
 }
 
-// bindFakeClientUDPPair binds a consecutive UDP port pair on 127.0.0.1,
-// standing in for the real client's openMediaSockets, and registers both
-// sockets for cleanup on t.
+// bindFakeClientUDPPair binds a consecutive UDP port pair (RTP at an ephemeral
+// port P, RTCP at P+1) on 127.0.0.1, standing in for the real client's
+// openMediaSockets, and registers both sockets for cleanup on t.
+//
+// It does NOT assume P+1 is free. After binding RTP to an OS-assigned ephemeral
+// port it tries RTCP at P+1, and on a bind collision it drops that RTP socket
+// and retries with a fresh ephemeral port. Windows allocates ephemeral ports
+// and reuses socket addresses in a way that intermittently leaves P+1 already
+// bound, which made the UDP handshake tests flaky on Windows CI (Linux does not
+// hit it); retrying until an adjacent pair is free removes the flake without
+// reserving a fixed client port range.
 func bindFakeClientUDPPair(t *testing.T) (rtpConn, rtcpConn *net.UDPConn) {
 	t.Helper()
-	rtpConn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
-	if err != nil {
-		t.Fatalf("ListenUDP client RTP: %v", err)
+	const maxAttempts = 20
+	var lastErr error
+	for range maxAttempts {
+		rtp, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+		if err != nil {
+			t.Fatalf("ListenUDP client RTP: %v", err)
+		}
+		rtpPort := rtp.LocalAddr().(*net.UDPAddr).Port
+		rtcp, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: rtpPort + 1})
+		if err != nil {
+			// P+1 is already bound (or out of range at the top of the ephemeral
+			// space). Drop this RTP socket and try a fresh ephemeral port rather
+			// than failing on the assumption that P+1 is free. Keep the last
+			// error so a persistent non-collision failure (e.g. FD exhaustion)
+			// is reported rather than hidden behind the attempt count.
+			lastErr = err
+			_ = rtp.Close()
+			continue
+		}
+		t.Cleanup(func() { _ = rtp.Close() })
+		t.Cleanup(func() { _ = rtcp.Close() })
+		return rtp, rtcp
 	}
-	t.Cleanup(func() { _ = rtpConn.Close() })
-	clientRTPPort := rtpConn.LocalAddr().(*net.UDPAddr).Port
-	rtcpConn, err = net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: clientRTPPort + 1})
-	if err != nil {
-		t.Fatalf("ListenUDP client RTCP: %v", err)
-	}
-	t.Cleanup(func() { _ = rtcpConn.Close() })
-	return rtpConn, rtcpConn
+	t.Fatalf("bindFakeClientUDPPair: no adjacent free UDP port pair after %d attempts; last RTCP bind error: %v", maxAttempts, lastErr)
+	return nil, nil // unreachable: t.Fatalf ends the test
 }
 
 // clientPort returns conn's bound local UDP port.
