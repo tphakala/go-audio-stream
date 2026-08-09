@@ -17,6 +17,7 @@ func TestCodecName(t *testing.T) {
 		want  string
 	}{
 		{"aac", audiostream.CodecAAC{}, "AAC"},
+		{"mp4a-latm", audiostream.CodecMP4ALATM{}, "AAC (MP4A-LATM)"},
 		{"opus", audiostream.CodecOpus{}, "Opus"},
 		{"mp3", audiostream.CodecMP3{}, "MP3"},
 		{"g711 mu-law", audiostream.CodecG711{Law: audiostream.MuLaw}, "PCMU (G.711 mu-law)"},
@@ -61,6 +62,7 @@ func TestDecodable(t *testing.T) {
 		want  bool
 	}{
 		{"aac audio", rtsp.Track{Media: audiostream.MediaAudio, Codec: audiostream.CodecAAC{}}, true},
+		{"mp4a-latm audio", rtsp.Track{Media: audiostream.MediaAudio, Codec: audiostream.CodecMP4ALATM{}}, true},
 		{"opus audio", rtsp.Track{Media: audiostream.MediaAudio, Codec: audiostream.CodecOpus{}}, true},
 		{"g711 audio", rtsp.Track{Media: audiostream.MediaAudio, Codec: audiostream.CodecG711{}}, true},
 		{"l16 audio", rtsp.Track{Media: audiostream.MediaAudio, Codec: audiostream.CodecL16{}}, true},
@@ -72,6 +74,30 @@ func TestDecodable(t *testing.T) {
 			t.Parallel()
 			if got := decodable(tc.track); got != tc.want {
 				t.Errorf("decodable(%+v) = %v, want %v", tc.track, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestASCHex(t *testing.T) {
+	t.Parallel()
+	asc := []byte{0x12, 0x10}
+	cases := []struct {
+		name  string
+		codec audiostream.Codec
+		want  string
+	}{
+		{"aac with asc", audiostream.CodecAAC{AudioSpecificConfig: asc}, "1210"},
+		{"latm with asc", audiostream.CodecMP4ALATM{AudioSpecificConfig: asc}, "1210"},
+		{"aac without asc", audiostream.CodecAAC{}, ""},
+		{"in-band latm without asc", audiostream.CodecMP4ALATM{MuxConfigPresent: true}, ""},
+		{"non-aac codec carries no asc", audiostream.CodecOpus{}, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := ascHex(tc.codec); got != tc.want {
+				t.Errorf("ascHex(%T) = %q, want %q", tc.codec, got, tc.want)
 			}
 		})
 	}
