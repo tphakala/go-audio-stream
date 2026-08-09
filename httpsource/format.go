@@ -17,8 +17,8 @@ const maxChannels = 8
 
 // resolveFormat dispatches on the response Content-Type and fills the reader's
 // immutable format fields: for a PCM source the rate, channels, frameBytes,
-// swap, and data budget; for a compressed source (MP3) the codec and the frame
-// scanner. It runs during Open, before the reader goroutine spawns, so those
+// swap, and data budget; for a compressed source (MP3 or AAC) the codec and the
+// frame scanner. It runs during Open, before the reader goroutine spawns, so those
 // fields need no synchronization afterward.
 //
 // Precedence for rate and channels is WAV header > Content-Type parameters >
@@ -38,6 +38,15 @@ func (c *Client) resolveFormat(resp *http.Response) error {
 		// reader frames it into coded frames; it is delivered compressed, never
 		// decoded.
 		return c.setupMP3()
+	case "audio/aac", "audio/aacp":
+		// A raw ADTS AAC byte stream, as Icecast and SHOUTcast AAC endpoints and
+		// progressive .aac responses serve it. The reader frames it into raw
+		// access units and synthesizes the AudioSpecificConfig from the ADTS
+		// header, so a consumer decodes it exactly like an RTSP AAC track; it is
+		// delivered compressed, never decoded. audio/aacp (HE-AAC) is framed the
+		// same way: its base-layer ADTS is AAC-LC with implicit SBR a decoder
+		// detects from the bitstream.
+		return c.setupAAC()
 	case "application/octet-stream", "audio/pcm", "":
 		// Empty covers both an absent Content-Type and one mime.ParseMediaType
 		// could not parse (it returns "" and an error, ignored here): sniff the
@@ -46,7 +55,7 @@ func (c *Client) resolveFormat(resp *http.Response) error {
 		// pair that mimics a frame sync, so MP3 requires an explicit media type.
 		return c.setupSniff()
 	default:
-		// A named type this source does not carry (audio/aac, audio/ogg, ...).
+		// A named type this source does not carry (audio/ogg, audio/flac, ...).
 		// Failing fast here is the no-transcode contract: this source delivers
 		// PCM or a framed compressed bitstream it recognizes, never an
 		// unrecognized codec's bytes mislabeled as something it is not.

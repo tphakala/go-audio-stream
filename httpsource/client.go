@@ -57,12 +57,12 @@ type Client struct {
 	swap       bool
 
 	// Compressed-source state, set by resolveFormat during Open and owned by the
-	// reader afterward. codec is non-nil for a compressed source (MP3), which
-	// makes Format report KindCompressed and the reader frame the body through
-	// framer rather than deliver fixed-width PCM. mediaPTS is the running
+	// reader afterward. codec is non-nil for a compressed source (MP3 or AAC),
+	// which makes Format report KindCompressed and the reader frame the body
+	// through framer rather than deliver fixed-width PCM. mediaPTS is the running
 	// presentation time, advanced one frame's duration per delivered frame.
 	codec    audiostream.Codec
-	framer   *mp3Stream
+	framer   compressedFramer
 	mediaPTS time.Duration
 
 	// Data budget, set during Open and owned by the reader afterward. When
@@ -386,7 +386,7 @@ func classifyOpenErr(ctx context.Context, err error, timedOut *atomic.Bool) erro
 }
 
 // Format returns the source's audio format descriptor. A compressed source
-// (MP3) reports its codec with Kind KindCompressed and, per the AudioFormat
+// (MP3 or AAC) reports its codec with Kind KindCompressed and, per the AudioFormat
 // contract, SampleRate and Channels 0: the true geometry is the consumer's
 // decoder's to determine (each delivered frame's header also carries it). A PCM
 // source (WAV or raw/L16) reports KindPCMS16LE at the resolved sample rate and
@@ -518,15 +518,15 @@ func (c *Client) recoverReader() {
 	}
 }
 
-// readLoop drives delivery for the source's life. A compressed source (MP3) is
-// delegated to readMP3, which frames the body into coded frames. Otherwise it
-// runs the PCM path: accumulate body bytes into rbuf and deliver each whole
-// sample-frame prefix, carrying the sub-frame remainder across reads so a frame
-// split by a read boundary is never delivered half. It runs until a terminal
-// condition, whose shutdown it funnels before returning.
+// readLoop drives delivery for the source's life. A compressed source (MP3 or
+// AAC) is delegated to readCompressed, which frames the body into coded frames.
+// Otherwise it runs the PCM path: accumulate body bytes into rbuf and deliver
+// each whole sample-frame prefix, carrying the sub-frame remainder across reads
+// so a frame split by a read boundary is never delivered half. It runs until a
+// terminal condition, whose shutdown it funnels before returning.
 func (c *Client) readLoop() {
 	if c.framer != nil {
-		c.readMP3()
+		c.readCompressed()
 		return
 	}
 	fill := 0

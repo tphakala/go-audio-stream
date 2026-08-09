@@ -35,8 +35,9 @@ var (
 	// for every failed request.
 	ErrBadStatus = errors.New("httpsource: non-success response status")
 	// ErrUnsupportedFormat reports a response this source will not decode: a
-	// Content-Type it does not carry (audio/aac, audio/ogg and the rest;
-	// audio/mpeg is framed as MP3 and delivered compressed), a WAV audio format
+	// Content-Type it does not carry (audio/ogg, audio/flac and the rest;
+	// audio/mpeg is framed as MP3 and audio/aac as ADTS AAC, both delivered
+	// compressed), a WAV audio format
 	// other than 16-bit integer PCM (including a
 	// WAVE_FORMAT_EXTENSIBLE chunk whose cbSize is smaller than 22, whose
 	// SubFormat is not PCM, or whose valid or container bits per sample is not

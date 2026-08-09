@@ -2,7 +2,6 @@ package httpsource
 
 import (
 	"encoding/binary"
-	"errors"
 	"time"
 
 	audiostream "github.com/tphakala/go-audio-stream"
@@ -48,6 +47,9 @@ type mp3Stream struct {
 	// final frame). It is the framer's malformed-frame equivalent.
 	gaps uint64
 }
+
+// compile-time: mp3Stream implements compressedFramer.
+var _ compressedFramer = (*mp3Stream)(nil)
 
 // feed appends freshly read body bytes to the buffer.
 func (s *mp3Stream) feed(p []byte) {
@@ -231,84 +233,35 @@ func (c *Client) setupMP3() error {
 	return nil
 }
 
-// readMP3 is the reader loop for a compressed MPEG audio body. It accumulates
-// body bytes into the framer and delivers each whole coded frame, carrying a
-// partial frame across reads. It runs until a terminal condition, whose
-// shutdown it funnels before returning.
-func (c *Client) readMP3() {
-	for {
-		select {
-		case <-c.closing:
-			return
-		default:
-		}
-		n, err := c.br.Read(c.rbuf[:])
-		if n > 0 {
-			now := time.Now()
-			c.lastReadAt.Store(now.UnixNano())
-			c.framer.feed(c.rbuf[:n])
-			c.drainMP3(now)
-		}
-		if err != nil {
-			cause := c.classifyReadErr(err)
-			if errors.Is(cause, ErrStreamEnded) {
-				// Deliver a final frame that has no following header to confirm it,
-				// then count any truncated tail.
-				c.framer.ended = true
-				c.drainMP3(time.Now())
-				c.framer.finish()
-				c.malformed.Store(c.framer.gaps)
-			}
-			c.initiateShutdown(cause)
-			return
-		}
+// nextFrame adapts mp3Stream to the compressedFramer interface. An MP3 frame is
+// delivered whole, since its inline header is part of the coded frame a decoder
+// consumes, so the deliverable payload IS the frame; the duration comes from the
+// header the framer already parsed.
+func (s *mp3Stream) nextFrame() (data []byte, dur time.Duration, ok bool) {
+	frame, hdr, ok := s.next()
+	if !ok {
+		return nil, 0, false
 	}
+	return frame, mp3FrameDuration(hdr), true
 }
 
-// drainMP3 delivers every whole frame the framer can yield, then compacts its
-// buffer and publishes the running discard count.
-func (c *Client) drainMP3(now time.Time) {
-	for {
-		frame, hdr, ok := c.framer.next()
-		if !ok {
-			break
-		}
-		c.deliverCompressed(frame, hdr, now)
-	}
-	c.framer.compact()
-	c.malformed.Store(c.framer.gaps)
-}
+// setEOF marks the stream ended so next delivers the final frame that has no
+// following header to confirm it.
+func (s *mp3Stream) setEOF() { s.ended = true }
 
-// deliverCompressed counts one coded-frame delivery and hands it to OnFrame. The
-// frame's PTS is the presentation time of its first sample, computed from the
-// running media time before this frame advances it, so the first frame is at
-// PTS 0 and successive PTSs increase by each frame's duration. frame aliases
-// reader-owned memory and is valid only during the callback.
-func (c *Client) deliverCompressed(frame []byte, hdr mp3.Header, now time.Time) {
-	c.packets.Add(1)
-	c.payload.Add(uint64(len(frame)))
-	pts := c.mediaPTS
-	c.advanceMediaPTS(hdr)
-	if c.cfg.OnFrame == nil {
-		return
-	}
-	c.cfg.OnFrame(audiostream.Frame{
-		TrackID:    0,
-		Data:       frame,
-		RTPTime:    0,
-		PTS:        pts,
-		ReceivedAt: now,
-		SeqGap:     0,
-	})
-}
+// gapCount is the running discard count, surfaced as the source's malformed
+// counter.
+func (s *mp3Stream) gapCount() uint64 { return s.gaps }
 
-// advanceMediaPTS adds one frame's duration to the running media time. The
-// duration is SamplesPerFrame/SampleRate seconds; accumulating it per frame,
-// each term bounded by a single frame, avoids the large-multiply overflow the
-// PCM path guards against on a long stream.
-func (c *Client) advanceMediaPTS(hdr mp3.Header) {
+// mp3FrameDuration is one frame's presentation duration, SamplesPerFrame /
+// SampleRate seconds. Each term is bounded by a single frame, so accumulating it
+// per frame (in deliverCompressed) avoids the large-multiply overflow the PCM
+// path guards against on a long stream. A non-positive rate, which a parsed
+// header never produces, yields 0 so a malformed frame does not advance the
+// clock.
+func mp3FrameDuration(hdr mp3.Header) time.Duration {
 	if hdr.SampleRate <= 0 {
-		return
+		return 0
 	}
-	c.mediaPTS += time.Duration(hdr.SamplesPerFrame) * time.Second / time.Duration(hdr.SampleRate)
+	return time.Duration(hdr.SamplesPerFrame) * time.Second / time.Duration(hdr.SampleRate)
 }
