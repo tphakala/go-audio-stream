@@ -2,12 +2,13 @@
 // go-audio-stream. It opens a single GET against an endpoint that streams
 // audio, resolves the audio format from the response, and delivers frames to
 // Config.OnFrame on a reader goroutine: little-endian s16le PCM for a PCM
-// source, or whole coded frames for a compressed source (MP3), the same frame
-// shape the rtsp client delivers. A Client satisfies
+// source, whole coded frames for a compressed MP3 source, or raw AAC access
+// units for a compressed AAC source, the same frame shape the rtsp client
+// delivers. A Client satisfies
 // audiostream.Source, so a supervisor can drive its lifecycle and read its
 // statistics and identity without importing this package.
 //
-// Three body formats are supported. A WAV response (audio/wav and its aliases, or
+// Four body formats are supported. A WAV response (audio/wav and its aliases, or
 // a body sniffed to begin with a RIFF/WAVE signature) is parsed by a minimal
 // streaming RIFF parser that requires 16-bit integer PCM; its fmt chunk is
 // authoritative for the rate and channel count, and a bounded data chunk ends
@@ -42,8 +43,20 @@
 // Icy-MetaData header, so an Icecast or SHOUTcast server streams the audio
 // without interleaving ICY metadata blocks; there is no ICY metadata parsing.
 //
+// A compressed AAC response (audio/aac or audio/aacp) is framed as ADTS the same
+// way. A streaming scanner splits the body on ADTS frame boundaries,
+// resynchronizing past garbage or a false sync, strips each frame's ADTS header,
+// and delivers the raw access unit as one OnFrame call with an increasing
+// per-frame PTS. The AudioSpecificConfig a decoder needs is not in any container
+// header, so it is synthesized from the first frame's ADTS header during Open;
+// such a track reports CodecAAC (carrying that config) and KindCompressed, and
+// decodes through the same path as an RTSP AAC track. audio/aacp (HE-AAC) is
+// framed identically: its base-layer ADTS is AAC-LC with implicit SBR a decoder
+// detects from the bitstream. As with MP3, SampleRate and Channels are 0 per the
+// AudioFormat contract.
+//
 // Other compressed and container formats remain out of scope by design. A
-// Content-Type this source does not carry (audio/aac, audio/ogg and the rest)
+// Content-Type this source does not carry (audio/ogg, audio/flac and the rest)
 // fails Open with ErrUnsupportedFormat rather than delivering bytes it cannot
 // frame, and the 64-bit RIFF variants RF64 and BW64 are rejected the same way.
 // This source never decodes: it moves PCM or a framed compressed bitstream,
