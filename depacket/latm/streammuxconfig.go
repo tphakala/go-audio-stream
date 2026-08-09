@@ -44,18 +44,11 @@ func (r *bitReader) byteAlign() {
 	}
 }
 
-// extractBits copies n bits from buf starting at bit offset start (MSB
-// first) into a freshly allocated byte-aligned slice, left-justifying the
-// bits and zero-padding any trailing bits of the final byte. The caller
-// guarantees start+n <= len(buf)*8.
-func extractBits(buf []byte, start, n int) []byte {
-	return extractBitsInto(nil, buf, start, n)
-}
-
-// extractBitsInto behaves like extractBits, but reuses dst's backing array
-// when it already has enough capacity, instead of always allocating a fresh
-// slice. The caller guarantees start+n <= len(buf)*8. Pass dst[:0] (or nil)
-// to force a fresh allocation only when dst is too small.
+// extractBitsInto copies n bits from buf starting at bit offset start (MSB
+// first) into a byte-aligned slice, left-justifying the bits and zero-padding
+// any trailing bits of the final byte. It reuses dst's backing array when that
+// already has enough capacity, re-zeroing the reslice it returns; pass nil to
+// always allocate a fresh slice. The caller guarantees start+n <= len(buf)*8.
 func extractBitsInto(dst, buf []byte, start, n int) []byte {
 	size := (n + 7) / 8
 	if cap(dst) < size {
@@ -115,7 +108,9 @@ func parseStreamMuxConfig(buf []byte) (smc streamMuxConfig, asc []byte, frameLen
 	if len(buf) > MaxStreamMuxConfigBytes {
 		buf = buf[:MaxStreamMuxConfigBytes]
 	}
-	return parseStreamMuxConfigBits(&bitReader{buf: buf})
+	// The out-of-band ASC is parsed once at New and must stay stable, so it
+	// takes a freshly allocated buffer (nil scratch) rather than a reused one.
+	return parseStreamMuxConfigBits(&bitReader{buf: buf}, nil)
 }
 
 // parseStreamMuxConfigBits parses a StreamMuxConfig from r's current bit
@@ -126,7 +121,10 @@ func parseStreamMuxConfig(buf []byte) (smc streamMuxConfig, asc []byte, frameLen
 // frameLengthType 0, and a GA-family AudioSpecificConfig; any other shape
 // returns ErrUnsupportedMux or ErrUnsupportedASC. It returns ErrTruncated
 // when r's buffer ends before a declared field is complete.
-func parseStreamMuxConfigBits(r *bitReader) (smc streamMuxConfig, asc []byte, frameLength uint32, err error) {
+//
+// ascDst is an optional scratch buffer the extracted ASC is packed into,
+// reused when it already has enough capacity; pass nil to always allocate.
+func parseStreamMuxConfigBits(r *bitReader, ascDst []byte) (smc streamMuxConfig, asc []byte, frameLength uint32, err error) {
 	audioMuxVersion, ok := r.read(1)
 	if !ok {
 		return streamMuxConfig{}, nil, 0, ErrTruncated
@@ -171,7 +169,7 @@ func parseStreamMuxConfigBits(r *bitReader) (smc streamMuxConfig, asc []byte, fr
 		return streamMuxConfig{}, nil, 0, fmt.Errorf("%w: numLayer %d", ErrUnsupportedMux, numLayer)
 	}
 
-	asc, frameLength, err = parseASC(r)
+	asc, frameLength, err = parseASC(r, ascDst)
 	if err != nil {
 		return streamMuxConfig{}, nil, 0, err
 	}
@@ -229,9 +227,10 @@ func parseStreamMuxConfigBits(r *bitReader) (smc streamMuxConfig, asc []byte, fr
 // sets extensionFlag (additional GASpecificConfig bits this parse does not
 // consume) is rejected with ErrUnsupportedASC rather than mis-parsed, matching
 // the audioObjectType rejection. It returns the ASC bits repacked MSB-first
-// into a fresh byte-aligned slice, and the per-AU sample count derived from
-// frameLengthFlag (1024 or 960).
-func parseASC(r *bitReader) (asc []byte, frameLength uint32, err error) {
+// into a byte-aligned slice (ascDst when it has capacity, else a fresh
+// allocation), and the per-AU sample count derived from frameLengthFlag (1024
+// or 960).
+func parseASC(r *bitReader, ascDst []byte) (asc []byte, frameLength uint32, err error) {
 	start := r.pos
 
 	aot, ok := r.read(5)
@@ -310,6 +309,6 @@ func parseASC(r *bitReader) (asc []byte, frameLength uint32, err error) {
 		frameLength = 960
 	}
 
-	asc = extractBits(r.buf, start, r.pos-start)
+	asc = extractBitsInto(ascDst, r.buf, start, r.pos-start)
 	return asc, frameLength, nil
 }
