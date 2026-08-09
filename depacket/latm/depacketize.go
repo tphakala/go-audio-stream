@@ -96,11 +96,18 @@ func (d *Depacketizer) depacketizeInBand(payload []byte) ([]AU, error) {
 		return nil, ErrTruncated
 	}
 	if useSameStreamMux == 0 {
-		smc, asc, frameLength, err := parseStreamMuxConfigBits(br)
+		smc, asc, frameLength, err := parseStreamMuxConfigBits(br, d.ascBuf)
 		if err != nil {
 			return nil, err
 		}
 		d.smc = smc
+		// asc was packed into d.ascBuf's backing array. Recycle the
+		// previously active buffer as the next packet's scratch and promote
+		// asc to active, so the two never share a backing array. A packet
+		// that fails mid-parse returns above with d.asc untouched, so the
+		// in-place mutation extractBitsInto performed on the scratch buffer
+		// cannot corrupt the retained config.
+		d.ascBuf = d.asc
 		d.asc = asc
 		d.frameLength = frameLength
 		d.haveSMC = true

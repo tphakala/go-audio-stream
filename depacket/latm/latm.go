@@ -99,6 +99,7 @@ type Depacketizer struct {
 	asc         []byte
 	frameLength uint32
 	inBandData  []byte // reused scratch for in-band AU bytes repacked MSB-first from the bit-misaligned payload
+	ascBuf      []byte // reused scratch backing for the in-band ASC, double-buffered with asc so a mid-parse failure cannot corrupt the retained config
 	aus         []AU   // reused scratch across calls
 }
 
@@ -151,6 +152,13 @@ func (d *Depacketizer) Reset() {
 	}
 	d.haveSMC = false
 	d.smc = streamMuxConfig{}
+	// Keep the larger of the two ASC buffers as scratch so a config
+	// re-announced after an SSRC reset need not reallocate. AudioSpecificConfig
+	// gates on haveSMC, so the retained bytes stay invisible until the next
+	// in-band config replaces them.
+	if cap(d.asc) > cap(d.ascBuf) {
+		d.ascBuf = d.asc
+	}
 	d.asc = nil
 	d.frameLength = 0
 }
