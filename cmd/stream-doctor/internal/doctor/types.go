@@ -85,6 +85,16 @@ type CaptureResult struct {
 	Elapsed time.Duration
 	// Reason records why capture stopped.
 	Reason EndReason
+	// LearnedCodec is a codec configuration the source resolved DURING capture
+	// rather than at Describe, or nil when nothing new was learned. Today this
+	// is the in-band MP4A-LATM AudioSpecificConfig (cpresent=1), which the
+	// depacketizer learns from the first RTP packet and reports through
+	// rtsp.Config.OnCodecUpdate after Describe has already returned an
+	// ASC-less track. The runner overlays it onto the audio track so the
+	// tracks block and the listen check see the resolved config. It stays nil
+	// for out-of-band LATM (whose ASC is already in the Describe track) and for
+	// every other source.
+	LearnedCodec audiostream.Codec
 }
 
 // HandshakeStep is one timed handshake stage for the walkthrough and report.

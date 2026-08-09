@@ -127,6 +127,18 @@ type rtspProber struct {
 
 	// sink accumulates the captured audio frames, shared with the HTTP adapter.
 	sink frameSink
+
+	// codecMu guards learnedCodec.
+	codecMu sync.Mutex
+	// learnedCodec is the most recent codec the library resolved DURING
+	// delivery for the audio target track and reported through
+	// Config.OnCodecUpdate, or nil until one fires. Today only an in-band
+	// MP4A-LATM track (cpresent=1) fires it, carrying the AudioSpecificConfig
+	// learned from the first packet; an out-of-band track is seeded from
+	// Describe and never fires it. onCodecUpdate writes it on the delivery
+	// goroutine and Collect reads it on the caller goroutine, so it is
+	// mutex-guarded.
+	learnedCodec audiostream.Codec
 }
 
 // compile-time: rtspProber implements RTSPProber.
@@ -175,15 +187,16 @@ func (p *rtspProber) dialConfig() rtsp.Config {
 	// zero-value PreferTCP is a safe fallback for a caller that bypassed it.
 	pref, _ := transportPreference(p.opts.Transport)
 	return rtsp.Config{
-		URL:         p.opts.URL,
-		Username:    p.opts.Username,
-		Password:    p.opts.Password,
-		Timeout:     p.opts.Timeout,
-		ReadIdle:    p.opts.ReadIdle,
-		InsecureTLS: p.opts.InsecureTLS,
-		UserAgent:   "stream-doctor/" + Version,
-		OnFrame:     p.onFrame,
-		Transport:   pref,
+		URL:           p.opts.URL,
+		Username:      p.opts.Username,
+		Password:      p.opts.Password,
+		Timeout:       p.opts.Timeout,
+		ReadIdle:      p.opts.ReadIdle,
+		InsecureTLS:   p.opts.InsecureTLS,
+		UserAgent:     "stream-doctor/" + Version,
+		OnFrame:       p.onFrame,
+		OnCodecUpdate: p.onCodecUpdate,
+		Transport:     pref,
 	}
 }
 
@@ -250,6 +263,51 @@ func (p *rtspProber) onFrame(f audiostream.Frame) {
 	p.sink.onFrame(f)
 }
 
+// onCodecUpdate is the OnCodecUpdate sink registered on the *rtsp.Client. It
+// records the codec the library resolved during delivery for the audio target
+// track, so Collect can surface an in-band MP4A-LATM AudioSpecificConfig that
+// Describe could not (the config is not in the SDP; the depacketizer learns it
+// from the first packet). Updates on any other track are dropped: only the
+// audio target is rendered and decoded. It runs on the delivery goroutine, so
+// it stores under codecMu; latest wins, so an SSRC reset that re-announces a
+// new config replaces the previous ASC rather than leaving a stale one.
+//
+//nolint:gocritic // codec's signature is fixed by rtsp.Config.OnCodecUpdate's func(int, audiostream.Codec) callback contract.
+func (p *rtspProber) onCodecUpdate(trackID int, codec audiostream.Codec) {
+	//nolint:gosec // audioTrackID was stored from an int track ID; the round trip through int32 is exact.
+	if trackID != int(p.audioTrackID.Load()) {
+		return
+	}
+	// Copy the codec's slices before retaining it. The OnCodecUpdate contract
+	// (rtsp.Config: "the codec value and any slices it carries are owned by the
+	// callee only for the duration of the call; copy AudioSpecificConfig to
+	// retain it") disclaims ownership after this returns, and the library's
+	// in-band ASC path is double-buffered scratch it may reuse. Collect reads
+	// the retained value long after the call, and applyLearnedCodec then aliases
+	// it into the rendered track, so an uncopied slice could be mutated under a
+	// later reader. append([]byte(nil), nil...) stays nil, so this preserves an
+	// absent StreamMuxConfig.
+	if lat, ok := codec.(audiostream.CodecMP4ALATM); ok {
+		lat.AudioSpecificConfig = append([]byte(nil), lat.AudioSpecificConfig...)
+		lat.StreamMuxConfig = append([]byte(nil), lat.StreamMuxConfig...)
+		codec = lat
+	}
+	p.codecMu.Lock()
+	p.learnedCodec = codec
+	p.codecMu.Unlock()
+}
+
+// learnedCodecSnapshot returns the codec most recently learned for the audio
+// target track through OnCodecUpdate, or nil if none. Collect calls it after
+// snapshotting frames: because OnCodecUpdate and OnFrame run in order on the
+// single delivery goroutine, every captured frame's config update has already
+// completed, so a captured in-band track never surfaces without its ASC.
+func (p *rtspProber) learnedCodecSnapshot() audiostream.Codec {
+	p.codecMu.Lock()
+	defer p.codecMu.Unlock()
+	return p.learnedCodec
+}
+
 // Collect owns the capture timer so the internal deadline is never
 // surfaced as a user error: it always returns a nil error, letting the
 // captured frame count and Reason drive the exit code.
@@ -263,17 +321,24 @@ func (p *rtspProber) Collect(ctx context.Context, track rtsp.Track, window time.
 
 	frames, truncated := p.sink.snapshot()
 
+	// Read the learned codec AFTER snapshotting frames: the two callbacks run in
+	// order on the delivery goroutine, so any captured frame's OnCodecUpdate has
+	// already stored its config, and an in-band track never surfaces without its
+	// ASC.
+	learned := p.learnedCodecSnapshot()
+
 	st := p.client.Stats()
 
 	return CaptureResult{
-		Session:    p.client.SessionInfo(),
-		Track:      track,
-		Frames:     frames,
-		Stats:      st.Tracks[track.ID],
-		CapturedAt: st.CapturedAt,
-		Window:     window,
-		Elapsed:    elapsed,
-		Reason:     classifyEndReason(ctx, waitErr, truncated, len(frames)),
+		Session:      p.client.SessionInfo(),
+		Track:        track,
+		Frames:       frames,
+		Stats:        st.Tracks[track.ID],
+		CapturedAt:   st.CapturedAt,
+		Window:       window,
+		Elapsed:      elapsed,
+		Reason:       classifyEndReason(ctx, waitErr, truncated, len(frames)),
+		LearnedCodec: learned,
 	}, nil
 }
 
