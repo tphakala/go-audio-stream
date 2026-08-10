@@ -20,6 +20,13 @@ const adtsMaxFrameLen = 8191
 // Open never waits on an unbounded prefix.
 const adtsProbeLen = 2048
 
+// maxID3v2SkipBytes bounds how much of a leading ID3v2 tag Open consumes to reach
+// the first ADTS frame. A syncsafe tag size permits up to 2^28-1 (~256 MiB); a
+// real album-art tag is at most a few MiB, so a larger declared length is a
+// mislabelled or hostile stream. Capping the skip keeps Open's read bounded for
+// an untrusted source instead of streaming up to the open-phase timeout.
+const maxID3v2SkipBytes = 16 << 20 // 16 MiB
+
 // adtsStream frames a raw ADTS (MPEG-2/4 AAC) byte stream into raw access units.
 // It buffers bytes across reads, resynchronizes past leading garbage or a false
 // sync with a next-frame consistency check, strips each frame's ADTS header, and
@@ -218,6 +225,8 @@ func (c *Client) setupAAC() error {
 // tag is consumed by its declared length rather than scanned past, so a tag
 // larger than the buffer (which Peek cannot see beyond) is handled uniformly and
 // sync-looking bytes inside binary album-art data cannot seed a false frame. A
+// declared length above maxID3v2SkipBytes is rejected before any bytes are read,
+// so a mislabelled or hostile response cannot make Open stream a huge prefix. A
 // stream with no tag, or too short to hold a tag header, is left untouched for
 // the probe to classify. Consecutive tags are consumed in turn, matching the MP3
 // framer's skip loop.
@@ -228,9 +237,14 @@ func (c *Client) skipLeadingID3() error {
 		if !isID3 || needMore {
 			return nil // no tag, or too few bytes to be one: let the probe proceed
 		}
-		// syncsafe caps the body at 2^28-1 bytes, so the whole tag length fits an
-		// int on every supported architecture; this cast cannot overflow.
+		// syncsafe caps the body at 2^28-1 (~256 MiB), so the length fits an int on
+		// every supported architecture; this cast cannot overflow. Reject a tag
+		// larger than the cap before reading it, so an untrusted source cannot make
+		// Open read and discard a very large prefix (bounded only by the timeout).
 		tagLen := int(id3v2TagLen(head))
+		if tagLen > maxID3v2SkipBytes {
+			return fmt.Errorf("%w: ID3v2 tag length %d exceeds the %d-byte limit", ErrFormatUnknown, tagLen, maxID3v2SkipBytes)
+		}
 		if _, err := c.br.Discard(tagLen); err != nil {
 			// The stream stalled or dropped while skipping the tag during Open.
 			// Surface it as a format error, consistent with the probe's existing

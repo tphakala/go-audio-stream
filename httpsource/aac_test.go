@@ -513,3 +513,27 @@ func TestAACRejectsTruncatedID3v2(t *testing.T) {
 		t.Errorf("Open error = %v, want it to identify the ID3v2 skip path", err)
 	}
 }
+
+// TestAACRejectsOversizeID3v2 covers the skip cap: an ID3v2 header declaring a
+// body larger than maxID3v2SkipBytes is rejected on its declared length before
+// any body byte is read, so a mislabelled or hostile audio/aac response cannot
+// make Open stream a huge prefix. Only the 10-byte header is served; a correct
+// fail-fast never waits on the (never-sent) body.
+func TestAACRejectsOversizeID3v2(t *testing.T) {
+	declared := maxID3v2SkipBytes // body size; total tag length exceeds the cap
+	body := []byte{
+		'I', 'D', '3', 0x03, 0x00, 0x00,
+		byte((declared >> 21) & 0x7F), byte((declared >> 14) & 0x7F),
+		byte((declared >> 7) & 0x7F), byte(declared & 0x7F),
+	}
+	srv := httptest.NewServer(serveStatic("audio/aac", body))
+	defer srv.Close()
+
+	_, err := Open(context.Background(), Config{URL: srv.URL})
+	if !errors.Is(err, ErrFormatUnknown) {
+		t.Fatalf("Open on an oversize ID3v2 tag = %v, want ErrFormatUnknown", err)
+	}
+	if !strings.Contains(err.Error(), "exceeds") {
+		t.Errorf("Open error = %v, want it to report the size limit", err)
+	}
+}
