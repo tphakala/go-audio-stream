@@ -196,8 +196,9 @@ func adtsFrameDuration(h adts.Header) time.Duration {
 // or SHOUTcast AAC, or a progressive .aac response). The AudioSpecificConfig a
 // decoder needs is carried by no container header, so setupAAC peeks the first
 // frame's ADTS header during Open and synthesizes the ASC from it, keeping
-// Format stable before the reader spawns. The peek does not consume, so the
-// reader frames the whole body, this first frame included. A CodecAAC track from
+// Format stable before the reader spawns. The peek does not consume the audio,
+// so the reader frames the whole body from this first frame; only a leading
+// ID3v2 metadata tag, if present, is consumed first. A CodecAAC track from
 // this source is then indistinguishable to a consumer from an RTSP AAC track:
 // raw access units plus the ASC.
 func (c *Client) setupAAC() error {
@@ -210,16 +211,50 @@ func (c *Client) setupAAC() error {
 	return nil
 }
 
+// skipLeadingID3 consumes any leading ID3v2 tag(s) from the buffered reader so
+// the ASC probe, and then the reader, begins at the first ADTS frame. A body
+// served as a static .aac file commonly carries such a tag, often with album art
+// that exceeds the reader buffer; live Icecast and SHOUTcast AAC carry none. The
+// tag is consumed by its declared length rather than scanned past, so a tag
+// larger than the buffer (which Peek cannot see beyond) is handled uniformly and
+// sync-looking bytes inside binary album-art data cannot seed a false frame. A
+// stream with no tag, or too short to hold a tag header, is left untouched for
+// the probe to classify. Consecutive tags are consumed in turn, matching the MP3
+// framer's skip loop.
+func (c *Client) skipLeadingID3() error {
+	for {
+		head, _ := c.br.Peek(id3v2HeaderLen)
+		isID3, needMore := looksLikeID3(head)
+		if !isID3 || needMore {
+			return nil // no tag, or too few bytes to be one: let the probe proceed
+		}
+		// syncsafe caps the body at 2^28-1 bytes, so the whole tag length fits an
+		// int on every supported architecture; this cast cannot overflow.
+		tagLen := int(id3v2TagLen(head))
+		if _, err := c.br.Discard(tagLen); err != nil {
+			// The stream stalled or dropped while skipping the tag during Open.
+			// Surface it as a format error, consistent with the probe's existing
+			// read-error handling; issue #92 will refine open-phase read-error
+			// classification across the WAV and AAC header parsers.
+			return fmt.Errorf("%w: skipping leading ID3v2 tag: %w", ErrFormatUnknown, err)
+		}
+	}
+}
+
 // probeADTS peeks the buffered body prefix and returns the first ADTS header it
-// can accept, without consuming it. It confirms a candidate against the
-// following frame's header when the prefix reaches it, so a coincidental sync in
-// leading noise is rejected. A candidate at offset 0 whose frame is too large to
-// confirm within the prefix is trusted, since a body labeled AAC begins with a
-// real frame; an unconfirmable candidate found only after skipped leading bytes
-// is NOT adopted, so a coincidental sync in that noise cannot seed a wrong ASC.
-// A prefix with no confirmable ADTS header fails Open rather than delivering
-// unframed bytes.
+// can accept, without consuming it. It first skips a leading ID3v2 tag (see
+// skipLeadingID3), so a static .aac file that carries one still resolves. It
+// confirms a candidate against the following frame's header when the prefix
+// reaches it, so a coincidental sync in leading noise is rejected. A candidate at
+// offset 0 whose frame is too large to confirm within the prefix is trusted,
+// since a body labeled AAC begins with a real frame; an unconfirmable candidate
+// found only after skipped leading bytes is NOT adopted, so a coincidental sync
+// in that noise cannot seed a wrong ASC. A prefix with no confirmable ADTS header
+// fails Open rather than delivering unframed bytes.
 func (c *Client) probeADTS() (adts.Header, error) {
+	if err := c.skipLeadingID3(); err != nil {
+		return adts.Header{}, err
+	}
 	n := adtsProbeLen
 	if sz := c.br.Size(); n > sz {
 		n = sz

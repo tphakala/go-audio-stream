@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -389,5 +390,126 @@ func TestAACFramerRejectsEmptyFrame(t *testing.T) {
 	s.setEOF()
 	if got := drainAll(s); len(got) != 0 {
 		t.Fatalf("delivered %d AUs from zero-length frames, want 0 (empty frames rejected)", len(got))
+	}
+}
+
+// aacID3v2Tag builds an ID3v2.3 tag: a 10-byte header, a body of bodyLen bytes,
+// and an optional 10-byte footer. The body size is written as a proper 4-byte
+// syncsafe integer so bodyLen may exceed the 4 KiB reader buffer, as an album-art
+// tag does. Per ID3v2 the syncsafe size counts neither the header nor the footer,
+// matching the skip length id3v2TagLen computes. The body is filled with bytes
+// that mimic ADTS syncs (0xFF 0xFx), so a correct length-driven skip must ignore
+// sync-looking bytes inside binary album-art data.
+func aacID3v2Tag(bodyLen int, footer bool) []byte {
+	flags := byte(0x00)
+	if footer {
+		flags = id3v2FooterFlag
+	}
+	tag := []byte{
+		'I', 'D', '3', 0x03, 0x00, flags,
+		byte((bodyLen >> 21) & 0x7F), byte((bodyLen >> 14) & 0x7F),
+		byte((bodyLen >> 7) & 0x7F), byte(bodyLen & 0x7F),
+	}
+	body := make([]byte, bodyLen)
+	for i := range body {
+		body[i] = 0xFF
+		if i%2 == 1 {
+			body[i] = 0xF1
+		}
+	}
+	tag = append(tag, body...)
+	if footer {
+		tag = append(tag, make([]byte, id3v2HeaderLen)...)
+	}
+	return tag
+}
+
+// runAACID3Skip serves body as audio/aac and asserts that Open skipped a leading
+// ID3v2 tag: the ASC is synthesized from the first real frame, every access unit
+// after the tag is delivered in order, and skipping the tag is not counted as a
+// malformed gap.
+func runAACID3Skip(t *testing.T, body []byte, aus [][]byte) {
+	t.Helper()
+	srv := httptest.NewServer(serveStatic("audio/aac", body))
+	defer srv.Close()
+
+	var col collector
+	c := openOK(t, srv, Config{OnFrame: col.onFrame})
+	if err := waitResult(t, c, 5*time.Second); !errors.Is(err, ErrStreamEnded) {
+		t.Fatalf("Wait = %v, want ErrStreamEnded", err)
+	}
+	codec, ok := c.Format().Codec.(audiostream.CodecAAC)
+	if !ok {
+		t.Fatalf("Format().Codec = %T, want CodecAAC", c.Format().Codec)
+	}
+	if !bytes.Equal(codec.AudioSpecificConfig, aacWantASC) {
+		t.Errorf("synthesized ASC = % x, want % x", codec.AudioSpecificConfig, aacWantASC)
+	}
+	var want []byte
+	for _, au := range aus {
+		want = append(want, au...)
+	}
+	if col.count() != len(aus) || !bytes.Equal(col.bytes(), want) {
+		t.Fatalf("delivered %d AUs (bytes-equal=%v), want %d matching the audio after the tag",
+			col.count(), bytes.Equal(col.bytes(), want), len(aus))
+	}
+	if m := c.Stats().Tracks[0].Malformed; m != 0 {
+		t.Errorf("Malformed = %d, want 0 (skipping an ID3v2 tag is not a gap)", m)
+	}
+}
+
+// TestAACSkipsLeadingID3v2 covers the common static .aac case: a leading ID3v2
+// tag precedes the ADTS frames. Open must skip the tag, synthesize the ASC from
+// the first real frame, and deliver every access unit after it.
+func TestAACSkipsLeadingID3v2(t *testing.T) {
+	stream, aus := adtsFrames(3, 40)
+	runAACID3Skip(t, append(aacID3v2Tag(64, false), stream...), aus)
+}
+
+// TestAACSkipsLargeID3v2 covers an album-art-sized tag larger than the 4 KiB
+// reader buffer, which Peek cannot see past: Open must consume the tag by its
+// declared length to reach the first ADTS frame far beyond any peek window.
+func TestAACSkipsLargeID3v2(t *testing.T) {
+	stream, aus := adtsFrames(3, 40)
+	runAACID3Skip(t, append(aacID3v2Tag(12*1024, false), stream...), aus)
+}
+
+// TestAACSkipsID3v2WithFooter exercises the footer-flag branch: the skip length
+// must include the trailing 10-byte footer so framing resumes exactly at the
+// first ADTS frame.
+func TestAACSkipsID3v2WithFooter(t *testing.T) {
+	stream, aus := adtsFrames(3, 40)
+	runAACID3Skip(t, append(aacID3v2Tag(30, true), stream...), aus)
+}
+
+// TestAACSkipsConsecutiveID3v2 covers a body that concatenates two ID3v2 tags
+// before the audio: skipLeadingID3 must consume both in turn before the probe
+// reaches the first ADTS frame.
+func TestAACSkipsConsecutiveID3v2(t *testing.T) {
+	stream, aus := adtsFrames(3, 40)
+	body := append(aacID3v2Tag(48, false), aacID3v2Tag(24, true)...)
+	body = append(body, stream...)
+	runAACID3Skip(t, body, aus)
+}
+
+// TestAACRejectsTruncatedID3v2 covers the read-error branch in skipLeadingID3: an
+// ID3v2 header declaring a body the stream never delivers cannot be skipped, so
+// Open fails cleanly with ErrFormatUnknown rather than hanging or panicking.
+// (Refining this open-phase read-error classification is tracked in #92.)
+func TestAACRejectsTruncatedID3v2(t *testing.T) {
+	tag := aacID3v2Tag(12*1024, false) // header declares a 12 KiB body
+	body := tag[:id3v2HeaderLen+100]   // header plus 100 body bytes, then EOF
+	srv := httptest.NewServer(serveStatic("audio/aac", body))
+	defer srv.Close()
+
+	_, err := Open(context.Background(), Config{URL: srv.URL})
+	if !errors.Is(err, ErrFormatUnknown) {
+		t.Fatalf("Open on a truncated ID3v2 tag = %v, want ErrFormatUnknown", err)
+	}
+	// Pin the Discard-error branch specifically: the probe's own no-frame path
+	// also wraps ErrFormatUnknown, so without this the test could pass on either
+	// route and mask a regression that swallowed the skip error.
+	if !strings.Contains(err.Error(), "skipping leading ID3v2 tag") {
+		t.Errorf("Open error = %v, want it to identify the ID3v2 skip path", err)
 	}
 }
