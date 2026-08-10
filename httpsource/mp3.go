@@ -124,11 +124,7 @@ func (s *mp3Stream) consumeID3() bool {
 // must be at least id3v2HeaderLen bytes and start with the "ID3" magic. The tag
 // is metadata, not corruption, so skipping it is not counted as a gap.
 func (s *mp3Stream) startID3Skip(rem []byte) {
-	skip := int64(id3v2HeaderLen) + int64(syncsafe(rem[6:10]))
-	if rem[5]&id3v2FooterFlag != 0 {
-		skip += id3v2HeaderLen
-	}
-	s.id3Skip = skip
+	s.id3Skip = id3v2TagLen(rem)
 }
 
 // discard advances past n unusable bytes and counts one gap.
@@ -196,6 +192,18 @@ func looksLikeID3(rem []byte) (isID3, needMore bool) {
 // syncsafe decodes the ID3v2 4-byte syncsafe tag size (7 active bits per byte).
 func syncsafe(b []byte) int {
 	return int(b[0]&0x7F)<<21 | int(b[1]&0x7F)<<14 | int(b[2]&0x7F)<<7 | int(b[3]&0x7F)
+}
+
+// id3v2TagLen returns the total on-wire length of a leading ID3v2 tag: the
+// 10-byte header, its syncsafe-encoded body size, and a trailing 10-byte footer
+// when the footer flag is set. head must be at least id3v2HeaderLen bytes and
+// begin with a validated "ID3" tag header (see looksLikeID3).
+func id3v2TagLen(head []byte) int64 {
+	skip := int64(id3v2HeaderLen) + int64(syncsafe(head[6:10]))
+	if head[5]&id3v2FooterFlag != 0 {
+		skip += id3v2HeaderLen
+	}
+	return skip
 }
 
 // scanHeader finds the first valid frame header in rem, returning its index and
