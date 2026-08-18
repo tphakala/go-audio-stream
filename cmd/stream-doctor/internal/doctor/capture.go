@@ -271,17 +271,16 @@ func (p *rtspProber) onFrame(f audiostream.Frame) {
 // audio target is rendered and decoded. It runs on the delivery goroutine, so
 // it stores under codecMu; latest wins, so an SSRC reset that re-announces a
 // new config replaces the previous ASC rather than leaving a stale one.
-//
-//nolint:gocritic // codec's signature is fixed by rtsp.Config.OnCodecUpdate's func(int, audiostream.Codec) callback contract.
-func (p *rtspProber) onCodecUpdate(trackID int, codec audiostream.Codec) {
+func (p *rtspProber) onCodecUpdate(u audiostream.CodecUpdate) {
 	//nolint:gosec // audioTrackID was stored from an int track ID; the round trip through int32 is exact.
-	if trackID != int(p.audioTrackID.Load()) {
+	if u.TrackID != int(p.audioTrackID.Load()) {
 		return
 	}
+	codec := u.Codec
 	// Copy the codec's slices before retaining it. The OnCodecUpdate contract
-	// (rtsp.Config: "the codec value and any slices it carries are owned by the
-	// callee only for the duration of the call; copy AudioSpecificConfig to
-	// retain it") disclaims ownership after this returns, and the library's
+	// (rtsp.Config: "the CodecUpdate's Codec and any slices it carries are owned
+	// by the callee only for the duration of the call; copy AudioSpecificConfig
+	// to retain it") disclaims ownership after this returns, and the library's
 	// in-band ASC path is double-buffered scratch it may reuse. Collect reads
 	// the retained value long after the call, and applyLearnedCodec then aliases
 	// it into the rendered track, so an uncopied slice could be mutated under a

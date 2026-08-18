@@ -138,7 +138,7 @@ func TestRTSPProberOnCodecUpdate(t *testing.T) {
 
 	// Before Setup records the audio track, audioTrackID is -1, so no update
 	// matches: nothing is learned.
-	p.onCodecUpdate(0, audiostream.CodecMP4ALATM{AudioSpecificConfig: []byte{0x99}})
+	p.onCodecUpdate(audiostream.CodecUpdate{TrackID: 0, Codec: audiostream.CodecMP4ALATM{AudioSpecificConfig: []byte{0x99}}})
 	if got := p.learnedCodecSnapshot(); got != nil {
 		t.Fatalf("learnedCodecSnapshot() = %v before Setup, want nil", got)
 	}
@@ -146,13 +146,13 @@ func TestRTSPProberOnCodecUpdate(t *testing.T) {
 	p.audioTrackID.Store(1)
 
 	// An update on a non-audio track is ignored.
-	p.onCodecUpdate(2, audiostream.CodecMP4ALATM{AudioSpecificConfig: []byte{0xAA}})
+	p.onCodecUpdate(audiostream.CodecUpdate{TrackID: 2, Codec: audiostream.CodecMP4ALATM{AudioSpecificConfig: []byte{0xAA}}})
 	if got := p.learnedCodecSnapshot(); got != nil {
 		t.Fatalf("learnedCodecSnapshot() = %v after a non-audio update, want nil", got)
 	}
 
 	// An update on the audio target is stored.
-	p.onCodecUpdate(1, audiostream.CodecMP4ALATM{AudioSpecificConfig: []byte{0x11, 0x22}})
+	p.onCodecUpdate(audiostream.CodecUpdate{TrackID: 1, Codec: audiostream.CodecMP4ALATM{AudioSpecificConfig: []byte{0x11, 0x22}}})
 	got, ok := p.learnedCodecSnapshot().(audiostream.CodecMP4ALATM)
 	if !ok {
 		t.Fatalf("learnedCodecSnapshot() type = %T, want CodecMP4ALATM", p.learnedCodecSnapshot())
@@ -163,7 +163,7 @@ func TestRTSPProberOnCodecUpdate(t *testing.T) {
 
 	// A later update on the audio target replaces the earlier one: an SSRC
 	// reset that re-announces a new config must not leave a stale ASC behind.
-	p.onCodecUpdate(1, audiostream.CodecMP4ALATM{AudioSpecificConfig: []byte{0x33}})
+	p.onCodecUpdate(audiostream.CodecUpdate{TrackID: 1, Codec: audiostream.CodecMP4ALATM{AudioSpecificConfig: []byte{0x33}}})
 	got, _ = p.learnedCodecSnapshot().(audiostream.CodecMP4ALATM)
 	if !bytes.Equal(got.AudioSpecificConfig, []byte{0x33}) {
 		t.Errorf("learned ASC after second update = % x, want 33", got.AudioSpecificConfig)
@@ -174,7 +174,7 @@ func TestRTSPProberOnCodecUpdate(t *testing.T) {
 	// later mutation of the caller's backing array must not reach the stored
 	// value (the library's in-band ASC path is reused scratch).
 	caller := []byte{0x44, 0x55}
-	p.onCodecUpdate(1, audiostream.CodecMP4ALATM{AudioSpecificConfig: caller})
+	p.onCodecUpdate(audiostream.CodecUpdate{TrackID: 1, Codec: audiostream.CodecMP4ALATM{AudioSpecificConfig: caller}})
 	caller[0] = 0xFF
 	got, _ = p.learnedCodecSnapshot().(audiostream.CodecMP4ALATM)
 	if !bytes.Equal(got.AudioSpecificConfig, []byte{0x44, 0x55}) {

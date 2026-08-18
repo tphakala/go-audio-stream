@@ -213,9 +213,9 @@ type codecUpdateRecording struct {
 	ascs   [][]byte
 }
 
-func (r *codecUpdateRecording) onCodecUpdate(trackID int, codec audiostream.Codec) {
+func (r *codecUpdateRecording) onCodecUpdate(u audiostream.CodecUpdate) {
 	r.events = append(r.events, latmEventUpdate)
-	c, _ := codec.(audiostream.CodecMP4ALATM)
+	c, _ := u.Codec.(audiostream.CodecMP4ALATM)
 	r.ascs = append(r.ascs, append([]byte(nil), c.AudioSpecificConfig...))
 }
 
@@ -241,6 +241,44 @@ func TestDeliverLATMOnCodecUpdateFiresBeforeFirstFrame(t *testing.T) {
 	}
 	if len(rec.ascs) != 1 || !bytes.Equal(rec.ascs[0], latmASC) {
 		t.Errorf("OnCodecUpdate ASC = % x, want % x", rec.ascs, latmASC)
+	}
+}
+
+// TestDeliverLATMOnCodecUpdateCarriesTrackID locks in that deliverLATM stamps
+// the resolved update with the track's own id. The other LATM tests build
+// id-0 tracks, so a TrackID accidentally wired to a constant would pass them
+// silently; this one uses a non-zero id so a mis-stamped CodecUpdate.TrackID
+// fails. onFrame is nil because OnCodecUpdate fires before the frame loop.
+func TestDeliverLATMOnCodecUpdateCarriesTrackID(t *testing.T) {
+	t.Parallel()
+	const trackID = 7
+	desc := describedTrack{
+		codec:     audiostream.CodecMP4ALATM{MuxConfigPresent: true},
+		clockRate: 44100,
+		media:     audiostream.MediaAudio,
+	}
+	tr := newTrack(trackID, desc, SetupOptions{}, 1, nil)
+	if tr.kind != deliverLATM {
+		t.Fatalf("kind = %d, want deliverLATM", tr.kind)
+	}
+
+	var got audiostream.CodecUpdate
+	fired := 0
+	onCodecUpdate := func(u audiostream.CodecUpdate) {
+		fired++
+		got = u
+	}
+	pkt := rtp.Packet{Header: rtp.Header{Timestamp: 0, Marker: true}, Payload: latmV4}
+	tr.deliverLATM(pkt, rtp.Update{Timestamp: 0}, time.Unix(1, 0), nil, onCodecUpdate)
+
+	if fired != 1 {
+		t.Fatalf("OnCodecUpdate fired %d times, want 1", fired)
+	}
+	if got.TrackID != trackID {
+		t.Errorf("CodecUpdate.TrackID = %d, want %d", got.TrackID, trackID)
+	}
+	if _, ok := got.Codec.(audiostream.CodecMP4ALATM); !ok {
+		t.Errorf("CodecUpdate.Codec type = %T, want CodecMP4ALATM", got.Codec)
 	}
 }
 
