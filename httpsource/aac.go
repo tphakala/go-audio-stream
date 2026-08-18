@@ -240,10 +240,8 @@ func (c *Client) skipLeadingID3() error {
 			// genuinely short stream, surface that here instead of leaning on the
 			// probe's own Peek to re-trip the buffered error (issue #92). A clean
 			// short read classifies as nil and lets the probe proceed as before.
-			if err != nil && c.classifyOpenRead != nil {
-				if oe := c.classifyOpenRead(err); oe != nil {
-					return oe
-				}
+			if oe := c.classifyOpenRead(err); oe != nil {
+				return oe
 			}
 			return nil
 		}
@@ -261,10 +259,8 @@ func (c *Client) skipLeadingID3() error {
 			// failure, not a format verdict (issue #92). A clean short read (a tag
 			// the stream never finishes delivering) falls through to
 			// ErrFormatUnknown, the pre-#92 behavior.
-			if c.classifyOpenRead != nil {
-				if oe := c.classifyOpenRead(err); oe != nil {
-					return oe
-				}
+			if oe := c.classifyOpenRead(err); oe != nil {
+				return oe
 			}
 			return fmt.Errorf("%w: skipping leading ID3v2 tag: %w", ErrFormatUnknown, err)
 		}
@@ -320,10 +316,8 @@ func (c *Client) probeADTS() (adts.Header, error) {
 	// through the open-phase taxonomy rather than as a format verdict (issue #92).
 	// A clean short read leaves perr as an EOF the classifier ignores, so a
 	// genuinely non-ADTS prefix still fails with ErrFormatUnknown.
-	if perr != nil && c.classifyOpenRead != nil {
-		if oe := c.classifyOpenRead(perr); oe != nil {
-			return adts.Header{}, oe
-		}
+	if oe := c.classifyOpenRead(perr); oe != nil {
+		return adts.Header{}, oe
 	}
 	return adts.Header{}, fmt.Errorf("%w: no ADTS frame header in the stream prefix", ErrFormatUnknown)
 }

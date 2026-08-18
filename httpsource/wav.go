@@ -320,10 +320,8 @@ func (c *Client) malformedWAV(err error) error {
 	// classify it through the open-phase taxonomy (issue #92). A clean short read
 	// on a well-formed but truncated stream (or a zero Client in a unit test)
 	// falls through to ErrMalformedWAV, preserving the pre-#92 behavior.
-	if c.classifyOpenRead != nil {
-		if oe := c.classifyOpenRead(err); oe != nil {
-			return oe
-		}
+	if oe := c.classifyOpenRead(err); oe != nil {
+		return oe
 	}
 	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
 		return fmt.Errorf("%w: %w", ErrMalformedWAV, io.ErrUnexpectedEOF)
