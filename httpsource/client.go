@@ -82,6 +82,16 @@ type Client struct {
 	body io.ReadCloser
 	br   *bufio.Reader
 
+	// openReadClassifier maps a raw read error hit while parsing the format header
+	// during Open to the open-phase taxonomy: a stall that tripped the open
+	// deadline or a caller cancellation surfaces as ErrRequestTimeout or the
+	// caller error rather than a format error (issue #92). It is set once in Open
+	// before the synchronous format probe and read only there, through the
+	// classifyOpenRead method; it is nil outside an Open (and in a zero Client),
+	// where the parsers report their own format error, preserving the pre-#92
+	// malformed/short-stream behavior.
+	openReadClassifier func(error) error
+
 	// lastReadAt is the watchdog clock (UnixNano): the reader stamps it on every
 	// read and the watchdog reads it to derive its deadline. Open stamps it once
 	// before spawning the watchdog so the first timer tick does not evaluate a
@@ -245,7 +255,17 @@ func Open(ctx context.Context, cfg Config) (*Client, error) {
 		return nil, serr
 	}
 	c.br = bufio.NewReaderSize(resp.Body, readBufSize)
-	if ferr := c.resolveFormat(resp); ferr != nil {
+	// Arm the open-phase read-error classifier before probing the format, so a
+	// stall or a caller cancellation mid-header is reported through the
+	// open-phase taxonomy rather than as a format error (issue #92).
+	c.openReadClassifier = func(err error) error { return classifyHeaderReadErr(ctx, err, &timedOut) }
+	ferr := c.resolveFormat(resp)
+	// The synchronous format probe is done, so drop the open-phase classifier:
+	// nothing invokes it afterward, and clearing it releases the caller ctx and
+	// the timer flag the closure captured rather than pinning them for the life
+	// of the stream.
+	c.openReadClassifier = nil
+	if ferr != nil {
 		return nil, ferr
 	}
 
@@ -383,6 +403,38 @@ func classifyOpenErr(ctx context.Context, err error, timedOut *atomic.Bool) erro
 		return fmt.Errorf("%w: %w", ErrRequestTimeout, err)
 	}
 	return fmt.Errorf("%w: %w", ErrConnectionClosed, err)
+}
+
+// classifyHeaderReadErr classifies a raw read error hit while a format-header
+// parser reads the body prefix during Open. It returns a non-nil open-phase
+// error (ErrRequestTimeout when the open deadline fired or the transport timed
+// out, the caller's ctx error when it cancelled, or ErrConnectionClosed for any
+// other transport failure) when the read failed for a transient, retryable
+// reason. It returns nil for a clean short read (io.EOF/io.ErrUnexpectedEOF) on
+// an otherwise-quiet stream, i.e. a genuinely short but well-formed stream, so
+// the parser reports it as its own format error (ErrMalformedWAV /
+// ErrFormatUnknown). An open-phase timeout or a caller cancellation takes
+// precedence over the read error's surface shape.
+func classifyHeaderReadErr(ctx context.Context, err error, timedOut *atomic.Bool) error {
+	if !timedOut.Load() && ctx.Err() == nil &&
+		(errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF)) {
+		return nil
+	}
+	return classifyOpenErr(ctx, err, timedOut)
+}
+
+// classifyOpenRead applies the open-phase read-error classifier armed for the
+// current Open, if any. It returns a non-nil open-phase error (ErrRequestTimeout,
+// the caller ctx error, or ErrConnectionClosed) when a header-parse read failed
+// for a transient, retryable reason, and nil when the caller should report its
+// own format error: when err is nil, outside an Open (a zero Client, where
+// openReadClassifier is unset), or for a clean short read. Centralizing the two
+// nil guards keeps the parser call sites to a single line.
+func (c *Client) classifyOpenRead(err error) error {
+	if err == nil || c.openReadClassifier == nil {
+		return nil
+	}
+	return c.openReadClassifier(err)
 }
 
 // Format returns the source's audio format descriptor. A compressed source

@@ -232,10 +232,18 @@ func (c *Client) setupAAC() error {
 // framer's skip loop.
 func (c *Client) skipLeadingID3() error {
 	for {
-		head, _ := c.br.Peek(id3v2HeaderLen)
+		head, err := c.br.Peek(id3v2HeaderLen)
 		isID3, needMore := looksLikeID3(head)
 		if !isID3 || needMore {
-			return nil // no tag, or too few bytes to be one: let the probe proceed
+			// No tag, or too few bytes to be one. If the prefix ran short because
+			// the open phase stalled or the transport failed rather than a
+			// genuinely short stream, surface that here instead of leaning on the
+			// probe's own Peek to re-trip the buffered error (issue #92). A clean
+			// short read classifies as nil and lets the probe proceed as before.
+			if oe := c.classifyOpenRead(err); oe != nil {
+				return oe
+			}
+			return nil
 		}
 		// syncsafe caps the body at 2^28-1 (~256 MiB), so the length fits an int on
 		// every supported architecture; this cast cannot overflow. Reject a tag
@@ -246,10 +254,14 @@ func (c *Client) skipLeadingID3() error {
 			return fmt.Errorf("%w: ID3v2 tag length %d exceeds the %d-byte limit", ErrFormatUnknown, tagLen, maxID3v2SkipBytes)
 		}
 		if _, err := c.br.Discard(tagLen); err != nil {
-			// The stream stalled or dropped while skipping the tag during Open.
-			// Surface it as a format error, consistent with the probe's existing
-			// read-error handling; issue #92 will refine open-phase read-error
-			// classification across the WAV and AAC header parsers.
+			// A stall that tripped the open deadline, a caller cancellation, or a
+			// transport failure while skipping the tag is a transient open-phase
+			// failure, not a format verdict (issue #92). A clean short read (a tag
+			// the stream never finishes delivering) falls through to
+			// ErrFormatUnknown, the pre-#92 behavior.
+			if oe := c.classifyOpenRead(err); oe != nil {
+				return oe
+			}
 			return fmt.Errorf("%w: skipping leading ID3v2 tag: %w", ErrFormatUnknown, err)
 		}
 	}
@@ -275,7 +287,7 @@ func (c *Client) probeADTS() (adts.Header, error) {
 	}
 	// A short read returns fewer bytes with a non-nil error; scan whatever the
 	// prefix held rather than failing on a stream shorter than the probe window.
-	head, _ := c.br.Peek(n)
+	head, perr := c.br.Peek(n)
 	for i := 0; i+adts.MinHeaderLen <= len(head); i++ {
 		if head[i] != 0xFF || head[i+1]&0xF6 != 0xF0 {
 			continue
@@ -297,6 +309,15 @@ func (c *Client) probeADTS() (adts.Header, error) {
 			return h, nil
 		}
 		// Unconfirmable and not at offset 0: keep scanning for a confirmable one.
+	}
+	// No confirmable ADTS header in the prefix. If the prefix ended because the
+	// open phase stalled, the caller cancelled, or the transport failed, that is
+	// a transient open-phase failure, not proof the body is not AAC: report it
+	// through the open-phase taxonomy rather than as a format verdict (issue #92).
+	// A clean short read leaves perr as an EOF the classifier ignores, so a
+	// genuinely non-ADTS prefix still fails with ErrFormatUnknown.
+	if oe := c.classifyOpenRead(perr); oe != nil {
+		return adts.Header{}, oe
 	}
 	return adts.Header{}, fmt.Errorf("%w: no ADTS frame header in the stream prefix", ErrFormatUnknown)
 }

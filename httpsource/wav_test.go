@@ -14,6 +14,15 @@ func wavReader(body []byte) *bufio.Reader {
 	return bufio.NewReaderSize(bytes.NewReader(body), readBufSize)
 }
 
+// parseWAVForTest runs the WAV header parser on a zero Client, which has no
+// open-phase read-error classifier armed, so a raw read error classifies
+// exactly as the pre-#92 free function did (a clean short read is
+// ErrMalformedWAV). The open-phase reclassification of a stall or a cancel is
+// exercised end to end through Open in open_classify_test.go.
+func parseWAVForTest(br *bufio.Reader) (wavInfo, error) {
+	return (&Client{}).parseWAVHeader(br)
+}
+
 // nonPCMSubFormatGUID is KSDATAFORMAT_SUBTYPE_IEEE_FLOAT, used to exercise
 // the "wrong SubFormat" rejection path. It differs from pcmSubFormatGUID only
 // in the first byte of data1.
@@ -97,7 +106,7 @@ func TestParseWAVHeaderHappy(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			info, err := parseWAVHeader(wavReader(tc.body))
+			info, err := parseWAVForTest(wavReader(tc.body))
 			if err != nil {
 				t.Fatalf("parseWAVHeader: %v", err)
 			}
@@ -115,7 +124,7 @@ func TestParseWAVHeaderPositionsAtData(t *testing.T) {
 	payload := []byte("PCMPAYLOAD!!")
 	body := append(stdWAVHeader(wavFormatPCM, 1, 8000, 16, uint32(len(payload)), 0xFFFFFFFF), payload...)
 	br := wavReader(body)
-	if _, err := parseWAVHeader(br); err != nil {
+	if _, err := parseWAVForTest(br); err != nil {
 		t.Fatalf("parseWAVHeader: %v", err)
 	}
 	got, err := io.ReadAll(br)
@@ -147,7 +156,7 @@ func TestParseWAVHeaderSkipsUnknownChunks(t *testing.T) {
 	body = append(body, payload...)
 
 	br := wavReader(body)
-	info, err := parseWAVHeader(br)
+	info, err := parseWAVForTest(br)
 	if err != nil {
 		t.Fatalf("parseWAVHeader: %v", err)
 	}
@@ -177,7 +186,7 @@ func TestParseWAVHeaderFmtExtension(t *testing.T) {
 	body = append(body, dataChunkID...)
 	body = le32(body, 0xFFFFFFFF)
 
-	info, err := parseWAVHeader(wavReader(body))
+	info, err := parseWAVForTest(wavReader(body))
 	if err != nil {
 		t.Fatalf("parseWAVHeader: %v", err)
 	}
@@ -205,7 +214,7 @@ func TestParseWAVHeaderExtensiblePCM16(t *testing.T) {
 			fmtBody := extensibleFmtBody(tc.channels, tc.rate, 16, 16, pcmSubFormatGUID)
 			body := wavWithFmtBody(fmtBody, uint32(len(fmtBody)), payload)
 			br := wavReader(body)
-			info, err := parseWAVHeader(br)
+			info, err := parseWAVForTest(br)
 			if err != nil {
 				t.Fatalf("parseWAVHeader: %v", err)
 			}
@@ -232,7 +241,7 @@ func TestParseWAVHeaderExtensibleMultichannel(t *testing.T) {
 	fmtBody := extensibleFmtBody(channels, 48000, 16, 16, pcmSubFormatGUID)
 	body := wavWithFmtBody(fmtBody, uint32(len(fmtBody)), payload)
 	br := wavReader(body)
-	info, err := parseWAVHeader(br)
+	info, err := parseWAVForTest(br)
 	if err != nil {
 		t.Fatalf("parseWAVHeader: %v", err)
 	}
@@ -259,7 +268,7 @@ func TestParseWAVHeaderExtensibleTrailingBytesAndPad(t *testing.T) {
 	body := wavWithFmtBody(fmtBody, uint32(len(fmtBody)), payload)
 
 	br := wavReader(body)
-	info, err := parseWAVHeader(br)
+	info, err := parseWAVForTest(br)
 	if err != nil {
 		t.Fatalf("parseWAVHeader: %v", err)
 	}
@@ -287,7 +296,7 @@ func TestParseWAVHeaderExtensibleTrailingBytesTruncated(t *testing.T) {
 	// header (8) + fmt base (16) + extension (24) + 5 of the 10 trailing bytes.
 	cut := riffHeaderSize + chunkHeaderSize + fmtChunkMinSize + fmtExtensibleExtSize + 5
 	body := full[:cut]
-	_, err := parseWAVHeader(wavReader(body))
+	_, err := parseWAVForTest(wavReader(body))
 	if !errors.Is(err, ErrMalformedWAV) || !errors.Is(err, io.ErrUnexpectedEOF) {
 		t.Fatalf("parseWAVHeader = %v, want ErrMalformedWAV wrapping io.ErrUnexpectedEOF", err)
 	}
@@ -344,7 +353,7 @@ func TestParseWAVHeaderExtensibleRejections(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if _, err := parseWAVHeader(wavReader(tc.body)); !errors.Is(err, tc.want) {
+			if _, err := parseWAVForTest(wavReader(tc.body)); !errors.Is(err, tc.want) {
 				t.Fatalf("parseWAVHeader = %v, want %v", err, tc.want)
 			}
 		})
@@ -363,7 +372,7 @@ func TestParseWAVHeaderExtensibleTruncatedExtension(t *testing.T) {
 	// 24 extension bytes.
 	cut := riffHeaderSize + chunkHeaderSize + fmtChunkMinSize + 10
 	body := full[:cut]
-	_, err := parseWAVHeader(wavReader(body))
+	_, err := parseWAVForTest(wavReader(body))
 	if !errors.Is(err, ErrMalformedWAV) || !errors.Is(err, io.ErrUnexpectedEOF) {
 		t.Fatalf("parseWAVHeader = %v, want ErrMalformedWAV wrapping io.ErrUnexpectedEOF", err)
 	}
@@ -391,7 +400,7 @@ func TestParseWAVHeaderErrors(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if _, err := parseWAVHeader(wavReader(tc.body)); !errors.Is(err, tc.want) {
+			if _, err := parseWAVForTest(wavReader(tc.body)); !errors.Is(err, tc.want) {
 				t.Fatalf("parseWAVHeader = %v, want %v", err, tc.want)
 			}
 		})
@@ -402,7 +411,7 @@ func TestParseWAVHeaderErrors(t *testing.T) {
 		body = append(body, fmtChunkID...)
 		body = le32(body, 10) // < 16
 		body = append(body, make([]byte, 10)...)
-		if _, err := parseWAVHeader(wavReader(body)); !errors.Is(err, ErrMalformedWAV) {
+		if _, err := parseWAVForTest(wavReader(body)); !errors.Is(err, ErrMalformedWAV) {
 			t.Fatalf("parseWAVHeader = %v, want ErrMalformedWAV", err)
 		}
 	})
@@ -413,7 +422,7 @@ func TestParseWAVHeaderErrors(t *testing.T) {
 		body := riffWave()
 		body = append(body, "JUNK"...)
 		body = le32(body, 2<<20)
-		if _, err := parseWAVHeader(wavReader(body)); !errors.Is(err, ErrMalformedWAV) {
+		if _, err := parseWAVForTest(wavReader(body)); !errors.Is(err, ErrMalformedWAV) {
 			t.Fatalf("parseWAVHeader = %v, want ErrMalformedWAV (budget)", err)
 		}
 	})
@@ -425,7 +434,7 @@ func TestParseWAVHeaderTruncations(t *testing.T) {
 	// fmt body. Every one is a truncation wrapping io.ErrUnexpectedEOF.
 	for _, cut := range []int{4, 10, 16, 30} {
 		body := full[:cut]
-		_, err := parseWAVHeader(wavReader(body))
+		_, err := parseWAVForTest(wavReader(body))
 		if !errors.Is(err, ErrMalformedWAV) || !errors.Is(err, io.ErrUnexpectedEOF) {
 			t.Fatalf("cut %d: parseWAVHeader = %v, want ErrMalformedWAV wrapping io.ErrUnexpectedEOF", cut, err)
 		}
@@ -467,7 +476,7 @@ func TestParseWAVHeaderFmtTrailingBudgetIsGlobal(t *testing.T) {
 	body = le16(body, 2)     // block align
 	body = le16(body, wavBitsPerSample)
 
-	_, err := parseWAVHeader(wavReader(body))
+	_, err := parseWAVForTest(wavReader(body))
 	if !errors.Is(err, ErrMalformedWAV) {
 		t.Fatalf("parseWAVHeader error = %v, want ErrMalformedWAV", err)
 	}
@@ -496,7 +505,7 @@ func TestParseWAVHeaderSampleRateUpperBound(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			header := stdWAVHeader(wavFormatPCM, 1, tt.rate, 16, 0, 0xFFFFFFFF)
-			info, err := parseWAVHeader(wavReader(header))
+			info, err := parseWAVForTest(wavReader(header))
 			switch {
 			case tt.wantErr && !errors.Is(err, ErrMalformedWAV):
 				t.Fatalf("rate %d: error = %v, want ErrMalformedWAV", tt.rate, err)

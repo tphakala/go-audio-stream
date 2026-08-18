@@ -106,10 +106,10 @@ type wavInfo struct {
 // byte after an odd size. RF64 and BW64 (64-bit RIFF) are reported as
 // unsupported; any other structural fault, including a truncation, is
 // ErrMalformedWAV.
-func parseWAVHeader(br *bufio.Reader) (wavInfo, error) {
+func (c *Client) parseWAVHeader(br *bufio.Reader) (wavInfo, error) {
 	var riff [riffHeaderSize]byte
 	if _, err := io.ReadFull(br, riff[:]); err != nil {
-		return wavInfo{}, malformedWAV(err)
+		return wavInfo{}, c.malformedWAV(err)
 	}
 	switch string(riff[0:4]) {
 	case riffMagic:
@@ -135,7 +135,7 @@ func parseWAVHeader(br *bufio.Reader) (wavInfo, error) {
 		}
 		var hdr [chunkHeaderSize]byte
 		if _, err := io.ReadFull(br, hdr[:]); err != nil {
-			return wavInfo{}, malformedWAV(err)
+			return wavInfo{}, c.malformedWAV(err)
 		}
 		consumed += chunkHeaderSize
 		id := string(hdr[0:4])
@@ -143,7 +143,7 @@ func parseWAVHeader(br *bufio.Reader) (wavInfo, error) {
 
 		switch id {
 		case fmtChunkID:
-			read, ferr := readFmtChunk(br, size, consumed, &info)
+			read, ferr := c.readFmtChunk(br, size, consumed, &info)
 			if ferr != nil {
 				return wavInfo{}, ferr
 			}
@@ -167,7 +167,7 @@ func parseWAVHeader(br *bufio.Reader) (wavInfo, error) {
 				return wavInfo{}, errWAVHeaderTooLarge()
 			}
 			if err := skip(br, skipLen); err != nil {
-				return wavInfo{}, malformedWAV(err)
+				return wavInfo{}, c.malformedWAV(err)
 			}
 			consumed += skipLen
 		}
@@ -196,13 +196,13 @@ func parseWAVHeader(br *bufio.Reader) (wavInfo, error) {
 // outerConsumed is the pre-data byte total parseWAVHeader has already spent (the
 // RIFF header and every chunk before this fmt), so the trailing-skip budget below
 // is enforced against the whole header rather than this chunk alone.
-func readFmtChunk(br *bufio.Reader, size uint32, outerConsumed int64, info *wavInfo) (int64, error) {
+func (c *Client) readFmtChunk(br *bufio.Reader, size uint32, outerConsumed int64, info *wavInfo) (int64, error) {
 	if size < fmtChunkMinSize {
 		return 0, fmt.Errorf("%w: fmt chunk is %d bytes, need at least %d", ErrMalformedWAV, size, fmtChunkMinSize)
 	}
 	var body [fmtChunkMinSize]byte
 	if _, err := io.ReadFull(br, body[:]); err != nil {
-		return 0, malformedWAV(err)
+		return 0, c.malformedWAV(err)
 	}
 	consumed := int64(fmtChunkMinSize)
 
@@ -222,7 +222,7 @@ func readFmtChunk(br *bufio.Reader, size uint32, outerConsumed int64, info *wavI
 		}
 		var ext [fmtExtensibleExtSize]byte
 		if _, err := io.ReadFull(br, ext[:]); err != nil {
-			return 0, malformedWAV(err)
+			return 0, c.malformedWAV(err)
 		}
 		consumed += int64(len(ext))
 
@@ -280,7 +280,7 @@ func readFmtChunk(br *bufio.Reader, size uint32, outerConsumed int64, info *wavI
 			return 0, errWAVHeaderTooLarge()
 		}
 		if err := skip(br, extra); err != nil {
-			return 0, malformedWAV(err)
+			return 0, c.malformedWAV(err)
 		}
 		consumed += extra
 	}
@@ -314,7 +314,15 @@ func skip(br *bufio.Reader, n int64) error {
 // malformedWAV wraps a read error as ErrMalformedWAV, normalizing any EOF-class
 // error to io.ErrUnexpectedEOF so a caller can match the truncation with
 // errors.Is(err, io.ErrUnexpectedEOF) regardless of which read hit the end.
-func malformedWAV(err error) error {
+func (c *Client) malformedWAV(err error) error {
+	// A stall that tripped the open deadline or a caller cancellation mid-header
+	// is a transient, retryable open-phase failure, not a malformed stream, so
+	// classify it through the open-phase taxonomy (issue #92). A clean short read
+	// on a well-formed but truncated stream (or a zero Client in a unit test)
+	// falls through to ErrMalformedWAV, preserving the pre-#92 behavior.
+	if oe := c.classifyOpenRead(err); oe != nil {
+		return oe
+	}
 	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
 		return fmt.Errorf("%w: %w", ErrMalformedWAV, io.ErrUnexpectedEOF)
 	}
