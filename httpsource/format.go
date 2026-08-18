@@ -66,7 +66,7 @@ func (c *Client) resolveFormat(resp *http.Response) error {
 // setupWAV parses the RIFF header from the buffered body and adopts its rate and
 // channels. WAV samples are little-endian by definition, so no byte swap.
 func (c *Client) setupWAV() error {
-	info, err := parseWAVHeader(c.br)
+	info, err := c.parseWAVHeader(c.br)
 	if err != nil {
 		return err
 	}
@@ -105,7 +105,19 @@ func (c *Client) setupL16(params map[string]string) error {
 // Absent any WAVE signature the shape comes entirely from Config.Format, and
 // unlabeled embedded PCM is native little-endian.
 func (c *Client) setupSniff() error {
-	if head, err := c.br.Peek(len(riffMagic) + 4 + len(waveMagic)); err == nil {
+	head, err := c.br.Peek(len(riffMagic) + 4 + len(waveMagic))
+	if err != nil && c.classifyOpenRead != nil {
+		// A stall that tripped the open deadline, a caller cancellation, or a
+		// transport failure during the sniff read fails Open through the
+		// open-phase taxonomy rather than being swallowed into a spurious raw-PCM
+		// success that then dies on the first body read (issue #92). A clean short
+		// read (a genuinely short unlabeled stream) classifies as nil and falls
+		// through to the Config.Format raw fallback, the pre-#92 behavior.
+		if oe := c.classifyOpenRead(err); oe != nil {
+			return oe
+		}
+	}
+	if err == nil {
 		if isRIFFWAVE(head) {
 			return c.setupWAV()
 		}

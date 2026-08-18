@@ -30,7 +30,7 @@ func FuzzParseWAVHeader(f *testing.F) {
 	f.Add([]byte(""))
 
 	f.Fuzz(func(t *testing.T, data []byte) {
-		info, err := parseWAVHeader(wavReader(data))
+		info, err := parseWAVForTest(wavReader(data))
 		if err != nil {
 			return // a typed error is fine; the contract is no panic
 		}
