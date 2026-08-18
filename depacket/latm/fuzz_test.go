@@ -111,11 +111,6 @@ func assertAUInvariants(t *testing.T, aus []AU) {
 // marker bit. It must never panic, and on the success path the returned AUs
 // must satisfy assertAUInvariants.
 func FuzzDepacketizeOutOfBand(f *testing.F) {
-	d, err := New(Config{MuxConfigPresent: false, StreamMuxConfig: v1})
-	if err != nil {
-		f.Fatalf("New: %v", err)
-	}
-
 	// v2 is the out-of-band AudioMuxElement paired with v1 (see V2 in
 	// latm_test.go): MuxSlotLengthBytes 03, payload AA BB CC.
 	v2 := []byte{0x03, 0xAA, 0xBB, 0xCC}
@@ -123,6 +118,12 @@ func FuzzDepacketizeOutOfBand(f *testing.F) {
 		f.Add(buf, true)
 	}
 	f.Fuzz(func(t *testing.T, payload []byte, marker bool) {
+		// A fresh depacketizer per input so each execution owns its buffers and
+		// cannot be influenced by state a prior input left behind.
+		d, err := New(Config{MuxConfigPresent: false, StreamMuxConfig: v1})
+		if err != nil {
+			t.Fatalf("New: %v", err)
+		}
 		aus, err := d.Depacketize(payload, marker, 0)
 		if err != nil {
 			return

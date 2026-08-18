@@ -160,8 +160,13 @@ func TestDescribeLATMOutOfBandMalformedConfigASCNil(t *testing.T) {
 // the test can assert both that OnCodecUpdate fired and that it preceded the
 // OnFrame call for the first AU decoded under the newly resolved config.
 type latmEvent struct {
-	kind string // "update" or "frame"
-	asc  []byte
+	kind string // eventUpdate or eventFrame
+	// data is the AudioSpecificConfig for an update event and the access-unit
+	// bytes for a frame event.
+	data []byte
+	// seqGap is the frame's reported RTP sequence gap (frame events only, 0 for
+	// updates), so a test can assert a gap was actually observed end to end.
+	seqGap int
 }
 
 // TestOnCodecUpdateEndToEnd drives a full Describe/Setup/Play/deliver cycle
@@ -189,11 +194,11 @@ func TestOnCodecUpdateEndToEnd(t *testing.T) {
 		URL:     s.URL("/stream"),
 		Timeout: testTimeout,
 		OnFrame: func(f audiostream.Frame) {
-			events <- latmEvent{kind: "frame"}
+			events <- latmEvent{kind: eventFrame}
 		},
 		OnCodecUpdate: func(trackID int, codec audiostream.Codec) {
 			latm, _ := codec.(audiostream.CodecMP4ALATM)
-			events <- latmEvent{kind: "update", asc: append([]byte(nil), latm.AudioSpecificConfig...)}
+			events <- latmEvent{kind: eventUpdate, data: append([]byte(nil), latm.AudioSpecificConfig...)}
 		},
 	})
 	if err != nil {
@@ -204,15 +209,15 @@ func TestOnCodecUpdateEndToEnd(t *testing.T) {
 	describeSetupPlay(t, c, nil)
 
 	first := recvLATMEvent(t, events)
-	if first.kind != "update" {
+	if first.kind != eventUpdate {
 		t.Fatalf("first event = %q, want update to precede the frame", first.kind)
 	}
-	if want := []byte{0x12, 0x10}; !bytes.Equal(first.asc, want) {
-		t.Errorf("OnCodecUpdate ASC = % x, want % x", first.asc, want)
+	if want := []byte{0x12, 0x10}; !bytes.Equal(first.data, want) {
+		t.Errorf("OnCodecUpdate ASC = % x, want % x", first.data, want)
 	}
 
 	second := recvLATMEvent(t, events)
-	if second.kind != "frame" {
+	if second.kind != eventFrame {
 		t.Errorf("second event = %q, want frame", second.kind)
 	}
 }
