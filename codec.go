@@ -6,6 +6,22 @@ type Codec interface {
 	isCodec()
 }
 
+// CodecUpdate is the value handed to Config.OnCodecUpdate when a track's codec
+// configuration is resolved from the media stream after Describe. It mirrors
+// the single-struct shape of Frame (handed to Config.OnFrame) so both callbacks
+// read the same way, and so an update reason or timestamp can be added later
+// without another signature break.
+//
+// TrackID is the track whose codec was resolved. Codec is the resolved codec
+// value; for in-band MP4A-LATM (cpresent=1) it carries the AudioSpecificConfig
+// that was not yet known at Describe. The Codec value and any slices it carries
+// (notably AudioSpecificConfig) are owned by the callee only for the duration
+// of the call; copy what you need to retain it.
+type CodecUpdate struct {
+	TrackID int
+	Codec   Codec
+}
+
 // CodecAAC is MPEG-4 AAC audio. AudioSpecificConfig carries the raw ASC
 // bytes from the SDP fmtp config attribute, ready to hand to a decoder
 // such as github.com/tphakala/go-aac.
@@ -71,8 +87,8 @@ func (CodecUnknown) isCodec() {}
 // AudioSpecificConfig is the AAC ASC bytes a decoder needs. For an
 // out-of-band config it is filled in at Describe time (extracted from
 // StreamMuxConfig); for an in-band config it is nil on the Track returned by
-// Describe and is delivered later through Config.OnCodecUpdate, whose codec
-// value carries the resolved ASC. This mirrors CodecAAC.AudioSpecificConfig,
+// Describe and is delivered later through Config.OnCodecUpdate, whose
+// CodecUpdate.Codec carries the resolved ASC. This mirrors CodecAAC.AudioSpecificConfig,
 // so a consumer handles both codecs the same way once the field is populated.
 type CodecMP4ALATM struct {
 	StreamMuxConfig     []byte

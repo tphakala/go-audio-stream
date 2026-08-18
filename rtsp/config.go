@@ -117,10 +117,10 @@ type Config struct {
 	// resolved config, so a consumer can initialize its decoder before the
 	// first frame reaches it. Like OnFrame, it runs on the delivery
 	// goroutine, must not block, and must not call Describe, Setup, Play, or
-	// Wait (Close and Stats are callback-safe). The codec value and any
-	// slices it carries are owned by the callee only for the duration of the
-	// call; copy AudioSpecificConfig to retain it.
-	OnCodecUpdate func(trackID int, codec audiostream.Codec)
+	// Wait (Close and Stats are callback-safe). The CodecUpdate's Codec and
+	// any slices it carries are owned by the callee only for the duration of
+	// the call; copy AudioSpecificConfig to retain it.
+	OnCodecUpdate func(audiostream.CodecUpdate)
 }
 
 // applyDefaults fills a zero or negative Timeout and a zero UserAgent with

@@ -196,8 +196,8 @@ func TestOnCodecUpdateEndToEnd(t *testing.T) {
 		OnFrame: func(f audiostream.Frame) {
 			events <- latmEvent{kind: eventFrame}
 		},
-		OnCodecUpdate: func(trackID int, codec audiostream.Codec) {
-			latm, _ := codec.(audiostream.CodecMP4ALATM)
+		OnCodecUpdate: func(u audiostream.CodecUpdate) {
+			latm, _ := u.Codec.(audiostream.CodecMP4ALATM)
 			events <- latmEvent{kind: eventUpdate, data: append([]byte(nil), latm.AudioSpecificConfig...)}
 		},
 	})

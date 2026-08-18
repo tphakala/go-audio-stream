@@ -437,7 +437,7 @@ func (tr *track) deliverAAC(pkt rtp.Packet, up rtp.Update, now time.Time, onFram
 // onCodecUpdate may be nil (deliver()'s generic dispatch passes nil, since it
 // has no Config to read one from; Client.process passes cfg.OnCodecUpdate).
 func (tr *track) deliverLATM(pkt rtp.Packet, up rtp.Update, now time.Time,
-	onFrame func(audiostream.Frame), onCodecUpdate func(trackID int, codec audiostream.Codec),
+	onFrame func(audiostream.Frame), onCodecUpdate func(audiostream.CodecUpdate),
 ) {
 	aus, err := tr.latm.Depacketize(pkt.Payload, pkt.Header.Marker, pkt.Header.Timestamp)
 	if err != nil {
@@ -453,9 +453,12 @@ func (tr *track) deliverLATM(pkt rtp.Packet, up rtp.Update, now time.Time,
 			// documents the slice as read-only, but a consumer that mutates it
 			// in place must not be able to reach back into tr.latmASC and skew
 			// a later comparison.
-			onCodecUpdate(tr.id, audiostream.CodecMP4ALATM{
-				MuxConfigPresent:    true,
-				AudioSpecificConfig: append([]byte(nil), asc...),
+			onCodecUpdate(audiostream.CodecUpdate{
+				TrackID: tr.id,
+				Codec: audiostream.CodecMP4ALATM{
+					MuxConfigPresent:    true,
+					AudioSpecificConfig: append([]byte(nil), asc...),
+				},
 			})
 		}
 	}
