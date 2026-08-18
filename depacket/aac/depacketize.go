@@ -49,8 +49,10 @@ func (d *Depacketizer) parseAUHeaders(payload []byte) (headers []auHeader, dataS
 		firstByte := bitPos / 8
 		lastByte := (bitPos + n - 1) / 8
 		var acc uint64
-		for b := firstByte; b <= lastByte; b++ {
-			acc = acc<<8 | uint64(hdr[b])
+		// Range over the exact byte span so the compiler elides the per-iteration
+		// bounds check; lastByte < len(hdr) by the loop guard in the caller.
+		for _, x := range hdr[firstByte : lastByte+1] {
+			acc = acc<<8 | uint64(x)
 		}
 		// Drop the bits after the field within the loaded bytes, then keep
 		// the low n bits (masking off any leading bits before the field).

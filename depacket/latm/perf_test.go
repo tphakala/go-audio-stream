@@ -81,15 +81,15 @@ func TestInBandResendConfigReuseSameASC(t *testing.T) {
 }
 
 // TestInBandResendConfigASCSizeChange drives resend-config packets whose ASC
-// changes size across calls, so the reused ascBuf must reslice and re-zero
+// changes size across calls, so the reused ascBuf must reslice and refill
 // correctly. The step order is load-bearing: because of the double buffer's
 // swap the dst passed on packet k is the buffer last written on packet k-2, so a
 // strict 2,5,2,5 alternation would only ever reuse a backing array to reproduce
-// the identical ASC it already held and would never exercise the re-zero. The
-// v4, explicit, explicit, v4 order instead reuses a 5-byte backing (last held
-// 17 80 5D C0 10) for the final 2-byte ASC: without the re-zero in
-// extractBitsInto that call would return 17 90 (the stale bytes OR-ed with
-// 12 10) rather than 12 10.
+// the identical ASC it already held. The v4, explicit, explicit, v4 order
+// instead reuses a 5-byte backing (last held 17 80 5D C0 10) for the final
+// 2-byte ASC: extractBitsInto reslices dst to 2 bytes and blitBits assigns both
+// directly, so the result is 12 10; a blit that failed to overwrite every byte
+// of the resliced dst would leak the stale 17 .. bytes.
 func TestInBandResendConfigASCSizeChange(t *testing.T) {
 	t.Parallel()
 	d, err := New(Config{MuxConfigPresent: true})
