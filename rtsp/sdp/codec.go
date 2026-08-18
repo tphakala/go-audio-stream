@@ -188,23 +188,32 @@ func rtpmapString(encoding string, clock, channels int, hasRTPMap bool) string {
 	return s
 }
 
-// parseAACFmtp parses a semicolon-separated MPEG4-GENERIC fmtp parameter
-// list. Keys are matched case-insensitively; unknown keys are ignored.
-// It never fails: a missing or non-hex config yields a nil Config, and
-// missing numeric fields stay 0.
-func parseAACFmtp(params string) *AACParams {
-	p := &AACParams{}
+// parseFmtpPairs splits a semicolon-separated fmtp parameter list into
+// key/value pairs and invokes fn for each. The key is lowercased for
+// case-insensitive matching and the value is trimmed but otherwise verbatim.
+//
+// BINDING TOTALITY RULE (split guard): a bare flag parameter with no '=' (for
+// example "cpresent") splits to a single element and is skipped here, never
+// indexed at [1]. Centralizing the guard means every fmtp parser inherits it.
+func parseFmtpPairs(params string, fn func(key, value string)) {
 	for _, elem := range strings.Split(params, ";") {
-		// BINDING TOTALITY RULE (split guard): a bare flag parameter with
-		// no '=' (for example "cpresent") splits to a single element and
-		// must be skipped, never indexed at [1].
 		kv := strings.SplitN(elem, "=", 2)
 		if len(kv) < 2 {
 			continue
 		}
 		key := strings.ToLower(strings.TrimSpace(kv[0]))
 		value := strings.TrimSpace(kv[1])
+		fn(key, value)
+	}
+}
 
+// parseAACFmtp parses a semicolon-separated MPEG4-GENERIC fmtp parameter
+// list. Keys are matched case-insensitively; unknown keys are ignored.
+// It never fails: a missing or non-hex config yields a nil Config, and
+// missing numeric fields stay 0.
+func parseAACFmtp(params string) *AACParams {
+	p := &AACParams{}
+	parseFmtpPairs(params, func(key, value string) {
 		switch key {
 		case "sizelength":
 			if n, err := strconv.Atoi(value); err == nil {
@@ -225,7 +234,7 @@ func parseAACFmtp(params string) *AACParams {
 				p.Config = b
 			}
 		}
-	}
+	})
 	return p
 }
 
@@ -237,17 +246,7 @@ func parseAACFmtp(params string) *AACParams {
 // cpresent leaves the RFC 3016 default of present (true).
 func parseLATMFmtp(params string) *LATMParams {
 	p := &LATMParams{Cpresent: true}
-	for _, elem := range strings.Split(params, ";") {
-		// BINDING TOTALITY RULE (split guard): a bare flag parameter with no
-		// '=' splits to a single element and must be skipped, never indexed
-		// at [1].
-		kv := strings.SplitN(elem, "=", 2)
-		if len(kv) < 2 {
-			continue
-		}
-		key := strings.ToLower(strings.TrimSpace(kv[0]))
-		value := strings.TrimSpace(kv[1])
-
+	parseFmtpPairs(params, func(key, value string) {
 		switch key {
 		case "cpresent":
 			if n, err := strconv.Atoi(value); err == nil {
@@ -262,6 +261,6 @@ func parseLATMFmtp(params string) *LATMParams {
 				p.Config = b
 			}
 		}
-	}
+	})
 	return p
 }

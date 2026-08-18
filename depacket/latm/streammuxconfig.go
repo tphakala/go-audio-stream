@@ -25,8 +25,11 @@ func (r *bitReader) read(n int) (v uint64, ok bool) {
 	firstByte := r.pos / 8
 	lastByte := (r.pos + n - 1) / 8
 	var acc uint64
-	for b := firstByte; b <= lastByte; b++ {
-		acc = acc<<8 | uint64(r.buf[b])
+	// Range over the exact byte span so the compiler elides the per-iteration
+	// bounds check; lastByte < len(r.buf) by the guard above. An index loop, or
+	// a pre-loop `_ = r.buf[lastByte]` hint, does not eliminate it.
+	for _, x := range r.buf[firstByte : lastByte+1] {
+		acc = acc<<8 | uint64(x)
 	}
 	rightPad := (lastByte+1)*8 - (r.pos + n)
 	v = (acc >> uint(rightPad)) & ((uint64(1) << uint(n)) - 1)
@@ -44,49 +47,64 @@ func (r *bitReader) byteAlign() {
 	}
 }
 
+// blitBits copies n bits from buf starting at bit offset start (MSB-first)
+// into dst[0:len(dst)], left-justified, zero-padding the trailing bits of the
+// final byte. len(dst) must equal (n+7)/8. It works one destination byte at a
+// time: each output byte is the source window [start+8j, start+8j+8) shifted
+// into place (a plain copy when the source is byte-aligned), rather than
+// testing one source bit at a time, so it touches roughly 8x fewer bytes on a
+// large in-band AU. The caller guarantees start+n <= len(buf)*8.
+func blitBits(dst, buf []byte, start, n int) {
+	if n == 0 {
+		return
+	}
+	sb := start / 8
+	shift := start % 8
+	size := len(dst)
+	if shift == 0 {
+		copy(dst, buf[sb:sb+size])
+	} else {
+		for j := range size {
+			hi := buf[sb+j] << shift
+			var lo byte
+			if sb+j+1 < len(buf) {
+				lo = buf[sb+j+1] >> (8 - shift)
+			}
+			dst[j] = hi | lo
+		}
+	}
+	// Zero-pad the bits after the field within the final byte. Direct
+	// assignment above already set every byte, so no separate clear is needed.
+	if rem := n & 7; rem != 0 {
+		dst[size-1] &= ^byte(0xFF >> rem)
+	}
+}
+
 // extractBitsInto copies n bits from buf starting at bit offset start (MSB
-// first) into a byte-aligned slice, left-justifying the bits and zero-padding
-// any trailing bits of the final byte. It reuses dst's backing array when that
-// already has enough capacity, re-zeroing the reslice it returns; pass nil to
-// always allocate a fresh slice. The caller guarantees start+n <= len(buf)*8.
+// first) into a byte-aligned slice via blitBits, left-justifying the bits and
+// zero-padding any trailing bits of the final byte. It reuses dst's backing
+// array when that already has enough capacity; pass nil to always allocate a
+// fresh slice. The caller guarantees start+n <= len(buf)*8.
 func extractBitsInto(dst, buf []byte, start, n int) []byte {
 	size := (n + 7) / 8
 	if cap(dst) < size {
 		dst = make([]byte, size)
 	} else {
 		dst = dst[:size]
-		for i := range dst {
-			dst[i] = 0
-		}
 	}
-	for i := range n {
-		bit := start + i
-		if buf[bit/8]&(1<<uint(7-bit%8)) == 0 {
-			continue
-		}
-		dst[i/8] |= 1 << uint(7-i%8)
-	}
+	blitBits(dst, buf, start, n)
 	return dst
 }
 
-// appendBits grows dst by n bits worth of bytes (via append, which
-// zero-fills a newly grown region on its own) and OR's in n bits from buf
-// starting at bit offset start (MSB first), left-justified into that
-// freshly appended region. Unlike extractBitsInto, appendBits never
-// re-zeros its destination: the region it writes into is always newly
-// appended, so it is already zero, and dst's prior content (if any) is left
-// untouched. The caller guarantees start+n <= len(buf)*8.
+// appendBits grows dst by n bits worth of bytes (via append) and writes n bits
+// from buf starting at bit offset start (MSB first) into that freshly appended
+// region via blitBits, left-justified. dst's prior content is left untouched.
+// The caller guarantees start+n <= len(buf)*8.
 func appendBits(dst, buf []byte, start, n int) []byte {
 	size := (n + 7) / 8
 	base := len(dst)
 	dst = append(dst, make([]byte, size)...)
-	for i := range n {
-		bit := start + i
-		if buf[bit/8]&(1<<uint(7-bit%8)) == 0 {
-			continue
-		}
-		dst[base+i/8] |= 1 << uint(7-i%8)
-	}
+	blitBits(dst[base:base+size], buf, start, n)
 	return dst
 }
 
