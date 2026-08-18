@@ -29,6 +29,24 @@ func readMuxSlot(payload []byte, offset int) (data []byte, next int, err error) 
 	return payload[offset : offset+length], offset + length, nil
 }
 
+// subFrameLayout validates the retained numSubFrames against MaxSubFrames and
+// returns the per-subframe RTP tick increment: Config.SamplesPerFrame when
+// nonzero, otherwise the ASC-derived frame length. The out-of-band and in-band
+// paths compute this identically once a StreamMuxConfig is in hand, so they
+// share it. The cap guard is a structural no-op today (numSubFrames is a 6-bit
+// field, so numSubFrames+1 tops out at exactly MaxSubFrames), kept as defensive
+// coding against the named constant.
+func (d *Depacketizer) subFrameLayout() (frameLenTicks uint32, err error) {
+	if d.smc.numSubFrames+1 > MaxSubFrames {
+		return 0, fmt.Errorf("%w: numSubFrames %d exceeds cap", ErrUnsupportedMux, d.smc.numSubFrames)
+	}
+	frameLenTicks = uint32(d.cfg.SamplesPerFrame)
+	if frameLenTicks == 0 {
+		frameLenTicks = d.frameLength
+	}
+	return frameLenTicks, nil
+}
+
 // Depacketize processes one RTP payload (one AudioMuxElement) and returns the
 // access units it carries, in order: one for the single-subframe case,
 // numSubFrames+1 for a multi-subframe AudioMuxElement. Each AU's RTPOffset is
@@ -51,17 +69,14 @@ func (d *Depacketizer) Depacketize(payload []byte, marker bool, rtpTime uint32) 
 		return d.depacketizeInBand(payload)
 	}
 	// Defensive: New always sets haveSMC on out-of-band success, so this is
-	// structurally unreachable here, like the numSubFrames cap guard below.
+	// structurally unreachable here, like the numSubFrames cap guard in
+	// subFrameLayout.
 	if !d.haveSMC {
 		return nil, ErrNoConfig
 	}
-	if d.smc.numSubFrames+1 > MaxSubFrames {
-		return nil, fmt.Errorf("%w: numSubFrames %d exceeds cap", ErrUnsupportedMux, d.smc.numSubFrames)
-	}
-
-	frameLenTicks := uint32(d.cfg.SamplesPerFrame)
-	if frameLenTicks == 0 {
-		frameLenTicks = d.frameLength
+	frameLenTicks, err := d.subFrameLayout()
+	if err != nil {
+		return nil, err
 	}
 
 	d.aus = d.aus[:0]
@@ -115,13 +130,9 @@ func (d *Depacketizer) depacketizeInBand(payload []byte) ([]AU, error) {
 		return nil, ErrNoConfig
 	}
 
-	if d.smc.numSubFrames+1 > MaxSubFrames {
-		return nil, fmt.Errorf("%w: numSubFrames %d exceeds cap", ErrUnsupportedMux, d.smc.numSubFrames)
-	}
-
-	frameLenTicks := uint32(d.cfg.SamplesPerFrame)
-	if frameLenTicks == 0 {
-		frameLenTicks = d.frameLength
+	frameLenTicks, err := d.subFrameLayout()
+	if err != nil {
+		return nil, err
 	}
 
 	d.aus = d.aus[:0]
