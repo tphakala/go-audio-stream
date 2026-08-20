@@ -25,6 +25,20 @@ const latmOutOfBandSDP = "v=0\r\n" +
 	"a=fmtp:96 cpresent=0;object=2;config=400024203fc0\r\n" +
 	"a=control:audio\r\n"
 
+// latmOutOfBandNoConfigSDP declares an out-of-band MP4A-LATM track (cpresent=0)
+// whose fmtp carries no config=, so its StreamMuxConfig is empty. latm.New
+// rejects an empty out-of-band config; resolveLATMASC now surfaces that once at
+// Describe (the dropped len(StreamMuxConfig)==0 early-out used to defer it to
+// Setup). It exercises latm.New's empty-config guard, a different branch than
+// latmOutOfBandMalformedSDP's parse error.
+const latmOutOfBandNoConfigSDP = "v=0\r\n" +
+	"o=- 0 0 IN IP4 127.0.0.1\r\n" +
+	"s=Stream\r\n" +
+	"m=audio 0 RTP/AVP 96\r\n" +
+	"a=rtpmap:96 MP4A-LATM/44100/2\r\n" +
+	"a=fmtp:96 cpresent=0;object=2\r\n" +
+	"a=control:audio\r\n"
+
 // latmInBandSDP declares an MP4A-LATM track whose fmtp carries no config=
 // and cpresent=1 (in-band): the ASC is not known until the stream carries
 // it, so it must be nil on the Track Describe returns.

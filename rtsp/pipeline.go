@@ -180,6 +180,8 @@ type track struct {
 // A non-audio track, an unrecognized codec, a non-AAC-hbr mode, or an invalid
 // fmtp falls back to raw payload delivery with a logged warning. It never
 // fails, so a quirky fmtp degrades one track to raw rather than failing Setup.
+//
+//nolint:gocritic // hugeParam: desc is the per-track descriptor threaded from Describe; newTrack runs once per Setup, not on the packet path, so the copy is not worth a pointer.
 func newTrack(id int, desc describedTrack, opts SetupOptions, rtcpCh int, logger *slog.Logger) *track {
 	tr := &track{
 		id:             id,
@@ -199,7 +201,7 @@ func newTrack(id int, desc describedTrack, opts SetupOptions, rtcpCh int, logger
 	case audiostream.CodecAAC:
 		tr.configureAAC(desc.aac, logger)
 	case audiostream.CodecMP4ALATM:
-		tr.configureLATM(codec, logger)
+		tr.configureLATM(codec, desc.latmDepack, desc.latmResolved, logger)
 	case audiostream.CodecOpus:
 		tr.kind = deliverOpus
 	case audiostream.CodecG711:
@@ -272,27 +274,43 @@ func modeOf(params *sdp.AACParams) string {
 }
 
 // configureLATM selects the MP4A-LATM depacketizer for a CodecMP4ALATM track,
-// falling back to raw delivery when latm.New rejects the config (an
-// out-of-band track with an unparseable or unsupported StreamMuxConfig; an
-// in-band track always succeeds here, since it learns its config from the
-// stream rather than from Setup).
+// falling back to raw delivery when the config cannot be parsed (an out-of-band
+// track with an unparseable, unsupported, or empty StreamMuxConfig; an in-band
+// track always succeeds here, since it learns its config from the stream rather
+// than from Setup).
+//
+// An out-of-band track's StreamMuxConfig was already parsed once at Describe:
+// resolved carries the depacketizer built there (or nil when that parse failed)
+// and alreadyResolved is true, so this adopts that result verbatim rather than
+// calling latm.New again and re-logging a malformed config. An in-band track,
+// and any track constructed without going through Describe, has alreadyResolved
+// false and builds the depacketizer here as before.
 //
 // For an out-of-band track the depacketizer already knows its
-// AudioSpecificConfig from New, equal to what Describe already put on the
-// Track (see resolveLATMASC), so tr.latmASC is seeded with it here: the first
-// call to deliverLATM then sees no change and never fires OnCodecUpdate,
-// matching the documented "does not fire for a config already known at
-// Describe" contract. An in-band track has no config yet, so
-// dp.AudioSpecificConfig() is nil and tr.latmASC stays nil until the first
-// packet resolves one.
-func (tr *track) configureLATM(codec audiostream.CodecMP4ALATM, logger *slog.Logger) {
-	dp, err := latm.New(latm.Config{
-		MuxConfigPresent: codec.MuxConfigPresent,
-		StreamMuxConfig:  codec.StreamMuxConfig,
-	})
-	if err != nil {
+// AudioSpecificConfig, equal to what Describe put on the Track (see
+// resolveLATMASC), so tr.latmASC is seeded with it here: the first call to
+// deliverLATM then sees no change and never fires OnCodecUpdate, matching the
+// documented "does not fire for a config already known at Describe" contract.
+// An in-band track has no config yet, so dp.AudioSpecificConfig() is nil and
+// tr.latmASC stays nil until the first packet resolves one.
+func (tr *track) configureLATM(codec audiostream.CodecMP4ALATM, resolved *latm.Depacketizer, alreadyResolved bool, logger *slog.Logger) {
+	dp := resolved
+	if !alreadyResolved {
+		var err error
+		dp, err = latm.New(latm.Config{
+			MuxConfigPresent: codec.MuxConfigPresent,
+			StreamMuxConfig:  codec.StreamMuxConfig,
+		})
+		if err != nil {
+			tr.kind = deliverRaw
+			logWarn(logger, "latm fmtp invalid; delivering raw payloads", "error", err)
+			return
+		}
+	}
+	if dp == nil {
+		// Describe parsed the out-of-band StreamMuxConfig and it was malformed;
+		// it logged there. Fall back to raw without re-parsing or re-logging.
 		tr.kind = deliverRaw
-		logWarn(logger, "latm fmtp invalid; delivering raw payloads", "error", err)
 		return
 	}
 	tr.kind = deliverLATM
