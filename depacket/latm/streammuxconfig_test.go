@@ -277,3 +277,121 @@ func TestParseStreamMuxConfigCoreCoderDelay(t *testing.T) {
 		t.Errorf("numSubFrames = %d, want 0", smc.numSubFrames)
 	}
 }
+
+// TestInBandSeedFromConfig covers the RFC 3016 config= seed: when cpresent=1
+// but the SDP also carries a StreamMuxConfig, New seeds the retained config so
+// a first AudioMuxElement that sets useSameStreamMux=1 decodes immediately
+// instead of stalling with ErrNoConfig.
+func TestInBandSeedFromConfig(t *testing.T) {
+	t.Parallel()
+	d, err := New(Config{MuxConfigPresent: true, StreamMuxConfig: v1})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if asc := d.AudioSpecificConfig(); !bytes.Equal(asc, []byte{0x12, 0x10}) {
+		t.Fatalf("AudioSpecificConfig = % x, want 12 10 (seed installed at New)", asc)
+	}
+	// v5 sets useSameStreamMux=1 as the FIRST packet: without the seed this was
+	// ErrNoConfig.
+	aus, err := d.Depacketize(v5, true, 0)
+	if err != nil {
+		t.Fatalf("Depacketize(v5) as first packet: %v", err)
+	}
+	if len(aus) != 1 {
+		t.Fatalf("AU count = %d, want 1", len(aus))
+	}
+	if want := []byte{0xAA, 0xBB, 0xCC}; !bytes.Equal(aus[0].Data, want) {
+		t.Errorf("Data = % x, want % x", aus[0].Data, want)
+	}
+	if aus[0].RTPOffset != 0 {
+		t.Errorf("RTPOffset = %d, want 0", aus[0].RTPOffset)
+	}
+}
+
+// TestInBandSeedReAppliedOnReset covers the SSRC-reset re-seed: a config= seed
+// is a persistent baseline, so Reset (called on an SSRC change) re-establishes
+// it rather than dropping it. Contrast TestResetDropsInBandConfig, where a
+// seedless in-band config is cleared and the following useSameStreamMux=1
+// packet fails.
+func TestInBandSeedReAppliedOnReset(t *testing.T) {
+	t.Parallel()
+	d, err := New(Config{MuxConfigPresent: true, StreamMuxConfig: v1})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if _, err := d.Depacketize(v5, true, 0); err != nil {
+		t.Fatalf("Depacketize(v5) before reset: %v", err)
+	}
+
+	d.Reset()
+
+	if asc := d.AudioSpecificConfig(); !bytes.Equal(asc, []byte{0x12, 0x10}) {
+		t.Fatalf("AudioSpecificConfig = % x after Reset, want 12 10 (seed re-applied)", asc)
+	}
+	aus, err := d.Depacketize(v5, true, 0)
+	if err != nil {
+		t.Fatalf("Depacketize(v5) after reset: %v, want the seed to survive", err)
+	}
+	if len(aus) != 1 {
+		t.Fatalf("AU count = %d, want 1", len(aus))
+	}
+	if want := []byte{0xAA, 0xBB, 0xCC}; !bytes.Equal(aus[0].Data, want) {
+		t.Errorf("Data = % x, want % x", aus[0].Data, want)
+	}
+}
+
+// TestInBandSeedMalformedIgnored covers the soft-ignore policy: a malformed
+// optional config= seed in the in-band mode does not fail New, and the stream
+// still self-describes via a later useSameStreamMux=0 packet.
+func TestInBandSeedMalformedIgnored(t *testing.T) {
+	t.Parallel()
+	d, err := New(Config{MuxConfigPresent: true, StreamMuxConfig: v1UnsupportedAOT})
+	if err != nil {
+		t.Fatalf("New with a malformed seed: %v, want nil (the seed is optional)", err)
+	}
+	if asc := d.AudioSpecificConfig(); asc != nil {
+		t.Errorf("AudioSpecificConfig = % x, want nil (malformed seed ignored)", asc)
+	}
+	// The seed was ignored, so a first useSameStreamMux=1 packet still stalls.
+	if _, err := d.Depacketize(v5, true, 0); !errors.Is(err, ErrNoConfig) {
+		t.Fatalf("Depacketize(v5) = %v, want ErrNoConfig (seed ignored)", err)
+	}
+	// A useSameStreamMux=0 packet carries the config inline and self-describes.
+	aus, err := d.Depacketize(v4, true, 0)
+	if err != nil {
+		t.Fatalf("Depacketize(v4): %v", err)
+	}
+	if len(aus) != 1 {
+		t.Fatalf("AU count = %d, want 1", len(aus))
+	}
+	if want := []byte{0xAA, 0xBB, 0xCC}; !bytes.Equal(aus[0].Data, want) {
+		t.Errorf("Data = % x, want % x", aus[0].Data, want)
+	}
+	if asc := d.AudioSpecificConfig(); !bytes.Equal(asc, []byte{0x12, 0x10}) {
+		t.Errorf("AudioSpecificConfig = % x after v4, want 12 10", asc)
+	}
+}
+
+// TestInBandSeedThenDifferentInlineConfigUpdatesASC proves that seeding the
+// retained config at New does not mask a genuine mid-stream config change: a
+// later useSameStreamMux=0 packet carrying a DIFFERENT StreamMuxConfig replaces
+// the seed, so AudioSpecificConfig reports the new ASC (which deliverLATM then
+// re-announces via OnCodecUpdate, covered at the rtsp layer).
+func TestInBandSeedThenDifferentInlineConfigUpdatesASC(t *testing.T) {
+	t.Parallel()
+	d, err := New(Config{MuxConfigPresent: true, StreamMuxConfig: v1})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if asc := d.AudioSpecificConfig(); !bytes.Equal(asc, []byte{0x12, 0x10}) {
+		t.Fatalf("seed ASC = % x, want 12 10", asc)
+	}
+	// buildInBandExplicitRate is a useSameStreamMux=0 AudioMuxElement whose
+	// inline config differs from the seed (ASC 17 80 5D C0 10).
+	if _, err := d.Depacketize(buildInBandExplicitRate(), true, 0); err != nil {
+		t.Fatalf("Depacketize(explicit-rate inline config): %v", err)
+	}
+	if asc := d.AudioSpecificConfig(); !bytes.Equal(asc, ascExplicitRate) {
+		t.Errorf("ASC after a different inline config = % x, want % x", asc, ascExplicitRate)
+	}
+}

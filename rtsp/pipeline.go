@@ -291,8 +291,11 @@ func modeOf(params *sdp.AACParams) string {
 // resolveLATMASC), so tr.latmASC is seeded with it here: the first call to
 // deliverLATM then sees no change and never fires OnCodecUpdate, matching the
 // documented "does not fire for a config already known at Describe" contract.
-// An in-band track has no config yet, so dp.AudioSpecificConfig() is nil and
-// tr.latmASC stays nil until the first packet resolves one.
+// A seedless in-band track has no config yet, so dp.AudioSpecificConfig() is
+// nil and tr.latmASC stays nil until the first packet resolves one. An in-band
+// track whose SDP carried a config= (an RFC 3016 seed) knows its ASC at Setup
+// just like the out-of-band case, so tr.latmASC is seeded here and the first
+// reused-config packet likewise fires no OnCodecUpdate.
 func (tr *track) configureLATM(codec audiostream.CodecMP4ALATM, resolved *latm.Depacketizer, alreadyResolved bool, logger *slog.Logger) {
 	dp := resolved
 	if !alreadyResolved {
@@ -659,13 +662,15 @@ func (tr *track) ptsOf(ts uint64) time.Duration {
 // tr.latm.Reset(), rather than cleared unconditionally, so the change
 // re-announces the resolved config for an in-band track without spuriously
 // refiring one for an out-of-band track. latm.Depacketizer.Reset documents the
-// asymmetry this relies on: it clears an in-band config (Reset sets its ASC
-// back to nil), but leaves an out-of-band one untouched (Reset is a no-op
-// there, so the ASC survives unchanged). Re-seeding after Reset therefore lands
-// on nil for in-band, so the next resolved config's deliverLATM sees no
-// snapshot to compare against and reports it through OnCodecUpdate again, and on
-// the same unchanged bytes for out-of-band, so the next packet's deliverLATM
-// sees no change and never fires.
+// asymmetry this relies on: it clears a seedless in-band config (Reset sets its
+// ASC back to nil), re-establishes an in-band config= seed (Reset lands on the
+// seed's ASC), and leaves an out-of-band one untouched (Reset is a no-op there,
+// so the ASC survives unchanged). Re-seeding tr.latmASC after Reset therefore
+// lands on nil for a seedless in-band track, so the next resolved config's
+// deliverLATM sees no snapshot to compare against and reports it through
+// OnCodecUpdate again; and on unchanged bytes for a seeded in-band or an
+// out-of-band track, so the next packet's deliverLATM sees no change and never
+// fires.
 func (tr *track) resetDepacketizer(onSSRCChange bool) {
 	if tr.aac != nil {
 		tr.aac.Reset()
