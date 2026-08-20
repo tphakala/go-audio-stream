@@ -59,10 +59,14 @@ type Config struct {
 	// StreamMuxConfig is out-of-band in StreamMuxConfig; true means each
 	// AudioMuxElement carries it in-band (or reuses a retained one).
 	MuxConfigPresent bool
-	// StreamMuxConfig is the out-of-band StreamMuxConfig bytes (the SDP
-	// config= value for a LATM track, which is a StreamMuxConfig, not a bare
-	// AudioSpecificConfig). Required when MuxConfigPresent is false; ignored
-	// otherwise.
+	// StreamMuxConfig is the StreamMuxConfig bytes carried in the SDP config=
+	// value for a LATM track (a StreamMuxConfig, not a bare
+	// AudioSpecificConfig). Required when MuxConfigPresent is false. When
+	// MuxConfigPresent is true it is optional: RFC 3016 permits a config=
+	// alongside cpresent=1 as an initial in-band StreamMuxConfig, so when
+	// present it seeds the retained config and a first AudioMuxElement that
+	// sets useSameStreamMux=1 reuses it instead of failing with ErrNoConfig. A
+	// malformed seed in this mode is ignored rather than fatal.
 	StreamMuxConfig []byte
 	// SamplesPerFrame overrides the per-subframe RTP tick increment. Zero
 	// uses the value derived from the ASC frameLengthFlag (1024 or 960).
@@ -107,7 +111,10 @@ type Depacketizer struct {
 // parses Config.StreamMuxConfig once, extracting the ASC and mux parameters,
 // and returns ErrConfigInvalid or ErrUnsupportedMux/ErrUnsupportedASC on a bad
 // config. For the in-band mode it returns a Depacketizer that learns the
-// config from the first packet.
+// config from the first packet; when Config.StreamMuxConfig is non-empty there
+// (an RFC 3016 config= alongside cpresent=1), it seeds the retained config from
+// those bytes so a first packet that reuses the config still decodes. A
+// malformed seed in the in-band mode is ignored, not fatal.
 func New(cfg Config) (*Depacketizer, error) {
 	if cfg.SamplesPerFrame < 0 || cfg.SamplesPerFrame > 8192 {
 		return nil, fmt.Errorf("%w: SamplesPerFrame %d not in 0..8192", ErrConfigInvalid, cfg.SamplesPerFrame)
@@ -115,6 +122,16 @@ func New(cfg Config) (*Depacketizer, error) {
 
 	d := &Depacketizer{cfg: cfg}
 	if cfg.MuxConfigPresent {
+		// RFC 3016 permits an SDP config= (a StreamMuxConfig) alongside
+		// cpresent=1 as an initial in-band StreamMuxConfig. Seed the retained
+		// config from it when present, so a camera whose first AudioMuxElement
+		// sets useSameStreamMux=1 (never sending an inline config) decodes
+		// immediately instead of stalling with ErrNoConfig. applySeed is a
+		// no-op when no seed is configured or it does not parse: the seed is
+		// optional and the stream can still self-describe via a later
+		// useSameStreamMux=0 packet, so an unusable seed degrades to the
+		// seedless in-band behavior rather than forcing raw fallback.
+		d.applySeed()
 		return d, nil
 	}
 
@@ -132,10 +149,33 @@ func New(cfg Config) (*Depacketizer, error) {
 	return d, nil
 }
 
+// applySeed installs the optional out-of-band StreamMuxConfig carried alongside
+// cpresent=1 (an RFC 3016 config=) as the retained in-band config, so a first
+// AudioMuxElement with useSameStreamMux=1 reuses it. It is a no-op when no seed
+// is configured or the seed does not parse, leaving haveSMC false so the
+// depacketizer behaves as if no config= were present. New and Reset both call
+// it; Reset re-establishes the seed after an SSRC change. Re-parsing from the
+// immutable Config bytes yields a freshly allocated ASC (nil scratch), so the
+// seed never shares a backing array with the in-band ASC double buffer and
+// cannot be corrupted by a later in-band config parse.
+func (d *Depacketizer) applySeed() {
+	if len(d.cfg.StreamMuxConfig) == 0 {
+		return
+	}
+	smc, asc, frameLength, err := parseStreamMuxConfig(d.cfg.StreamMuxConfig)
+	if err != nil {
+		return
+	}
+	d.smc = smc
+	d.asc = asc
+	d.frameLength = frameLength
+	d.haveSMC = true
+}
+
 // AudioSpecificConfig returns the AAC AudioSpecificConfig extracted from the
-// StreamMuxConfig (out-of-band at New, or from the first in-band packet), or
-// nil before any config has been seen. The returned slice is owned by the
-// Depacketizer; copy to retain across calls.
+// StreamMuxConfig (out-of-band at New, from an in-band config= seed at New, or
+// from the first in-band packet), or nil before any config has been seen. The
+// returned slice is owned by the Depacketizer; copy to retain across calls.
 func (d *Depacketizer) AudioSpecificConfig() []byte {
 	if !d.haveSMC {
 		return nil
@@ -145,7 +185,9 @@ func (d *Depacketizer) AudioSpecificConfig() []byte {
 
 // Reset discards any retained in-band StreamMuxConfig learned from the stream,
 // so a following packet must re-carry the config. The caller invokes it on an
-// SSRC change. It does not clear an out-of-band config supplied at New.
+// SSRC change. It does not clear an out-of-band config supplied at New, and it
+// re-establishes an in-band config= seed (see applySeed) so a stream that only
+// ever sends useSameStreamMux=1 keeps decoding across SSRC changes.
 func (d *Depacketizer) Reset() {
 	if !d.cfg.MuxConfigPresent {
 		return
@@ -161,4 +203,8 @@ func (d *Depacketizer) Reset() {
 	}
 	d.asc = nil
 	d.frameLength = 0
+	// Re-establish the config= seed (if any) so a camera that only ever sends
+	// useSameStreamMux=1 keeps decoding after an SSRC change. Without a seed
+	// this is a no-op and the next packet must re-carry the config as before.
+	d.applySeed()
 }

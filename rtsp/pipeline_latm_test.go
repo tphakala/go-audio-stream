@@ -540,3 +540,112 @@ func TestResetDepacketizerInBandConfigClearedOnSSRCChange(t *testing.T) {
 		t.Errorf("malformed = %d after V5, want %d (cleared config -> ErrNoConfig)", got, before+1)
 	}
 }
+
+// newSeededInBandLATMTrack builds a track configured for in-band MP4A-LATM
+// whose SDP carried a config= (an RFC 3016 seed): MuxConfigPresent true WITH a
+// StreamMuxConfig. It matches a camera that advertises config= alongside
+// cpresent=1 and then reuses it in-band via useSameStreamMux=1.
+func newSeededInBandLATMTrack(t *testing.T) *track {
+	t.Helper()
+	desc := describedTrack{
+		codec:     audiostream.CodecMP4ALATM{MuxConfigPresent: true, StreamMuxConfig: latmV1},
+		clockRate: 44100,
+		media:     audiostream.MediaAudio,
+	}
+	tr := newTrack(0, desc, SetupOptions{}, 1, nil)
+	if tr.kind != deliverLATM {
+		t.Fatalf("kind = %d, want deliverLATM", tr.kind)
+	}
+	if tr.latm == nil {
+		t.Fatal("latm depacketizer is nil")
+	}
+	tr.baseSet.Store(true)
+	return tr
+}
+
+// TestNewTrackLATMInBandSeedFromConfig covers the Setup wiring for issue #83's
+// config= seed: an in-band track whose SDP carried config= gets the seed ASC at
+// Setup (like an out-of-band track), and a first useSameStreamMux=1 packet
+// (latmV5) decodes immediately instead of stalling with ErrNoConfig.
+func TestNewTrackLATMInBandSeedFromConfig(t *testing.T) {
+	t.Parallel()
+	tr := newSeededInBandLATMTrack(t)
+	if !bytes.Equal(tr.latmASC, latmASC) {
+		t.Fatalf("latmASC = % x, want % x seeded at Setup from config=", tr.latmASC, latmASC)
+	}
+
+	pkt := rtp.Packet{Header: rtp.Header{Timestamp: 0, Marker: true}, Payload: latmV5}
+	var frames []audiostream.Frame
+	tr.deliverLATM(pkt, rtp.Update{Timestamp: 0}, time.Unix(1, 0), func(f audiostream.Frame) {
+		frames = append(frames, copyFrame(&f))
+	}, nil)
+	if len(frames) != 1 {
+		t.Fatalf("first useSameStreamMux=1 packet delivered %d frames, want 1", len(frames))
+	}
+	if want := []byte{0xAA, 0xBB, 0xCC}; !bytes.Equal(frames[0].Data, want) {
+		t.Errorf("Data = % x, want % x", frames[0].Data, want)
+	}
+	if tr.malformed.Load() != 0 {
+		t.Errorf("malformed = %d, want 0 (the seed lets the reuse packet decode)", tr.malformed.Load())
+	}
+}
+
+// TestDeliverLATMInBandSeedNoCodecUpdate covers OnCodecUpdate suppression for a
+// seeded in-band track: the seed ASC is known at Setup, so a reused-config
+// packet reports no change and never fires OnCodecUpdate, matching the
+// out-of-band contract.
+func TestDeliverLATMInBandSeedNoCodecUpdate(t *testing.T) {
+	t.Parallel()
+	tr := newSeededInBandLATMTrack(t)
+	var rec codecUpdateRecording
+
+	pkt := rtp.Packet{Header: rtp.Header{Timestamp: 0, Marker: true}, Payload: latmV5}
+	tr.deliverLATM(pkt, rtp.Update{Timestamp: 0}, time.Unix(1, 0), rec.onFrame, rec.onCodecUpdate)
+	// A second packet too, so the assertion covers steady state, not just the first.
+	tr.deliverLATM(pkt, rtp.Update{Timestamp: 0}, time.Unix(1, 0), rec.onFrame, rec.onCodecUpdate)
+
+	for _, e := range rec.events {
+		if e == latmEventUpdate {
+			t.Fatalf("OnCodecUpdate fired for a seeded in-band track: events = %v", rec.events)
+		}
+	}
+	if len(rec.events) == 0 {
+		t.Fatal("no frames delivered from the seeded in-band track")
+	}
+}
+
+// TestResetDepacketizerInBandSeedSurvivesSSRCChange is the seeded counterpart to
+// TestResetDepacketizerInBandConfigClearedOnSSRCChange: a config= seed is a
+// persistent baseline, so an SSRC reset re-establishes it and a following
+// useSameStreamMux=1 packet keeps decoding, with no spurious OnCodecUpdate.
+func TestResetDepacketizerInBandSeedSurvivesSSRCChange(t *testing.T) {
+	t.Parallel()
+	tr := newSeededInBandLATMTrack(t)
+	var rec codecUpdateRecording
+
+	pkt := rtp.Packet{Header: rtp.Header{Timestamp: 0, Marker: true}, Payload: latmV5}
+	tr.deliverLATM(pkt, rtp.Update{Timestamp: 0}, time.Unix(1, 0), rec.onFrame, rec.onCodecUpdate)
+
+	// An SSRC change: resetDepacketizer(true) clears a seedless config, but a
+	// config= seed is re-established, so the retained ASC survives.
+	tr.resetDepacketizer(true)
+	if !bytes.Equal(tr.latmASC, latmASC) {
+		t.Fatalf("latmASC = % x after an SSRC reset, want the seed % x to survive", tr.latmASC, latmASC)
+	}
+
+	before := tr.malformed.Load()
+	pkt2 := rtp.Packet{Header: rtp.Header{Timestamp: 1024, Marker: true}, Payload: latmV5}
+	n := 0
+	tr.deliverLATM(pkt2, rtp.Update{Timestamp: 1024}, time.Unix(1, 0), func(audiostream.Frame) { n++ }, rec.onCodecUpdate)
+	if n != 1 {
+		t.Fatalf("useSameStreamMux=1 packet after an SSRC reset delivered %d frames, want 1 (seed must survive)", n)
+	}
+	if got := tr.malformed.Load(); got != before {
+		t.Errorf("malformed = %d after the reset packet, want %d", got, before)
+	}
+	for _, e := range rec.events {
+		if e == latmEventUpdate {
+			t.Fatalf("OnCodecUpdate fired for a seeded in-band track across an SSRC reset: events = %v", rec.events)
+		}
+	}
+}
