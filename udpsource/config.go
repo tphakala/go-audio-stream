@@ -129,6 +129,27 @@ type Config struct {
 	// It has no effect in ModePCM, whose datagrams carry no sequence numbers.
 	Reorder bool
 
+	// RTCPListenAddr, when non-empty, binds a second UDP socket (host:port) that
+	// receives RTCP for this stream on a separate port, the classic RTP/RTCP
+	// convention where a sender emits RTCP alongside the media on RTP-port + 1.
+	// A received Sender Report populates TrackStats.SenderClock (the RTP-to-wall-
+	// clock correspondence), which is otherwise invalid on the raw path since it
+	// carries no SDP. RTCP is advisory: a malformed or off-source datagram is
+	// ignored and never ends the session, and media delivery is unaffected. It is
+	// consulted only in ModeRTP; empty (the default) binds no second socket and is
+	// zero-value-inert, leaving the steady-state media path byte-for-byte
+	// unchanged. Mutually exclusive with RTCPMux.
+	RTCPListenAddr string
+
+	// RTCPMux enables RFC 5761 RTP/RTCP multiplexing: RTCP is demultiplexed off
+	// the single media socket (ListenAddr) by packet type, for senders that mux
+	// both onto one port. Like RTCPListenAddr it populates TrackStats.SenderClock
+	// from Sender Reports and is advisory. It is consulted only in ModeRTP and is
+	// zero-value-inert when false (the default). Because RFC 5761 disambiguates by
+	// the second byte, PayloadType must not fall in the reserved range 64-95 when
+	// RTCPMux is set. Mutually exclusive with RTCPListenAddr.
+	RTCPMux bool
+
 	// Format describes the raw PCM datagrams (ModePCM). Required for ModePCM.
 	Format PCMFormat
 

@@ -42,7 +42,12 @@
 // corrupting the next one. Config.Reorder opts into resequencing through the shared
 // rtsp/rtp.Reorderer, so a late-but-in-window datagram is recovered and delivered in
 // sequence order at the cost of a bounded latency and one heap copy per datagram.
-// There is no RTCP handling, so TrackStats.SenderClock stays invalid.
+// RTCP is opt-in: Config.RTCPListenAddr binds a second socket for RTCP on a
+// separate port, and Config.RTCPMux demultiplexes RTCP off the media socket (RFC
+// 5761), so a received Sender Report populates TrackStats.SenderClock (the
+// RTP-to-wall-clock correspondence). RTCP is advisory and never affects media
+// delivery; with neither set (the default) there is no RTCP handling and
+// TrackStats.SenderClock stays invalid.
 //
 // Open binds the socket and returns an already-receiving source. Its ctx bounds
 // only the bind and does not end the stream afterward; Close does. A Client
