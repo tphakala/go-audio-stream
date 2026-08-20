@@ -6,6 +6,7 @@ import (
 	"time"
 
 	audiostream "github.com/tphakala/go-audio-stream"
+	"github.com/tphakala/go-audio-stream/depacket/latm"
 	"github.com/tphakala/go-audio-stream/rtsp/rtp"
 )
 
@@ -156,6 +157,61 @@ func TestNewTrackInvalidLATMConfigFallsBackToRaw(t *testing.T) {
 	}
 	if tr.latm != nil {
 		t.Error("latm depacketizer must be nil when the config is invalid")
+	}
+}
+
+// TestConfigureLATMReusesDescribeDepacketizer proves the out-of-band
+// double-parse fix: when Describe already parsed the StreamMuxConfig and
+// stashed the depacketizer on the describedTrack (latmResolved true), newTrack
+// adopts that exact instance rather than building a second one. Pointer
+// identity is the proof of reuse, and the ASC snapshot is still seeded.
+func TestConfigureLATMReusesDescribeDepacketizer(t *testing.T) {
+	t.Parallel()
+	dp, err := latm.New(latm.Config{MuxConfigPresent: false, StreamMuxConfig: latmV1})
+	if err != nil {
+		t.Fatalf("latm.New: %v", err)
+	}
+	desc := describedTrack{
+		codec:        audiostream.CodecMP4ALATM{StreamMuxConfig: latmV1, MuxConfigPresent: false},
+		clockRate:    44100,
+		media:        audiostream.MediaAudio,
+		latmDepack:   dp,
+		latmResolved: true,
+	}
+	tr := newTrack(0, desc, SetupOptions{}, 1, nil)
+	if tr.kind != deliverLATM {
+		t.Fatalf("kind = %d, want deliverLATM", tr.kind)
+	}
+	if tr.latm != dp {
+		t.Error("latm depacketizer was rebuilt; want the Describe-parsed instance reused")
+	}
+	if !bytes.Equal(tr.latmASC, latmASC) {
+		t.Errorf("latmASC = % x, want % x seeded from the reused depacketizer", tr.latmASC, latmASC)
+	}
+}
+
+// TestConfigureLATMResolvedFailureFallsBackToRaw covers the resolved-but-failed
+// path: Describe ran the out-of-band parse and it failed (latmResolved true,
+// latmDepack nil), so newTrack falls back to raw delivery without re-parsing.
+// The StreamMuxConfig here is a VALID config (latmV1) on purpose: because it
+// would parse if re-read, a regression that dropped the alreadyResolved guard
+// and re-called latm.New would build a depacketizer and yield deliverLATM, which
+// tr.kind != deliverRaw then catches. The correct path never reads it and stays
+// raw because latmDepack is nil.
+func TestConfigureLATMResolvedFailureFallsBackToRaw(t *testing.T) {
+	t.Parallel()
+	desc := describedTrack{
+		codec:        audiostream.CodecMP4ALATM{StreamMuxConfig: latmV1, MuxConfigPresent: false},
+		clockRate:    44100,
+		media:        audiostream.MediaAudio,
+		latmResolved: true,
+	}
+	tr := newTrack(0, desc, SetupOptions{}, 1, nil)
+	if tr.kind != deliverRaw {
+		t.Fatalf("kind = %d, want deliverRaw", tr.kind)
+	}
+	if tr.latm != nil {
+		t.Error("latm depacketizer is non-nil; want raw fallback with no depacketizer")
 	}
 }
 

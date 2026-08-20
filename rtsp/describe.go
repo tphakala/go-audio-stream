@@ -35,6 +35,16 @@ type describedTrack struct {
 	clockRate   int
 	media       audiostream.MediaKind
 	aac         *sdp.AACParams
+	// latmDepack is the depacketizer resolveLATMASC built once from an
+	// out-of-band MP4A-LATM StreamMuxConfig at Describe, reused verbatim by
+	// configureLATM at Setup so the config is parsed once, not twice. It is nil
+	// for every non-LATM or in-band track and nil when the out-of-band parse
+	// failed. latmResolved records that Describe ran that parse (success or
+	// failure) so Setup neither re-parses nor re-logs; when false, Setup builds
+	// the depacketizer itself as before: the in-band path, and a
+	// direct-construction unit test that leaves latmResolved unset.
+	latmDepack   *latm.Depacketizer
+	latmResolved bool
 }
 
 // payloadTypeUnknown is describedTrack.payloadType when the SDP named no usable
@@ -162,7 +172,7 @@ func resolveTracks(describeURL string, resp *Response, logger *slog.Logger) ([]T
 		if cerr != nil {
 			return nil, "", nil, cerr
 		}
-		codec := resolveLATMASC(dt.Codec, logger)
+		codec, latmDepack, latmResolved := resolveLATMASC(dt.Codec, logger)
 		tracks = append(tracks, Track{
 			ID:          i,
 			Media:       dt.Media,
@@ -174,12 +184,14 @@ func resolveTracks(describeURL string, resp *Response, logger *slog.Logger) ([]T
 			FMTP:        dt.FMTP,
 		})
 		described = append(described, describedTrack{
-			control:     control,
-			codec:       codec,
-			payloadType: dt.PayloadType,
-			clockRate:   dt.ClockRate,
-			media:       dt.Media,
-			aac:         dt.AAC,
+			control:      control,
+			codec:        codec,
+			payloadType:  dt.PayloadType,
+			clockRate:    dt.ClockRate,
+			media:        dt.Media,
+			aac:          dt.AAC,
+			latmDepack:   latmDepack,
+			latmResolved: latmResolved,
 		})
 	}
 	return tracks, base, described, nil
@@ -194,21 +206,29 @@ func resolveTracks(describeURL string, resp *Response, logger *slog.Logger) ([]T
 //
 // This is the only place rtsp/describe.go touches depacket/latm: rtsp/sdp
 // does not parse the StreamMuxConfig itself, to keep the SDP parser free of
-// that dependency. A StreamMuxConfig latm.New cannot parse (an unsupported or
-// malformed out-of-band config) logs a warning and returns codec unchanged,
-// with AudioSpecificConfig left nil; the track still sets up and falls back
-// to raw delivery at newTrack (configureLATM makes the same latm.New call and
-// hits the same error).
-func resolveLATMASC(codec audiostream.Codec, logger *slog.Logger) audiostream.Codec {
+// that dependency.
+//
+// It returns the (possibly ASC-augmented) codec, the depacketizer it built,
+// and whether it ran the out-of-band parse. The depacketizer is stashed on the
+// describedTrack and adopted verbatim by configureLATM at Setup, so an
+// out-of-band StreamMuxConfig is parsed once, not once here and again at Setup.
+// A StreamMuxConfig latm.New cannot parse (an unsupported, malformed, or empty
+// out-of-band config) logs a warning ONCE here and returns a nil depacketizer
+// with resolved true, so Setup falls back to raw delivery without re-parsing or
+// re-logging; AudioSpecificConfig is left nil. A non-LATM or in-band track
+// (MuxConfigPresent true) is returned unchanged with resolved false, so Setup
+// builds the depacketizer itself: an in-band ASC is not known until the stream
+// carries it.
+func resolveLATMASC(codec audiostream.Codec, logger *slog.Logger) (audiostream.Codec, *latm.Depacketizer, bool) {
 	lc, ok := codec.(audiostream.CodecMP4ALATM)
-	if !ok || lc.MuxConfigPresent || len(lc.StreamMuxConfig) == 0 {
-		return codec
+	if !ok || lc.MuxConfigPresent {
+		return codec, nil, false
 	}
 	dp, err := latm.New(latm.Config{MuxConfigPresent: false, StreamMuxConfig: lc.StreamMuxConfig})
 	if err != nil {
 		logWarn(logger, "latm out-of-band StreamMuxConfig invalid; AudioSpecificConfig unavailable at Describe", "error", err)
-		return codec
+		return codec, nil, true
 	}
 	lc.AudioSpecificConfig = append([]byte(nil), dp.AudioSpecificConfig()...)
-	return lc
+	return lc, dp, true
 }
