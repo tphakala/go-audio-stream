@@ -97,15 +97,27 @@ type Client struct {
 	// before the next Depacketize call that could overwrite its aliased backing.
 	aac *aac.Depacketizer
 
-	// aacPendingGap carries an observed sequence gap forward to the next AAC
-	// frame actually delivered. A gap can land on a packet that completes no
-	// access unit (a buffering fragment start, or a malformed payload); without
-	// this the loss would reach no Frame.SeqGap, and the access unit that
-	// completes on a later in-order packet would report SeqGap 0, hiding the
-	// discontinuity from a consumer that conceals per frame. The single-frame
-	// codecs never need this because each packet delivers exactly one frame.
-	// Reader-owned; only the reader goroutine touches it.
-	aacPendingGap int
+	// pendingGap carries an observed sequence gap forward to the next frame
+	// actually delivered. A gap can land on a packet that delivers no frame (an
+	// AAC buffering fragment, or a malformed payload in any codec); without this
+	// the loss would reach no Frame.SeqGap, and the frame that completes on a
+	// later in-order packet would report SeqGap 0, hiding the discontinuity from
+	// a consumer that conceals per frame. TrackStats.SeqGaps was already correct
+	// (processRTP counts the gap before delivery); only Frame.SeqGap was wrong.
+	//
+	// Shared by every codec path: a udpsource Client resolves to exactly one
+	// codecKind at Open, so the AAC path and the single-frame path never contend
+	// for it, mirroring rtsp's shared track.pendingGap. Unlike rtsp, though,
+	// deliverRTP runs the codec transform unconditionally and checks OnFrame only
+	// at its shared tail, so the single-frame path folds up.Gap in once at the
+	// top of that section and drains it at the tail before the nil-callback
+	// return: a valid packet always reaches the drain (even under a nil
+	// callback), so the counter stays bounded, while a malformed early-return
+	// retains the gap for the next valid frame. deliverAAC folds at its own top
+	// and drains on the first completed access unit. Reader-owned; only the
+	// reader goroutine touches it, and processRTP clears it only on an SSRC
+	// reset, never on a plain gap.
+	pendingGap int
 
 	// tsBase rebases the RTP timestamp so the first delivered frame is at PTS 0,
 	// as the other sources deliver. Stream.Observe reports the absolute unwrapped
@@ -444,10 +456,10 @@ func (c *Client) processRTP(pkt rtp.Packet, now time.Time) {
 		c.ssrcResets.Add(1)
 		// A new source restarts the media timeline, so any AAC access unit half
 		// reassembled from the old source must be dropped before its first packet,
-		// and any gap still pending from the old source's sequence space must not
-		// carry onto the new source's first frame.
+		// and any gap still pending from the old source's sequence space (AAC or a
+		// single-frame codec) must not carry onto the new source's first frame.
 		c.resetAAC()
-		c.aacPendingGap = 0
+		c.pendingGap = 0
 	}
 	// Re-seed the PTS origin on the first packet and on every SSRC change, so the
 	// media timeline starts at 0 and restarts cleanly for a new stream.
@@ -491,6 +503,15 @@ func (c *Client) deliverRTP(pkt rtp.Packet, up rtp.Update, now time.Time) {
 		c.deliverAAC(pkt, up, now)
 		return
 	}
+	// Fold this packet's gap into the pending total before the codec transform.
+	// Unlike rtsp, which runs the transform only under a non-nil callback and so
+	// must fold G.711/L16 past their own nil-callback return, udpsource always
+	// runs the transform and checks OnFrame only at the shared tail below, so a
+	// single fold here serves every single-frame codec. A malformed packet
+	// returns early from the switch and RETAINS the pending gap; a valid packet
+	// reaches the tail drain even under a nil callback, so the counter stays
+	// bounded. In the common no-loss case up.Gap is 0 and this is inert.
+	c.pendingGap += up.Gap
 	var out []byte
 	switch c.kind {
 	case kindG711:
@@ -525,6 +546,12 @@ func (c *Client) deliverRTP(pkt rtp.Packet, up rtp.Update, now time.Time) {
 		out = pkt.Payload
 	}
 	c.payload.Add(uint64(len(out)))
+	// Drain the pending gap onto this frame BEFORE the nil-callback return, so a
+	// loss stranded on a preceding malformed packet surfaces here and the counter
+	// cannot grow unbounded across a nil-callback stream. A plain gap never clears
+	// it early; only an SSRC reset (in processRTP) does.
+	gap := c.pendingGap
+	c.pendingGap = 0
 	if c.cfg.OnFrame == nil {
 		return
 	}
@@ -534,7 +561,7 @@ func (c *Client) deliverRTP(pkt rtp.Packet, up rtp.Update, now time.Time) {
 		RTPTime:    pkt.Header.Timestamp,
 		PTS:        mediatime.PTSFromSamples(c.relTicks(up.Timestamp), c.cfg.ClockRate),
 		ReceivedAt: now,
-		SeqGap:     up.Gap,
+		SeqGap:     gap,
 	})
 }
 
@@ -570,7 +597,7 @@ func (c *Client) deliverAAC(pkt rtp.Packet, up rtp.Update, now time.Time) {
 	// surfaces on the next delivered frame, so a loss immediately before a
 	// fragmented access unit is not lost from Frame.SeqGap. In the common
 	// no-loss case up.Gap is 0 and this is inert.
-	c.aacPendingGap += up.Gap
+	c.pendingGap += up.Gap
 	aus, err := c.aac.Depacketize(pkt.Payload, pkt.Header.Marker, pkt.Header.Timestamp)
 	if err != nil {
 		// A malformed AAC payload (truncated headers, an AU size past the payload,
@@ -590,8 +617,8 @@ func (c *Client) deliverAAC(pkt rtp.Packet, up rtp.Update, now time.Time) {
 		// happens even when OnFrame is nil so the counter cannot grow unbounded.
 		seqGap := 0
 		if i == 0 {
-			seqGap = c.aacPendingGap
-			c.aacPendingGap = 0
+			seqGap = c.pendingGap
+			c.pendingGap = 0
 		}
 		if c.cfg.OnFrame == nil {
 			continue
