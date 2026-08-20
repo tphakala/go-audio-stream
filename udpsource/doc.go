@@ -28,15 +28,16 @@
 // goroutine. An optional Config.SourceIP restricts accepted datagrams to one
 // sender IP; by default any sender on the bound port is accepted.
 //
-// Scope: this first version frames G.711, L16, and Opus over raw RTP and raw
-// s16 PCM datagrams. AAC over raw RTP (which needs the fmtp depacketizer widths)
-// and RTP reordering (rtsp/rtp exposes a Reorderer this source does not yet
-// drive) are deliberate follow-ups: an out-of-order datagram is dropped and
-// surfaces only as a sequence gap, not delivered late for the consumer to
-// reorder. Because each supported codec here carries a self-contained payload
-// with its own timestamp, that loss is non-corrupting (a dropped frame, not a
-// desynchronized stream). There is no RTCP handling, so TrackStats.SenderClock
-// stays invalid.
+// Scope: this version frames G.711, L16, and Opus over raw RTP and raw s16 PCM
+// datagrams. By default an out-of-order datagram is dropped and surfaces only as
+// a sequence gap, not delivered late for the consumer to reorder; because each
+// supported codec here carries a self-contained payload with its own timestamp,
+// that loss is non-corrupting (a dropped frame, not a desynchronized stream).
+// Config.Reorder opts into resequencing through the shared rtsp/rtp.Reorderer, so
+// a late-but-in-window datagram is recovered and delivered in sequence order at
+// the cost of a bounded latency and one heap copy per datagram. AAC over raw RTP
+// (which needs the fmtp depacketizer widths) remains a follow-up. There is no
+// RTCP handling, so TrackStats.SenderClock stays invalid.
 //
 // Open binds the socket and returns an already-receiving source. Its ctx bounds
 // only the bind and does not end the stream afterward; Close does. A Client

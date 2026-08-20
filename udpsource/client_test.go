@@ -13,6 +13,7 @@ import (
 
 	audiostream "github.com/tphakala/go-audio-stream"
 	"github.com/tphakala/go-audio-stream/depacket/g711"
+	"github.com/tphakala/go-audio-stream/rtsp/rtp"
 )
 
 // loopbackAddr is the wildcard-port loopback bind used across the source tests.
@@ -96,6 +97,28 @@ func senderFor(t *testing.T, c *Client) *net.UDPConn {
 	return conn
 }
 
+// sendAndSettle writes one datagram and blocks until the reader has consumed it,
+// so a following datagram cannot race ahead of it into the reader. Loopback UDP
+// does not guarantee datagram order, so reorder tests that depend on a specific
+// arrival order to set up the Reorderer's buffered state use this instead of a
+// bare Write. WireBytes is stamped on every accepted datagram before dispatch, so
+// once it reflects this datagram the reader has read it and, being
+// single-threaded, finishes dispatching it before reading the next.
+func sendAndSettle(t *testing.T, c *Client, conn *net.UDPConn, datagram []byte) {
+	t.Helper()
+	want := c.Stats().Tracks[0].WireBytes + uint64(len(datagram))
+	if _, err := conn.Write(datagram); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for c.Stats().Tracks[0].WireBytes < want && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if c.Stats().Tracks[0].WireBytes < want {
+		t.Fatalf("reader did not consume a %d-byte datagram within 2s", len(datagram))
+	}
+}
+
 // waitCount polls until at least n frames have been delivered or the deadline
 // passes, failing the test on timeout.
 func waitCount(t *testing.T, col *collector, n int, within time.Duration) {
@@ -120,6 +143,32 @@ func waitResult(t *testing.T, c *Client, within time.Duration) error {
 	case <-time.After(within):
 		t.Fatal("Wait did not return within bound")
 		return nil
+	}
+}
+
+// deliveredSeqMarkers returns the first payload byte of each delivered frame.
+// The reorder tests tag every datagram with a distinct low sequence number as
+// its single payload byte (via the opaque codec, delivered verbatim), so this is
+// the delivery order the assertions compare against.
+func deliveredSeqMarkers(frames []audiostream.Frame) []byte {
+	out := make([]byte, len(frames))
+	for i, f := range frames {
+		if len(f.Data) > 0 {
+			out[i] = f.Data[0]
+		}
+	}
+	return out
+}
+
+// opaqueReorderCfg is the shared config for the reorder tests: an opaque
+// passthrough (so Frame.Data is exactly the sent payload and ordering is a
+// trivial byte compare) on payload type 96, with reordering set per the caller.
+//
+//nolint:gocritic // Test helper mirrors Open's documented by-value Config signature.
+func opaqueReorderCfg(reorder bool, onFrame func(audiostream.Frame)) Config {
+	return Config{
+		Mode: ModeRTP, PayloadType: 96, Codec: audiostream.CodecUnknown{RTPMap: "X/90000"},
+		ClockRate: 90000, Reorder: reorder, OnFrame: onFrame,
 	}
 }
 
@@ -581,5 +630,322 @@ func TestOpenErrBind(t *testing.T) {
 	})
 	if !errors.Is(err, ErrBind) {
 		t.Fatalf("Open on an already-bound address = %v, want ErrBind", err)
+	}
+}
+
+// --- reorder tests ---------------------------------------------------------
+
+func TestReorderDropsCountAsDuplicates(t *testing.T) {
+	// Every kind of dropped datagram is counted exactly once in Duplicates and
+	// never delivered: a backward arrival on the disabled path (which drops rather
+	// than reorders, locking in the refactored disabled path), a duplicate
+	// sequence number on the enabled path, and an arrival older than the enabled
+	// path's release point. The enabled cases exercise the Reorderer late count
+	// folding into Duplicates.
+	cases := []struct {
+		name      string
+		reorder   bool
+		sends     []uint16
+		wantOrder []byte
+	}{
+		{"disabled backward drop", false, []uint16{1, 3, 2}, []byte{1, 3}},
+		{"enabled duplicate sequence", true, []uint16{1, 2, 2}, []byte{1, 2}},
+		{"enabled late arrival", true, []uint16{1, 2, 3, 1}, []byte{1, 2, 3}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var col collector
+			c := openOK(t, opaqueReorderCfg(tc.reorder, col.onFrame))
+			defer func() { _ = c.Close() }()
+
+			send := senderFor(t, c)
+			for _, seq := range tc.sends {
+				sendAndSettle(t, c, send, rtpPacket(96, seq, 0, 1, []byte{byte(seq)}))
+			}
+			waitCount(t, &col, len(tc.wantOrder), 2*time.Second)
+
+			deadline := time.Now().Add(2 * time.Second)
+			for c.Stats().Tracks[0].Duplicates == 0 && time.Now().Before(deadline) {
+				time.Sleep(2 * time.Millisecond)
+			}
+			if got := deliveredSeqMarkers(col.snapshot()); !bytes.Equal(got, tc.wantOrder) {
+				t.Fatalf("delivery order = %v, want %v (dropped datagram not delivered)", got, tc.wantOrder)
+			}
+			if d := c.Stats().Tracks[0].Duplicates; d != 1 {
+				t.Errorf("Duplicates = %d, want 1", d)
+			}
+		})
+	}
+}
+
+func TestReorderInOrderPassthrough(t *testing.T) {
+	// With reordering enabled, an already in-order stream delivers unchanged and
+	// records no duplicates or gaps.
+	var col collector
+	c := openOK(t, opaqueReorderCfg(true, col.onFrame))
+	defer func() { _ = c.Close() }()
+
+	send := senderFor(t, c)
+	for seq := uint16(1); seq <= 3; seq++ {
+		_, _ = send.Write(rtpPacket(96, seq, 0, 1, []byte{byte(seq)}))
+	}
+	waitCount(t, &col, 3, 2*time.Second)
+
+	if got := deliveredSeqMarkers(col.snapshot()); !bytes.Equal(got, []byte{1, 2, 3}) {
+		t.Fatalf("in-order delivery = %v, want [1 2 3]", got)
+	}
+	ts := c.Stats().Tracks[0]
+	if ts.Duplicates != 0 || ts.SeqGaps != 0 {
+		t.Errorf("Duplicates=%d SeqGaps=%d, want 0/0 for an in-order stream", ts.Duplicates, ts.SeqGaps)
+	}
+}
+
+func TestReorderRecoversOutOfOrder(t *testing.T) {
+	// The core recovery: a late-but-in-window datagram is resequenced and the run
+	// is delivered in ascending sequence order, with no gap or duplicate charged.
+	var col collector
+	c := openOK(t, opaqueReorderCfg(true, col.onFrame))
+	defer func() { _ = c.Close() }()
+
+	send := senderFor(t, c)
+	sendAndSettle(t, c, send, rtpPacket(96, 1, 0, 1, []byte{1}))
+	sendAndSettle(t, c, send, rtpPacket(96, 3, 0, 1, []byte{3})) // arrives early, buffered
+	sendAndSettle(t, c, send, rtpPacket(96, 2, 0, 1, []byte{2})) // fills the hole, releases 2 then 3
+	waitCount(t, &col, 3, 2*time.Second)
+
+	if got := deliveredSeqMarkers(col.snapshot()); !bytes.Equal(got, []byte{1, 2, 3}) {
+		t.Fatalf("recovered delivery order = %v, want [1 2 3]", got)
+	}
+	ts := c.Stats().Tracks[0]
+	if ts.Duplicates != 0 || ts.SeqGaps != 0 {
+		t.Errorf("Duplicates=%d SeqGaps=%d, want 0/0 (the hole was filled)", ts.Duplicates, ts.SeqGaps)
+	}
+}
+
+func TestReorderWindowOverflowForcesRelease(t *testing.T) {
+	// A never-arriving sequence number is force-released once a later datagram
+	// lands more than a window ahead, so a buffered packet behind the gap still
+	// gets out and the loss is counted rather than the run stalling forever.
+	var col collector
+	c := openOK(t, opaqueReorderCfg(true, col.onFrame))
+	defer func() { _ = c.Close() }()
+
+	send := senderFor(t, c)
+	sendAndSettle(t, c, send, rtpPacket(96, 1, 0, 1, []byte{1}))                         // released, next=2
+	sendAndSettle(t, c, send, rtpPacket(96, 3, 0, 1, []byte{3}))                         // buffered, waits for 2
+	sendAndSettle(t, c, send, rtpPacket(96, 3+rtp.MaxReorderWindow, 0, 1, []byte{0x7F})) // forces seq 2 lost, releases 3
+	waitCount(t, &col, 2, 2*time.Second)
+
+	if got := deliveredSeqMarkers(col.snapshot()); !bytes.Equal(got, []byte{1, 3}) {
+		t.Fatalf("delivery = %v, want [1 3] (seq 2 force-released as lost)", got)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for c.Stats().Tracks[0].SeqGaps == 0 && time.Now().Before(deadline) {
+		time.Sleep(2 * time.Millisecond)
+	}
+	if g := c.Stats().Tracks[0].SeqGaps; g != 1 {
+		t.Errorf("SeqGaps = %d, want 1 (the lost seq 2)", g)
+	}
+}
+
+func TestReorderSSRCChangeFlushesInOrder(t *testing.T) {
+	// An SSRC change drains the old source's buffered packets in order before the
+	// new source establishes a fresh release point, and the first new-source frame
+	// is PTS-rebased to the origin.
+	var col collector
+	c := openOK(t, opaqueReorderCfg(true, col.onFrame))
+	defer func() { _ = c.Close() }()
+
+	send := senderFor(t, c)
+	sendAndSettle(t, c, send, rtpPacket(96, 10, 1000, 0xAAAA, []byte{10}))   // SSRC A: released
+	sendAndSettle(t, c, send, rtpPacket(96, 12, 2920, 0xAAAA, []byte{12}))   // SSRC A: buffered (11 missing)
+	sendAndSettle(t, c, send, rtpPacket(96, 100, 7000, 0xBBBB, []byte{100})) // SSRC B: flush A, then reset
+	waitCount(t, &col, 3, 2*time.Second)
+
+	frames := col.snapshot()
+	if got := deliveredSeqMarkers(frames); !bytes.Equal(got, []byte{10, 12, 100}) {
+		t.Fatalf("delivery = %v, want [10 12 100] (A drained in order before B)", got)
+	}
+	if frames[2].PTS != 0 {
+		t.Errorf("first frame after SSRC change PTS = %v, want 0 (rebased)", frames[2].PTS)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for c.Stats().Tracks[0].SSRCResets == 0 && time.Now().Before(deadline) {
+		time.Sleep(2 * time.Millisecond)
+	}
+	if r := c.Stats().Tracks[0].SSRCResets; r != 1 {
+		t.Errorf("SSRCResets = %d, want 1", r)
+	}
+}
+
+func TestReorderForeignAndMalformedDroppedAtReceive(t *testing.T) {
+	// A foreign payload type whose SSRC does not match the active stream, and an
+	// unparseable datagram, are both dropped before the resequencer and counted
+	// malformed, so unrelated traffic on the wildcard port cannot poison or thrash
+	// the buffer. This also covers handleRTPReordered's parse-error branch.
+	var col collector
+	c := openOK(t, opaqueReorderCfg(true, col.onFrame))
+	defer func() { _ = c.Close() }()
+
+	send := senderFor(t, c)
+	sendAndSettle(t, c, send, rtpPacket(96, 1, 0, 0xAAAA, []byte{1})) // establishes SSRC A
+	sendAndSettle(t, c, send, rtpPacket(97, 9, 0, 0xCCCC, []byte{9})) // foreign PT, different SSRC: dropped at receive
+	sendAndSettle(t, c, send, []byte{0x80, 0x00})                     // too short to parse: dropped at receive
+	sendAndSettle(t, c, send, rtpPacket(96, 2, 0, 0xAAAA, []byte{2})) // our PT, SSRC A: delivered
+	waitCount(t, &col, 2, 2*time.Second)
+
+	if got := deliveredSeqMarkers(col.snapshot()); !bytes.Equal(got, []byte{1, 2}) {
+		t.Fatalf("delivery = %v, want [1 2] (foreign and malformed datagrams dropped)", got)
+	}
+	if m := c.Stats().Tracks[0].Malformed; m != 2 {
+		t.Errorf("Malformed = %d, want 2 (the foreign-SSRC payload type and the truncated datagram)", m)
+	}
+}
+
+func TestReorderSameSSRCMuxDoesNotStall(t *testing.T) {
+	// A foreign payload type multiplexed on the ACTIVE SSRC (an in-band event
+	// occupying a real sequence number, e.g. an RFC 4733 telephone-event) must not
+	// stall the stream: it fills its slot and is filtered at drain, so the next
+	// real packet is delivered PROMPTLY (the waitCount below, which a receive-time
+	// drop would hang until window overflow and fail) rather than waiting a whole
+	// reorder window for a phantom gap to force-release.
+	var col collector
+	c := openOK(t, opaqueReorderCfg(true, col.onFrame))
+	defer func() { _ = c.Close() }()
+
+	send := senderFor(t, c)
+	sendAndSettle(t, c, send, rtpPacket(96, 1, 0, 0xAAAA, []byte{1})) // our PT, seq 1
+	sendAndSettle(t, c, send, rtpPacket(97, 2, 0, 0xAAAA, []byte{2})) // foreign PT, SAME SSRC, seq 2
+	sendAndSettle(t, c, send, rtpPacket(96, 3, 0, 0xAAAA, []byte{3})) // our PT, seq 3
+	waitCount(t, &col, 2, 2*time.Second)
+
+	if got := deliveredSeqMarkers(col.snapshot()); !bytes.Equal(got, []byte{1, 3}) {
+		t.Fatalf("delivery = %v, want [1 3] promptly (seq 2 mux filled its slot, seq 3 not stalled)", got)
+	}
+	ts := c.Stats().Tracks[0]
+	if ts.Malformed != 1 {
+		t.Errorf("Malformed = %d, want 1 (the in-band mux packet, filtered at drain)", ts.Malformed)
+	}
+	// The mux packet's sequence number is filtered before Observe, so the audio
+	// stream legitimately skips it: SeqGaps counts it as one missing audio packet.
+	// The point of the fix is that this shows up immediately without a stall, not
+	// that the gap disappears.
+	if ts.SeqGaps != 1 {
+		t.Errorf("SeqGaps = %d, want 1 (the audio stream skips the filtered mux sequence number)", ts.SeqGaps)
+	}
+}
+
+func TestReorderManyPacketsDeliverInOrder(t *testing.T) {
+	// Drive more than one reorder window of datagrams, each with its own payload,
+	// and confirm every frame carries the payload of its own sequence: delivery is
+	// correct and lossless across a span longer than the fixed window, and the
+	// per-packet copies never mix payloads.
+	var col collector
+	c := openOK(t, opaqueReorderCfg(true, col.onFrame))
+	defer func() { _ = c.Close() }()
+
+	const n = rtp.MaxReorderWindow + 20
+	send := senderFor(t, c)
+	for seq := uint16(1); seq <= n; seq++ {
+		if _, err := send.Write(rtpPacket(96, seq, 0, 1, []byte{byte(seq)})); err != nil {
+			t.Fatalf("write seq %d: %v", seq, err)
+		}
+	}
+	waitCount(t, &col, n, 3*time.Second)
+
+	frames := col.snapshot()
+	if len(frames) != n {
+		t.Fatalf("delivered %d frames, want %d", len(frames), n)
+	}
+	for i, f := range frames {
+		if want := byte(i + 1); len(f.Data) != 1 || f.Data[0] != want {
+			t.Fatalf("frame %d payload = %x, want [%02x] (a copy aliased another packet)", i, f.Data, want)
+		}
+	}
+	if d := c.Stats().Tracks[0].Duplicates; d != 0 {
+		t.Errorf("Duplicates = %d, want 0", d)
+	}
+}
+
+func TestReorderDuplicateSeqKeepsBufferedPayload(t *testing.T) {
+	// A duplicate of a still-buffered sequence number is rejected as late and does
+	// not disturb the buffered packet: the delivered frame carries the payload of
+	// the first (buffered) copy, and the per-packet copy makes that deterministic.
+	var col collector
+	c := openOK(t, opaqueReorderCfg(true, col.onFrame))
+	defer func() { _ = c.Close() }()
+
+	send := senderFor(t, c)
+	sendAndSettle(t, c, send, rtpPacket(96, 1, 0, 1, []byte{1}))
+	sendAndSettle(t, c, send, rtpPacket(96, 3, 0, 1, []byte{0xA3})) // seq 3, payload A: buffered
+	sendAndSettle(t, c, send, rtpPacket(96, 3, 0, 1, []byte{0xB3})) // seq 3 again: rejected as late, cannot corrupt A
+	sendAndSettle(t, c, send, rtpPacket(96, 2, 0, 1, []byte{2}))    // releases 2 then 3
+	waitCount(t, &col, 3, 2*time.Second)
+
+	frames := col.snapshot()
+	if got := deliveredSeqMarkers(frames); !bytes.Equal(got, []byte{1, 2, 0xA3}) {
+		t.Fatalf("delivery = %v, want [1 2 A3] (buffered payload preserved)", got)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for c.Stats().Tracks[0].Duplicates == 0 && time.Now().Before(deadline) {
+		time.Sleep(2 * time.Millisecond)
+	}
+	if d := c.Stats().Tracks[0].Duplicates; d != 1 {
+		t.Errorf("Duplicates = %d, want 1 (the duplicate seq 3)", d)
+	}
+}
+
+func TestReorderDropCountSurvivesSSRCReset(t *testing.T) {
+	// A late drop is counted, and an SSRC change resets the Reorderer, zeroing its
+	// internal late counter. The next Push reads the late count fresh after the
+	// reset, so a drop before the reset is preserved and a drop after it is still
+	// counted, neither lost nor double-counted through the zeroing (guarding the
+	// compare-not-subtract accounting across a reset).
+	var col collector
+	c := openOK(t, opaqueReorderCfg(true, col.onFrame))
+	defer func() { _ = c.Close() }()
+
+	send := senderFor(t, c)
+	sendAndSettle(t, c, send, rtpPacket(96, 5, 0, 0xAAAA, []byte{5}))     // SSRC A: released, next=6
+	sendAndSettle(t, c, send, rtpPacket(96, 3, 0, 0xAAAA, []byte{3}))     // SSRC A: before release point, dropped late
+	sendAndSettle(t, c, send, rtpPacket(96, 100, 0, 0xBBBB, []byte{100})) // SSRC B: flush+reset (zeroes late), released
+	sendAndSettle(t, c, send, rtpPacket(96, 50, 0, 0xBBBB, []byte{50}))   // SSRC B: before release point, dropped late
+
+	waitCount(t, &col, 2, 2*time.Second)
+	if got := deliveredSeqMarkers(col.snapshot()); !bytes.Equal(got, []byte{5, 100}) {
+		t.Fatalf("delivery = %v, want [5 100]", got)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for c.Stats().Tracks[0].Duplicates < 2 && time.Now().Before(deadline) {
+		time.Sleep(2 * time.Millisecond)
+	}
+	ts := c.Stats().Tracks[0]
+	if ts.Duplicates != 2 {
+		t.Errorf("Duplicates = %d, want 2 (one late drop before the reset, one after)", ts.Duplicates)
+	}
+	if ts.SSRCResets != 1 {
+		t.Errorf("SSRCResets = %d, want 1", ts.SSRCResets)
+	}
+}
+
+func TestReorderIgnoredInPCMMode(t *testing.T) {
+	// Reorder is a ModeRTP option; a ModePCM source ignores it (the resequencer is
+	// never allocated) and delivers datagrams normally.
+	var col collector
+	c := openOK(t, Config{
+		Mode: ModePCM, Format: PCMFormat{SampleRate: 16000, Channels: 1}, Reorder: true, OnFrame: col.onFrame,
+	})
+	defer func() { _ = c.Close() }()
+	if c.reorder != nil {
+		t.Fatal("reorder resequencer allocated for a ModePCM source, want nil (flag ignored)")
+	}
+
+	datagram := []byte{0x01, 0x00, 0x02, 0x00}
+	if _, err := senderFor(t, c).Write(datagram); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	waitCount(t, &col, 1, 2*time.Second)
+	if got := col.snapshot()[0].Data; !bytes.Equal(got, datagram) {
+		t.Fatalf("PCM delivery = %x, want %x", got, datagram)
 	}
 }

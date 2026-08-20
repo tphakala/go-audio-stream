@@ -74,6 +74,12 @@ type Client struct {
 	malformed  atomic.Uint64
 	ssrcResets atomic.Uint64
 
+	// reorderDrops counts datagrams the Reorderer dropped as late or duplicate
+	// before Stream.Observe ever saw them (Config.Reorder path only). Stats folds
+	// it into Duplicates so the reordered path reports the same Duplicates meaning
+	// as the immediate path, where Observe counts duplicates directly.
+	reorderDrops atomic.Uint64
+
 	// Reader-owned state (no lock needed; only the reader touches it). stream
 	// tracks RTP sequence continuity and timestamp unwrap; samples is the ModePCM
 	// PTS counter; pcmBuf is reusable scratch for G.711 expansion and L16/PCM
@@ -88,6 +94,18 @@ type Client struct {
 	// change, which restarts the media timeline).
 	tsBase    uint64
 	tsBaseSet bool
+
+	// Reorder state, used only when Config.Reorder is set (reorder != nil, an
+	// opt-in allocated in resolveFormat so a disabled or ModePCM source carries no
+	// resequencing footprint). reorder resequences datagrams by 16-bit sequence
+	// number; released is reused scratch for the packets it emits; lastSSRC and
+	// haveSSRC detect an SSRC change from the raw parsed header, before Observe, to
+	// flush and reset the resequencer. All are reader-owned; only the reader
+	// goroutine touches them.
+	reorder  *rtp.Reorderer
+	released []rtp.Released
+	lastSSRC uint32
+	haveSSRC bool
 }
 
 // Client satisfies the root package's source-agnostic capture contract.
@@ -175,6 +193,13 @@ func (c *Client) resolveFormat() error {
 		if c.kind == kindL16 {
 			c.frameBytes = 2 * c.cfg.Channels
 		}
+		// Allocate the resequencer only when opted in, so a disabled ModeRTP source
+		// keeps the immediate zero-alloc path and carries none of the Reorderer's
+		// fixed-window footprint. A nil c.reorder is the disabled gate the reader
+		// dispatch checks.
+		if c.cfg.Reorder {
+			c.reorder = &rtp.Reorderer{}
+		}
 		return nil
 	case ModePCM:
 		if c.cfg.Format.SampleRate <= 0 || c.cfg.Format.Channels <= 0 {
@@ -258,21 +283,114 @@ func (c *Client) recvLoop() {
 			c.deliverPCM(buf[:n], now)
 			continue
 		}
+		if c.reorder != nil {
+			c.handleRTPReordered(buf[:n], now)
+			continue
+		}
 		c.handleRTP(buf[:n], now)
 	}
 }
 
-// handleRTP parses one datagram as an RTP packet, tracks sequence continuity,
-// drops a duplicate, and delivers the payload. It reuses the exported rtp.Stream
-// for gap, duplicate, SSRC-reset, and timestamp-unwrap accounting. datagram
-// aliases the receive buffer; the payload is copied or delivered within the
-// callback before the next read overwrites it.
+// handleRTP is the ModeRTP receive path when reordering is disabled (the
+// default). It parses one datagram as an RTP packet, drops a malformed one, and
+// delegates the payload-type filter, sequence-continuity accounting, and delivery
+// to processRTP. datagram aliases the receive buffer; the payload is copied or
+// delivered within the callback before the next read overwrites it.
 func (c *Client) handleRTP(datagram []byte, now time.Time) {
 	pkt, err := rtp.ParsePacket(datagram)
 	if err != nil {
 		c.malformed.Add(1)
 		return
 	}
+	c.processRTP(pkt, now)
+}
+
+// handleRTPReordered is the ModeRTP receive path when Config.Reorder is set. It
+// parses each datagram, resequences the active stream through the Reorderer, and
+// drains released packets in ascending sequence order through the shared
+// processRTP tail (which applies the payload-type filter at drain time). An SSRC
+// change flushes and resets the Reorderer, whose sequence space restarts with the
+// new source. Packets still buffered when the stream ends are dropped, not
+// flushed, matching the RTSP UDP receiver.
+//
+// Payload-type handling is deliberately split. A foreign payload type whose SSRC
+// does not match the active stream is unrelated traffic on the wildcard port and
+// is dropped here, before the Reorderer, so its unrelated sequence space cannot
+// poison the buffer or thrash it via a spurious SSRC change. A foreign payload
+// type sharing the active SSRC is an in-band mux on this stream (for example an
+// RFC 4733 telephone-event) that occupies a real sequence number in this stream's
+// space: it is pushed like any other packet and filtered out only at drain time,
+// so it fills its slot instead of leaving a phantom gap that would stall the run
+// for a whole reorder window. (Such a mux packet is dropped and counted exactly
+// once: as malformed at drain when it arrives in order, or, if it arrives late,
+// as a Reorderer drop folded into Duplicates.)
+func (c *Client) handleRTPReordered(datagram []byte, now time.Time) {
+	pkt, err := rtp.ParsePacket(datagram)
+	if err != nil {
+		c.malformed.Add(1)
+		return
+	}
+	if pkt.Header.PayloadType != c.cfg.PayloadType && (!c.haveSSRC || pkt.Header.SSRC != c.lastSSRC) {
+		c.malformed.Add(1)
+		return
+	}
+	if c.haveSSRC && pkt.Header.SSRC != c.lastSSRC {
+		// A new source restarts the sequence space, so drain the old source's
+		// buffered packets in order and reset before the new packet establishes a
+		// fresh release point. processRTP re-baselines the PTS origin when Observe
+		// reports the SSRC change on the first released new-source packet.
+		c.released = c.reorder.Flush(c.released[:0])
+		c.drainReleased(c.released, now)
+		c.reorder.Reset()
+	}
+	c.lastSSRC = pkt.Header.SSRC
+	c.haveSSRC = true
+
+	// The Reorderer retains the slice and datagram aliases the reused receive
+	// buffer, so hand Push a fresh copy; re-parsing it on release keeps each
+	// Released.Payload a self-contained RTP packet. This per-packet heap copy is
+	// exactly why reordering is opt-in. A reused ring keyed by seq %
+	// MaxReorderWindow is unsafe here: an arriving packet whose sequence is a
+	// window multiple ahead of a still-buffered one shares its slot, and writing
+	// the copy before Push force-releases the older packet would corrupt it.
+	cp := make([]byte, len(datagram))
+	copy(cp, datagram)
+
+	// Read Late immediately before Push (Reset above zeroes it) and compare rather
+	// than subtract, so a hypothetical decrease can never underflow-wrap the delta
+	// into a huge positive that inflates the count.
+	lateBefore := c.reorder.Stats().Late
+	c.released = c.reorder.Push(pkt.Header.SequenceNumber, cp, c.released[:0])
+	if lateAfter := c.reorder.Stats().Late; lateAfter > lateBefore {
+		c.reorderDrops.Add(lateAfter - lateBefore)
+	}
+	c.drainReleased(c.released, now)
+}
+
+// drainReleased folds a run of Reorderer-released packets into the pipeline in
+// sequence order. Each Released.Payload is a self-contained copy of a full RTP
+// datagram, so it is re-parsed here; a copy that somehow fails to parse is
+// counted malformed and skipped rather than dropping the whole run.
+func (c *Client) drainReleased(released []rtp.Released, now time.Time) {
+	for i := range released {
+		pkt, err := rtp.ParsePacket(released[i].Payload)
+		if err != nil {
+			c.malformed.Add(1)
+			continue
+		}
+		c.processRTP(pkt, now)
+	}
+}
+
+// processRTP runs the payload-type filter plus the sequence-continuity
+// accounting and delivery tail shared by the immediate path (handleRTP) and the
+// reordered drain path (drainReleased): it drops a foreign payload type as
+// malformed (without observing it, so it never perturbs the sequence or timestamp
+// state), then observes the header for gap, duplicate, SSRC-reset, and
+// timestamp-unwrap, re-seeds the PTS origin on the first packet and every SSRC
+// change, drops a duplicate, folds the gap and packet counts, and delivers the
+// frame. pkt aliases memory valid only for this call.
+func (c *Client) processRTP(pkt rtp.Packet, now time.Time) {
 	if pkt.Header.PayloadType != c.cfg.PayloadType {
 		c.malformed.Add(1)
 		return
@@ -494,7 +612,7 @@ func (c *Client) Stats() audiostream.Stats {
 		PayloadBytes: c.payload.Load(),
 		WireBytes:    c.wire.Load(),
 		SeqGaps:      c.seqGaps.Load(),
-		Duplicates:   c.duplicates.Load(),
+		Duplicates:   c.duplicates.Load() + c.reorderDrops.Load(),
 		Malformed:    c.malformed.Load(),
 		SSRCResets:   c.ssrcResets.Load(),
 	}
