@@ -107,18 +107,32 @@ func BenchmarkDeliverRTP(b *testing.B) {
 	}
 }
 
+// allocRuns is the AllocsPerRun measured-run count. AllocsPerRun invokes the
+// function once to warm up and then allocRuns more times, so the delivery
+// callback fires allocRuns+1 times across one measurement.
+const allocRuns = 1000
+
 // TestDeliverRTPZeroAlloc enforces the 0-allocs/op steady-state contract on the
 // udpsource delivery path. AllocsPerRun warms up once (amortizing the one-time
-// pcmBuf / depacketizer-buffer growth) and then averages the measured runs.
+// pcmBuf / depacketizer-buffer growth) and then averages the measured runs. A
+// per-run delivery counter is a positive control: without it a payload that
+// silently took a malformed no-frame branch would still measure 0 allocs and
+// pass, so the zero-alloc result is only meaningful once we confirm a frame was
+// actually produced every run.
 func TestDeliverRTPZeroAlloc(t *testing.T) {
 	now := time.Now()
 	for _, tc := range deliverBenchCases(t) {
 		t.Run(tc.name, func(t *testing.T) {
-			got := testing.AllocsPerRun(1000, func() {
+			delivered := 0
+			tc.c.cfg.OnFrame = func(audiostream.Frame) { delivered++ }
+			got := testing.AllocsPerRun(allocRuns, func() {
 				tc.c.deliverRTP(tc.pkt, tc.up, now)
 			})
 			if got != 0 {
 				t.Errorf("%s delivery allocated %v allocs/op in steady state, want 0", tc.name, got)
+			}
+			if delivered != allocRuns+1 {
+				t.Errorf("%s delivered %d frames over the measurement, want %d (one per run; a no-frame branch would make the 0-alloc result meaningless)", tc.name, delivered, allocRuns+1)
 			}
 		})
 	}

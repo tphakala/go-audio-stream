@@ -197,6 +197,40 @@ func TestRTPNilOnFrameCountsSeqGapsBounded(t *testing.T) {
 	}
 }
 
+// TestRTPReorderStrandedGapClearedOnSSRCReset exercises the SeqGap accumulator
+// on the Config.Reorder path (handleRTPReordered -> drainReleased -> processRTP),
+// not just the immediate path. A gap stranded on a malformed packet released from
+// the reorder buffer must be cleared by the following SSRC reset, exactly as on
+// the immediate path. This mirrors TestReorderSSRCChangeFlushesInOrder but makes
+// the old source's second packet malformed so it strands a gap, then asserts the
+// gap does not bleed onto the new source's first frame. It guards against a future
+// change that reads up.Gap directly on the reordered path, bypassing pendingGap.
+func TestRTPReorderStrandedGapClearedOnSSRCReset(t *testing.T) {
+	var col collector
+	c := openOK(t, Config{
+		Mode: ModeRTP, PayloadType: 96, Codec: audiostream.CodecOpus{},
+		ClockRate: 48000, Reorder: true, OnFrame: col.onFrame,
+	})
+	defer func() { _ = c.Close() }()
+
+	conn := senderFor(t, c)
+	sendAndSettle(t, c, conn, rtpPacket(96, 10, 1000, 0xAAAA, []byte{0x78, 1}))  // source A: released, frame
+	sendAndSettle(t, c, conn, rtpPacket(96, 12, 2920, 0xAAAA, nil))              // source A: empty -> malformed; seq 11 lost -> gap 1 stranded
+	sendAndSettle(t, c, conn, rtpPacket(96, 100, 7000, 0xBBBB, []byte{0x78, 2})) // source B: flushes A, SSRC reset clears the pending gap
+	waitCount(t, &col, 2, 2*time.Second)
+
+	frames := col.snapshot()
+	if len(frames) != 2 {
+		t.Fatalf("delivered %d frames, want 2 (the empty-payload packet from source A must not yield a frame)", len(frames))
+	}
+	if frames[1].SeqGap != 0 {
+		t.Errorf("first frame from the new source reported SeqGap %d, want 0 (a gap stranded on the reorder path must not bleed across an SSRC reset)", frames[1].SeqGap)
+	}
+	if ts := c.Stats().Tracks[0]; ts.SSRCResets != 1 {
+		t.Errorf("SSRCResets = %d, want 1", ts.SSRCResets)
+	}
+}
+
 // --- direct-call unit tests --------------------------------------------------
 //
 // deliverRTP is unexported and reachable in-package, so these call it directly

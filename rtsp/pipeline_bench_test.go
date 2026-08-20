@@ -98,21 +98,33 @@ func BenchmarkDeliver(b *testing.B) {
 	}
 }
 
+// allocRuns is the AllocsPerRun measured-run count. AllocsPerRun invokes the
+// function once to warm up and then allocRuns more times, so a delivery-path
+// callback fires allocRuns+1 times across one measurement.
+const allocRuns = 1000
+
 // TestDeliverZeroAlloc enforces the 0-allocs/op steady-state contract on the
 // single-frame delivery path. AllocsPerRun runs the function once to warm up (so
 // the one-time pcmBuf growth is amortized, not counted) and then averages the
-// allocations over the measured runs.
+// allocations over the measured runs. A per-run delivery counter is a positive
+// control: without it a payload that silently took a malformed no-frame branch
+// would still measure 0 allocs and pass, so the zero-alloc result is only
+// meaningful once we confirm a frame was actually produced every run.
 func TestDeliverZeroAlloc(t *testing.T) {
 	now := time.Now()
 	up := rtp.Update{Timestamp: 480, Gap: 0}
-	noop := func(audiostream.Frame) {}
 	for _, tc := range singleFrameCases() {
 		t.Run(tc.name, func(t *testing.T) {
-			got := testing.AllocsPerRun(1000, func() {
-				tc.tr.deliver(tc.pkt, up, now, noop)
+			delivered := 0
+			count := func(audiostream.Frame) { delivered++ }
+			got := testing.AllocsPerRun(allocRuns, func() {
+				tc.tr.deliver(tc.pkt, up, now, count)
 			})
 			if got != 0 {
 				t.Errorf("%s delivery allocated %v allocs/op in steady state, want 0", tc.name, got)
+			}
+			if delivered != allocRuns+1 {
+				t.Errorf("%s delivered %d frames over the measurement, want %d (one per run; a no-frame branch would make the 0-alloc result meaningless)", tc.name, delivered, allocRuns+1)
 			}
 		})
 	}
