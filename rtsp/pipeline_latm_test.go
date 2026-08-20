@@ -541,6 +541,84 @@ func TestResetDepacketizerInBandConfigClearedOnSSRCChange(t *testing.T) {
 	}
 }
 
+// TestDeliverLATMSeqGapCarriesAfterMalformed is the LATM half of issue #103.
+// LATM never buffers a fragment across packets (see resetDepacketizer's comment
+// and depacket/latm), so the only path that completes no AU is the malformed
+// one: a loss on a malformed packet must retain its gap and drain it onto the
+// next good frame instead of vanishing. A plain gap in between must not wipe it.
+func TestDeliverLATMSeqGapCarriesAfterMalformed(t *testing.T) {
+	t.Parallel()
+	tr := newInBandLATMTrack(t)
+
+	// V4 carries the config inline and resolves it, delivering one frame.
+	pkt4 := rtp.Packet{Header: rtp.Header{Timestamp: 0, Marker: true}, Payload: latmV4}
+	tr.deliverLATM(pkt4, rtp.Update{Timestamp: 0}, time.Unix(1, 0), func(audiostream.Frame) {}, nil)
+
+	// A malformed packet (empty payload, truncated before the PayloadLengthInfo)
+	// carrying a gap of 1 delivers no frame but must retain the pending gap.
+	before := tr.malformed.Load()
+	bad := rtp.Packet{Header: rtp.Header{Timestamp: 512, Marker: true}, Payload: []byte{}}
+	n := 0
+	tr.deliverLATM(bad, rtp.Update{Timestamp: 512, Gap: 1}, time.Unix(1, 0), func(audiostream.Frame) { n++ }, nil)
+	if n != 0 || tr.malformed.Load() != before+1 {
+		t.Fatalf("malformed LATM: frames=%d malformed=%d, want 0 and %d", n, tr.malformed.Load(), before+1)
+	}
+
+	// A plain gap between the packets must not clear the retained gap; the config
+	// must also survive it (the existing invariant).
+	tr.resetDepacketizer(false)
+
+	// V5 reuses the retained config and completes one AU, which must carry the
+	// gap that was stranded on the malformed packet.
+	pkt5 := rtp.Packet{Header: rtp.Header{Timestamp: 1024, Marker: true}, Payload: latmV5}
+	var got audiostream.Frame
+	m := 0
+	tr.deliverLATM(pkt5, rtp.Update{Timestamp: 1024, Gap: 0}, time.Unix(1, 0), func(f audiostream.Frame) {
+		got = f
+		m++
+	}, nil)
+	if m != 1 {
+		t.Fatalf("V5 delivered %d frames, want 1 (config must survive the gap)", m)
+	}
+	if got.SeqGap != 1 {
+		t.Errorf("SeqGap = %d, want 1 (a gap on a malformed LATM packet must drain onto the next frame)", got.SeqGap)
+	}
+}
+
+// TestDeliverLATMSSRCResetClearsPendingGap is the LATM analog of the AAC SSRC
+// test: an SSRC reset drops a pending gap from the old sequence space. The
+// recovery packet re-announces the config inline (V4) because the reset also
+// clears the retained in-band config.
+func TestDeliverLATMSSRCResetClearsPendingGap(t *testing.T) {
+	t.Parallel()
+	tr := newInBandLATMTrack(t)
+
+	// Resolve the config, then strand a gap of 2 on a malformed packet.
+	pkt4 := rtp.Packet{Header: rtp.Header{Timestamp: 0, Marker: true}, Payload: latmV4}
+	tr.deliverLATM(pkt4, rtp.Update{Timestamp: 0}, time.Unix(1, 0), func(audiostream.Frame) {}, nil)
+	bad := rtp.Packet{Header: rtp.Header{Timestamp: 512, Marker: true}, Payload: []byte{}}
+	tr.deliverLATM(bad, rtp.Update{Timestamp: 512, Gap: 2}, time.Unix(1, 0), func(audiostream.Frame) {}, nil)
+
+	// The SSRC-reset path clears both the retained config and the pending gap.
+	tr.resetDepacketizer(true)
+
+	// A fresh config-bearing packet (V4) re-announces the config and delivers a
+	// frame whose SeqGap must be 0: the old source's gap must not carry over.
+	reannounce := rtp.Packet{Header: rtp.Header{Timestamp: 2048, Marker: true}, Payload: latmV4}
+	var got audiostream.Frame
+	n := 0
+	tr.deliverLATM(reannounce, rtp.Update{Timestamp: 2048, Gap: 0}, time.Unix(1, 0), func(f audiostream.Frame) {
+		got = f
+		n++
+	}, nil)
+	if n != 1 {
+		t.Fatalf("recovery packet delivered %d frames, want 1", n)
+	}
+	if got.SeqGap != 0 {
+		t.Errorf("SeqGap = %d, want 0 (a gap from the old source must not carry across an SSRC reset)", got.SeqGap)
+	}
+}
+
 // newSeededInBandLATMTrack builds a track configured for in-band MP4A-LATM
 // whose SDP carried a config= (an RFC 3016 seed): MuxConfigPresent true WITH a
 // StreamMuxConfig. It matches a camera that advertises config= alongside
