@@ -22,6 +22,13 @@ const (
 	// in-band parse reads from the RTP payload buffer instead and is bounded by
 	// the payload length, so this cap does not apply there.
 	MaxStreamMuxConfigBytes = 512
+	// MaxMuxElements caps the number of AudioMuxElements consumed from one RTP
+	// payload (RFC 3016 permits more than one). Realistic senders pack one or a
+	// few; 64 bounds the outer element loop, and with MaxSubFrames it bounds the
+	// total access units per payload at MaxMuxElements*MaxSubFrames. A payload
+	// carrying more (after any trailing-zero padding is stopped) has its leading
+	// MaxMuxElements delivered and the rest dropped.
+	MaxMuxElements = 64
 )
 
 // Sentinel errors. New and Depacketize return one of these, matched with

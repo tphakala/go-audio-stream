@@ -47,15 +47,33 @@ func (d *Depacketizer) subFrameLayout() (frameLenTicks uint32, err error) {
 	return frameLenTicks, nil
 }
 
-// Depacketize processes one RTP payload (one AudioMuxElement) and returns the
-// access units it carries, in order: one for the single-subframe case,
-// numSubFrames+1 for a multi-subframe AudioMuxElement. Each AU's RTPOffset is
-// i times the per-frame RTP tick count, i being the AU's subframe index:
-// Config.SamplesPerFrame when nonzero, otherwise the frame length derived
-// from the ASC's frameLengthFlag. Any malformed input returns a sentinel
-// error and never panics. marker and rtpTime are accepted for signature
-// parity with the AAC depacketizer; LATM does not fragment across packets, so
-// they are unused by the transform (the caller owns the absolute clock).
+// Depacketize processes one RTP payload and returns the access units it carries,
+// in order. A payload holds one AudioMuxElement in the common case (one access
+// unit for the single-subframe case, numSubFrames+1 for a multi-subframe one),
+// but RFC 3016 permits more than one AudioMuxElement per payload, and every
+// element is now consumed rather than the first alone with the rest silently
+// dropped. Each AU's RTPOffset accumulates across the whole payload: within an
+// element it is the subframe index times the per-frame RTP tick count
+// (Config.SamplesPerFrame when nonzero, otherwise the ASC-derived frame length),
+// and each element continues from the tick span of the ones before it. A wholly
+// zero trailing remainder is treated as byte-alignment or RTP padding and
+// dropped. A malformed leading (first) element returns a sentinel error with no
+// access units; a malformed trailing element delivers the complete leading
+// elements and stops. More than MaxMuxElements elements delivers the leading
+// MaxMuxElements and drops the rest (a bound against a crafted payload; legitimate
+// traffic never packs that many). Any error is a sentinel and never a panic, and
+// a non-nil error always means no access units were produced.
+//
+// A limitation of consuming several elements in one call: an inline config change
+// mid-payload (a second in-band element with useSameStreamMux==0 carrying a
+// different StreamMuxConfig) is honored for that element's access units, but a
+// caller reading AudioSpecificConfig once after Depacketize returns sees only the
+// last element's config. A config change mid-RTP-packet is pathological and this
+// keeps the callback contract simple.
+//
+// marker and rtpTime are accepted for signature parity with the AAC depacketizer;
+// LATM does not fragment across packets, so they are unused by the transform (the
+// caller owns the absolute clock).
 //
 // This package covers both out-of-band (Config.MuxConfigPresent == false,
 // payload starts directly at PayloadLengthInfo, byte-aligned) and in-band
@@ -79,17 +97,65 @@ func (d *Depacketizer) Depacketize(payload []byte, marker bool, rtpTime uint32) 
 		return nil, err
 	}
 
+	// RFC 3016 permits more than one AudioMuxElement per RTP payload. The common
+	// case is exactly one, exiting at the first `offset >= len(payload)` below
+	// before the padding scan or the tick accumulator ever run, so the
+	// single-element hot path is unchanged. elemBaseTicks continues each element's
+	// RTPOffset from the end of the previous one (out-of-band shares one fixed
+	// StreamMuxConfig, so frameLenTicks is constant across elements).
 	d.aus = d.aus[:0]
 	offset := 0
-	for i := 0; i <= d.smc.numSubFrames; i++ {
-		data, next, err := readMuxSlot(payload, offset)
-		if err != nil {
-			return nil, err
+	var elemBaseTicks uint32
+	for elem := 0; ; elem++ {
+		if elem >= MaxMuxElements {
+			// The leading elements are valid audio; deliver them and stop rather
+			// than dropping the whole packet or looping unbounded on a crafted one.
+			// Return nil, not an error: the consumer treats a non-nil error as "no
+			// usable access units", and the trailing-malformed path already returns
+			// nil for the same deliver-leading reason, so the cap matches it.
+			return d.aus, nil
 		}
-		offset = next
-		d.aus = append(d.aus, AU{Data: data, RTPOffset: uint32(i) * frameLenTicks})
+		auMark := len(d.aus)
+		for i := 0; i <= d.smc.numSubFrames; i++ {
+			data, next, rerr := readMuxSlot(payload, offset)
+			if rerr != nil {
+				if elem == 0 {
+					return nil, rerr
+				}
+				// A malformed trailing element: roll back its partial access units
+				// and deliver the complete leading elements (better for a real-time
+				// stream than dropping everything already parsed).
+				d.aus = d.aus[:auMark]
+				return d.aus, nil
+			}
+			offset = next
+			d.aus = append(d.aus, AU{Data: data, RTPOffset: elemBaseTicks + uint32(i)*frameLenTicks})
+		}
+		elemBaseTicks += uint32(d.smc.numSubFrames+1) * frameLenTicks
+
+		if offset >= len(payload) {
+			break // payload exhausted: the common single-element exit
+		}
+		if allZero(payload[offset:]) {
+			break // trailing byte-alignment / RTP padding, not another element
+		}
 	}
 	return d.aus, nil
+}
+
+// allZero reports whether every byte of b is zero. A wholly-zero remainder after
+// a complete AudioMuxElement is treated as byte-alignment or RTP padding and
+// dropped rather than parsed as another element. A trailing element consisting
+// only of zero-length access units is therefore indistinguishable from padding
+// and is likewise dropped, which is lossless since a zero-length access unit
+// carries no audio.
+func allZero(b []byte) bool {
+	for _, x := range b {
+		if x != 0 {
+			return false
+		}
+	}
+	return true
 }
 
 // depacketizeInBand handles Config.MuxConfigPresent == true: the whole
@@ -106,64 +172,110 @@ func (d *Depacketizer) Depacketize(payload []byte, marker bool, rtpTime uint32) 
 func (d *Depacketizer) depacketizeInBand(payload []byte) ([]AU, error) {
 	br := &bitReader{buf: payload}
 
+	// One RTP payload may carry more than one AudioMuxElement (RFC 3016). The
+	// common case is exactly one, breaking at the first `br.pos >= len` below
+	// before the padding scan runs, so the single-element hot path is unchanged.
+	// d.aus and d.inBandData are reset once and appended across every element;
+	// elemBaseTicks continues each element's RTPOffset from the previous one, and
+	// frameLenTicks is recomputed per element since an inline config may change it.
+	d.aus = d.aus[:0]
+	d.inBandData = d.inBandData[:0]
+	var elemBaseTicks uint32
+	for elem := 0; ; elem++ {
+		if elem >= MaxMuxElements {
+			// Deliver the leading elements and stop; nil error for the same reason
+			// as the out-of-band cap and the trailing-malformed path (the consumer
+			// treats err != nil as no usable access units).
+			return d.aus, nil
+		}
+		auMark := len(d.aus)
+		span, err := d.depacketizeInBandElement(br, elemBaseTicks)
+		if err != nil {
+			if elem == 0 {
+				return nil, err
+			}
+			// A malformed trailing element: roll back its partial access units
+			// (d.inBandData scratch need not shrink; it is reset next call and the
+			// abandoned bytes are unreferenced) and deliver the leading elements.
+			d.aus = d.aus[:auMark]
+			return d.aus, nil
+		}
+		elemBaseTicks += span
+
+		if br.pos >= len(payload)*8 {
+			break // payload exhausted: the common single-element exit
+		}
+		if allZero(payload[br.pos/8:]) {
+			break // trailing byte-alignment / RTP padding, not another element
+		}
+	}
+	return d.aus, nil
+}
+
+// depacketizeInBandElement parses one in-band AudioMuxElement from br, appending
+// its access units to d.aus (backed by d.inBandData) with each RTPOffset based at
+// baseTicks, and returns this element's total RTP tick span for the next
+// element's base. It reads the leading useSameStreamMux bit and, when 0, the
+// inline StreamMuxConfig (retained); useSameStreamMux==1 requires a previously
+// retained config. It leaves br byte-aligned at the element's end. On any error
+// it returns the sentinel and leaves the partial appends for the caller to roll
+// back; br is left wherever the failure occurred.
+func (d *Depacketizer) depacketizeInBandElement(br *bitReader, baseTicks uint32) (spanTicks uint32, err error) {
 	useSameStreamMux, ok := br.read(1)
 	if !ok {
-		return nil, ErrTruncated
+		return 0, ErrTruncated
 	}
 	if useSameStreamMux == 0 {
-		smc, asc, frameLength, err := parseStreamMuxConfigBits(br, d.ascBuf)
-		if err != nil {
-			return nil, err
+		smc, asc, frameLength, perr := parseStreamMuxConfigBits(br, d.ascBuf)
+		if perr != nil {
+			return 0, perr
 		}
 		d.smc = smc
-		// asc was packed into d.ascBuf's backing array. Recycle the
-		// previously active buffer as the next packet's scratch and promote
-		// asc to active, so the two never share a backing array. A packet
-		// that fails mid-parse returns above with d.asc untouched, so the
-		// in-place mutation extractBitsInto performed on the scratch buffer
-		// cannot corrupt the retained config.
+		// asc was packed into d.ascBuf's backing array. Recycle the previously
+		// active buffer as the next parse's scratch and promote asc to active, so
+		// the two never share a backing array. A parse that fails above leaves d.asc
+		// untouched, so the in-place mutation extractBitsInto performed on the
+		// scratch buffer cannot corrupt the retained config.
 		d.ascBuf = d.asc
 		d.asc = asc
 		d.frameLength = frameLength
 		d.haveSMC = true
 	} else if !d.haveSMC {
-		return nil, ErrNoConfig
+		return 0, ErrNoConfig
 	}
 
 	frameLenTicks, err := d.subFrameLayout()
 	if err != nil {
-		return nil, err
+		return 0, err
 	}
 
-	d.aus = d.aus[:0]
-	d.inBandData = d.inBandData[:0]
 	for i := 0; i <= d.smc.numSubFrames; i++ {
 		length := 0
 		for {
 			b, ok := br.read(8)
 			if !ok {
-				return nil, ErrTruncated
+				return 0, ErrTruncated
 			}
 			length += int(b)
 			if length > MaxMuxSlotBytes {
-				return nil, ErrPayloadOverflow
+				return 0, ErrPayloadOverflow
 			}
 			if b != 0xFF {
 				break
 			}
 		}
-		if br.pos+length*8 > len(payload)*8 {
-			return nil, ErrPayloadOverflow
+		if br.pos+length*8 > len(br.buf)*8 {
+			return 0, ErrPayloadOverflow
 		}
 
 		start := len(d.inBandData)
-		d.inBandData = appendBits(d.inBandData, payload, br.pos, length*8)
+		d.inBandData = appendBits(d.inBandData, br.buf, br.pos, length*8)
 		data := d.inBandData[start:]
 		br.pos += length * 8
 
-		d.aus = append(d.aus, AU{Data: data, RTPOffset: uint32(i) * frameLenTicks})
+		d.aus = append(d.aus, AU{Data: data, RTPOffset: baseTicks + uint32(i)*frameLenTicks})
 	}
 	br.byteAlign()
 
-	return d.aus, nil
+	return uint32(d.smc.numSubFrames+1) * frameLenTicks, nil
 }

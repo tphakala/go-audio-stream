@@ -29,9 +29,11 @@ const (
 	kindAAC                     // run the RFC 3640 AAC-hbr depacketizer, one CodecAAC frame per access unit
 )
 
-// Client is a single raw-UDP audio source. It binds one UDP socket and, for the
-// source's life, delivers frames to Config.OnFrame on its reader goroutine until
-// Close is called or the read-idle watchdog fires.
+// Client is a single raw-UDP audio source. It binds one UDP socket (and, when
+// Config.RTCPListenAddr is set, a second for RTCP) and, for the source's life,
+// delivers frames to Config.OnFrame on its reader goroutine until Close is called
+// or the read-idle watchdog fires. When RTCP is enabled (RTCPListenAddr or
+// RTCPMux) a received Sender Report populates TrackStats.SenderClock.
 //
 // Close, Wait, Stats, Info and Format are safe from any goroutine; of those, all
 // but Wait may be called from inside OnFrame, because Wait blocks until the
@@ -137,6 +139,32 @@ type Client struct {
 	released []rtp.Released
 	lastSSRC uint32
 	haveSSRC bool
+
+	// RTCP / sender-clock state, used only when Config.RTCPListenAddr or
+	// Config.RTCPMux is set (both zero-value-inert). rtcpConn is the second socket
+	// for the separate-port model (nil for mux or when RTCP is disabled); rtcpWG
+	// tracks its receive goroutine so Wait joins it and Close leaks nothing.
+	// mediaSSRC and baseSet are published by the RTP reader (processRTP) so the RTCP
+	// path can match a Sender Report to this stream's source and gate publication
+	// until the first accepted packet identifies that source; they are read by
+	// handleRTCP. srClock holds the most recent RTP-to-wall-clock correspondence
+	// (nil until a usable Sender Report arrives): it has TWO writers, the RTP reader
+	// (clears it on an SSRC change) and, on the separate-socket path, the RTCP
+	// goroutine (publishes it in handleRTCP), and is read by Stats on any external
+	// goroutine, so it stays an atomic.Pointer for Stats to read lock-free.
+	//
+	// rtcpMu serializes handleRTCP's read-match-publish against processRTP's
+	// SSRC-reset identity swap, so a delayed Sender Report for the old source cannot
+	// publish a mapping after the reset cleared it (a check-then-store the atomics
+	// alone cannot make indivisible). It is taken only when the source identity
+	// changes (first packet or SSRC reset) and per RTCP packet, never on the
+	// steady-state media path, so the zero-alloc hot path is untouched.
+	rtcpConn  *net.UDPConn
+	rtcpWG    sync.WaitGroup
+	rtcpMu    sync.Mutex
+	mediaSSRC atomic.Uint32
+	baseSet   atomic.Bool
+	srClock   atomic.Pointer[audiostream.SenderClock]
 }
 
 // Client satisfies the root package's source-agnostic capture contract.
@@ -182,12 +210,34 @@ func Open(ctx context.Context, cfg Config) (*Client, error) {
 	}
 	c.conn = conn
 	c.url = "udp://" + conn.LocalAddr().String()
+
+	// Bind the separate RTCP socket before the reader spawns, so a bind failure
+	// returns cleanly with no goroutine to tear down. RTCPMux carries RTCP on the
+	// media socket and needs no second bind.
+	if cfg.RTCPListenAddr != "" {
+		rtcpAddr, rerr := net.ResolveUDPAddr("udp", cfg.RTCPListenAddr)
+		if rerr != nil {
+			_ = conn.Close()
+			return nil, fmt.Errorf("%w: RTCPListenAddr: %w", ErrInvalidConfig, rerr)
+		}
+		rtcpConn, rerr := net.ListenUDP("udp", rtcpAddr)
+		if rerr != nil {
+			_ = conn.Close()
+			return nil, fmt.Errorf("%w: RTCP socket: %w", ErrBind, rerr)
+		}
+		c.rtcpConn = rtcpConn
+	}
+
 	if c.cfg.Logger != nil {
 		c.cfg.Logger.Debug("udpsource: listening", "url", c.url, "mode", c.cfg.Mode.String())
 	}
 
 	c.lastReadAt.Store(time.Now().UnixNano())
 	go c.reader()
+	if c.rtcpConn != nil {
+		c.rtcpWG.Add(1)
+		go c.rtcpReader()
+	}
 	return c, nil
 }
 
@@ -198,6 +248,13 @@ func (c *Client) resolveFormat() error {
 	case ModeRTP:
 		if c.cfg.ClockRate <= 0 {
 			return fmt.Errorf("%w: ModeRTP requires a positive ClockRate", ErrInvalidConfig)
+		}
+		// An RTP payload type is 7 bits, so a value above 127 can never equal the
+		// masked payload type of any parsed packet: processRTP would drop every
+		// datagram as malformed and the source would deliver nothing. Reject it up
+		// front rather than silently receive an empty stream.
+		if c.cfg.PayloadType > 127 {
+			return fmt.Errorf("%w: PayloadType must be 0-127 (7-bit RTP field), got %d", ErrInvalidConfig, c.cfg.PayloadType)
 		}
 		switch codec := c.cfg.Codec.(type) {
 		case audiostream.CodecG711:
@@ -256,10 +313,23 @@ func (c *Client) resolveFormat() error {
 		if c.cfg.Reorder {
 			c.reorder = &rtp.Reorderer{}
 		}
+		// RTCP is opt-in. The two enable modes are mutually exclusive, and RTCP-mux
+		// needs a media payload type outside the RFC 5761 reserved range so the
+		// second byte disambiguates media from RTCP on the shared socket.
+		if c.cfg.RTCPListenAddr != "" && c.cfg.RTCPMux {
+			return fmt.Errorf("%w: RTCPListenAddr and RTCPMux are mutually exclusive", ErrInvalidConfig)
+		}
+		if c.cfg.RTCPMux && c.cfg.PayloadType >= 64 && c.cfg.PayloadType <= 95 {
+			return fmt.Errorf("%w: RTCPMux requires a PayloadType outside the RFC 5761 reserved range 64-95, got %d", ErrInvalidConfig, c.cfg.PayloadType)
+		}
 		return nil
 	case ModePCM:
 		if c.cfg.Format.SampleRate <= 0 || c.cfg.Format.Channels <= 0 {
 			return fmt.Errorf("%w: ModePCM requires a positive SampleRate and Channels", ErrInvalidConfig)
+		}
+		// RTCP carries no meaning for a raw-PCM datagram stream (no RTP, no SSRC).
+		if c.cfg.RTCPListenAddr != "" || c.cfg.RTCPMux {
+			return fmt.Errorf("%w: RTCP (RTCPListenAddr/RTCPMux) applies only to ModeRTP", ErrInvalidConfig)
 		}
 		c.frameBytes = 2 * c.cfg.Format.Channels
 		c.swap = c.cfg.Format.BigEndian
@@ -333,6 +403,15 @@ func (c *Client) recvLoop() {
 			continue
 		}
 		now := time.Now()
+		if c.cfg.RTCPMux && isRTCP(buf[:n]) {
+			// Demultiplexed RTCP on the shared media socket (RFC 5761). Handle it off
+			// the media accounting: RTCP bytes are not media wire bytes, and an
+			// RTCP-only sender must not refresh the media liveness clock. The socket
+			// read already re-armed the read-idle deadline, which is unavoidable on a
+			// shared socket and harmless (a peer sending RTCP is alive).
+			c.handleRTCP(buf[:n], now)
+			continue
+		}
 		c.lastReadAt.Store(now.UnixNano())
 		c.wire.Add(uint64(n))
 		if c.cfg.Mode == ModePCM {
@@ -462,10 +541,25 @@ func (c *Client) processRTP(pkt rtp.Packet, now time.Time) {
 		c.pendingGap = 0
 	}
 	// Re-seed the PTS origin on the first packet and on every SSRC change, so the
-	// media timeline starts at 0 and restarts cleanly for a new stream.
+	// media timeline starts at 0 and restarts cleanly for a new stream, and publish
+	// the media source identity for the RTCP path. Hold rtcpMu across the whole
+	// identity swap so it is indivisible with respect to handleRTCP: a Sender Report
+	// for the old source that races an SSRC reset either publishes before the swap
+	// (and is then cleared by srClock.Store(nil) inside the same critical section)
+	// or is evaluated after it against the new mediaSSRC, never leaving a stale
+	// mapping. The lock is taken only when the identity changes, never on the
+	// steady-state media path, so the zero-alloc delivery path is unaffected.
 	if up.SSRCReset || !c.tsBaseSet {
 		c.tsBase = up.Timestamp
 		c.tsBaseSet = true
+		c.rtcpMu.Lock()
+		if up.SSRCReset {
+			// Invalidate the old source's mapping as part of the atomic swap.
+			c.srClock.Store(nil)
+		}
+		c.mediaSSRC.Store(pkt.Header.SSRC)
+		c.baseSet.Store(true)
+		c.rtcpMu.Unlock()
 	}
 	if up.Duplicate {
 		c.duplicates.Add(1)
@@ -727,6 +821,11 @@ func (c *Client) initiateShutdown(cause error) {
 		if c.conn != nil {
 			_ = c.conn.Close()
 		}
+		// Close the RTCP socket too so its parked ReadFromUDP unblocks and the RTCP
+		// goroutine exits; a nil rtcpConn (mux or RTCP disabled) is skipped.
+		if c.rtcpConn != nil {
+			_ = c.rtcpConn.Close()
+		}
 	})
 }
 
@@ -747,12 +846,16 @@ func (c *Client) termError() error {
 func (c *Client) Wait(ctx context.Context) error {
 	select {
 	case <-c.done:
-		return c.termError()
 	case <-ctx.Done():
 		c.initiateShutdown(ctx.Err())
 		<-c.done
-		return c.termError()
 	}
+	// Join the RTCP goroutine (a no-op when RTCP is disabled or muxed, where
+	// rtcpWG is zero): the media reader closed done, and initiateShutdown closed
+	// the RTCP socket, so its goroutine is already unblocking. This guarantees no
+	// RTCP goroutine outlives Wait.
+	c.rtcpWG.Wait()
+	return c.termError()
 }
 
 // Close ends the stream. It is idempotent and safe from any goroutine, including
@@ -778,6 +881,12 @@ func (c *Client) Stats() audiostream.Stats {
 	}
 	if nanos := c.lastReadAt.Load(); nanos != 0 {
 		ts.LastFrameAt = time.Unix(0, nanos)
+	}
+	// Publish a value copy of the sender-clock mapping so the snapshot never
+	// aliases the internal pointer the RTCP goroutine swaps. Nil (the default and
+	// the disabled path) leaves SenderClock at its invalid zero value.
+	if sc := c.srClock.Load(); sc != nil {
+		ts.SenderClock = *sc
 	}
 	return audiostream.Stats{
 		CapturedAt: time.Now(),

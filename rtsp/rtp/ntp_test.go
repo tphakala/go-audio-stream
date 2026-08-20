@@ -1,11 +1,11 @@
-package rtsp
+package rtp
 
 import (
 	"testing"
 	"time"
 )
 
-// ntpTime decodes a 64-bit RTCP NTP timestamp into a time.Time. The seconds
+// NTPTime decodes a 64-bit RTCP NTP timestamp into a time.Time. The seconds
 // field is read through the RFC 5905 era-1 pivot so a sender clock in the
 // post-2036 era decodes correctly, and the fraction is the binary fraction of
 // a second.
@@ -41,9 +41,9 @@ func TestNTPTime(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := ntpTime(tc.ts)
+			got := NTPTime(tc.ts)
 			if !got.Equal(tc.want) {
-				t.Errorf("ntpTime(%#016x) = %v, want %v", tc.ts, got.UTC(), tc.want.UTC())
+				t.Errorf("NTPTime(%#016x) = %v, want %v", tc.ts, got.UTC(), tc.want.UTC())
 			}
 		})
 	}
