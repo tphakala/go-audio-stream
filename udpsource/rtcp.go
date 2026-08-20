@@ -73,6 +73,13 @@ func (c *Client) handleRTCP(datagram []byte, now time.Time) {
 	if err != nil || len(reports) == 0 {
 		return
 	}
+	// Serialize the source match and the publish with processRTP's SSRC-reset
+	// identity swap: the parse above stays outside the lock (it is the expensive
+	// part and touches no shared state), and rtcpMu makes the read-match-store below
+	// indivisible so a report cannot be published against a source identity that a
+	// concurrent reset is mid-way through replacing.
+	c.rtcpMu.Lock()
+	defer c.rtcpMu.Unlock()
 	if !c.baseSet.Load() {
 		// The RTP stream has not identified its media source yet, so there is no
 		// SSRC to match a report against. A mixer or translator compound can carry a

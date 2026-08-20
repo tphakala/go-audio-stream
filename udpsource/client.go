@@ -151,10 +151,17 @@ type Client struct {
 	// (nil until a usable Sender Report arrives): it has TWO writers, the RTP reader
 	// (clears it on an SSRC change) and, on the separate-socket path, the RTCP
 	// goroutine (publishes it in handleRTCP), and is read by Stats on any external
-	// goroutine. All three are therefore atomic; the mux path happens to run
-	// handleRTCP on the reader goroutine, but the atomics are correct either way.
+	// goroutine, so it stays an atomic.Pointer for Stats to read lock-free.
+	//
+	// rtcpMu serializes handleRTCP's read-match-publish against processRTP's
+	// SSRC-reset identity swap, so a delayed Sender Report for the old source cannot
+	// publish a mapping after the reset cleared it (a check-then-store the atomics
+	// alone cannot make indivisible). It is taken only when the source identity
+	// changes (first packet or SSRC reset) and per RTCP packet, never on the
+	// steady-state media path, so the zero-alloc hot path is untouched.
 	rtcpConn  *net.UDPConn
 	rtcpWG    sync.WaitGroup
+	rtcpMu    sync.Mutex
 	mediaSSRC atomic.Uint32
 	baseSet   atomic.Bool
 	srClock   atomic.Pointer[audiostream.SenderClock]
@@ -241,6 +248,13 @@ func (c *Client) resolveFormat() error {
 	case ModeRTP:
 		if c.cfg.ClockRate <= 0 {
 			return fmt.Errorf("%w: ModeRTP requires a positive ClockRate", ErrInvalidConfig)
+		}
+		// An RTP payload type is 7 bits, so a value above 127 can never equal the
+		// masked payload type of any parsed packet: processRTP would drop every
+		// datagram as malformed and the source would deliver nothing. Reject it up
+		// front rather than silently receive an empty stream.
+		if c.cfg.PayloadType > 127 {
+			return fmt.Errorf("%w: PayloadType must be 0-127 (7-bit RTP field), got %d", ErrInvalidConfig, c.cfg.PayloadType)
 		}
 		switch codec := c.cfg.Codec.(type) {
 		case audiostream.CodecG711:
@@ -525,32 +539,27 @@ func (c *Client) processRTP(pkt rtp.Packet, now time.Time) {
 		// single-frame codec) must not carry onto the new source's first frame.
 		c.resetAAC()
 		c.pendingGap = 0
-		// Gate the RTCP publisher shut for the whole reset window before touching
-		// mediaSSRC: clear baseSet so handleRTCP (which returns early on !baseSet)
-		// does not publish a mapping while mediaSSRC still names the old source, then
-		// invalidate the old source's Sender Report mapping. baseSet is restored
-		// below once mediaSSRC names the new source, so a delayed old-source Sender
-		// Report racing the reset is rejected by the !baseSet gate instead of
-		// republishing a stale mapping against the new timeline. A few-instruction
-		// TOCTOU window remains (an RTCP goroutine that already read baseSet==true
-		// could still store once after this clear), but it is advisory-only and
-		// self-corrects on the new source's first report. Mirrors the rtsp UDP path,
-		// which clears baseSet across the same window.
-		c.baseSet.Store(false)
-		c.srClock.Store(nil)
 	}
 	// Re-seed the PTS origin on the first packet and on every SSRC change, so the
-	// media timeline starts at 0 and restarts cleanly for a new stream.
+	// media timeline starts at 0 and restarts cleanly for a new stream, and publish
+	// the media source identity for the RTCP path. Hold rtcpMu across the whole
+	// identity swap so it is indivisible with respect to handleRTCP: a Sender Report
+	// for the old source that races an SSRC reset either publishes before the swap
+	// (and is then cleared by srClock.Store(nil) inside the same critical section)
+	// or is evaluated after it against the new mediaSSRC, never leaving a stale
+	// mapping. The lock is taken only when the identity changes, never on the
+	// steady-state media path, so the zero-alloc delivery path is unaffected.
 	if up.SSRCReset || !c.tsBaseSet {
 		c.tsBase = up.Timestamp
 		c.tsBaseSet = true
-		// Publish the media source identity for the RTCP path. Store mediaSSRC
-		// before baseSet: sync/atomic operations are sequentially consistent, so an
-		// RTCP goroutine that observes baseSet true is guaranteed to also see the
-		// matching mediaSSRC. baseSet is stored last, reopening the RTCP publish gate
-		// only once mediaSSRC names the current source.
+		c.rtcpMu.Lock()
+		if up.SSRCReset {
+			// Invalidate the old source's mapping as part of the atomic swap.
+			c.srClock.Store(nil)
+		}
 		c.mediaSSRC.Store(pkt.Header.SSRC)
 		c.baseSet.Store(true)
+		c.rtcpMu.Unlock()
 	}
 	if up.Duplicate {
 		c.duplicates.Add(1)

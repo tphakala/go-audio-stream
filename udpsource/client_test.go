@@ -482,6 +482,7 @@ func TestOpenInvalidConfig(t *testing.T) {
 		{"rtp pcm codec missing channels", Config{ListenAddr: loopbackAddr, Mode: ModeRTP, Codec: audiostream.CodecG711{Law: audiostream.MuLaw}, ClockRate: 8000}, ErrInvalidConfig},
 		{"pcm missing rate", Config{ListenAddr: loopbackAddr, Mode: ModePCM, Format: PCMFormat{Channels: 1}}, ErrInvalidConfig},
 		{"bad source ip", Config{ListenAddr: loopbackAddr, Mode: ModeRTP, Codec: audiostream.CodecOpus{}, ClockRate: 48000, SourceIP: "not-an-ip"}, ErrInvalidConfig},
+		{"payload type above 127", Config{ListenAddr: loopbackAddr, Mode: ModeRTP, PayloadType: 200, Codec: audiostream.CodecOpus{}, ClockRate: 48000}, ErrInvalidConfig},
 		{"unsupported codec", Config{ListenAddr: loopbackAddr, Mode: ModeRTP, Codec: audiostream.CodecMP3{}, ClockRate: 90000}, ErrUnsupportedCodec},
 		{"aac invalid widths", Config{ListenAddr: loopbackAddr, Mode: ModeRTP, PayloadType: 97, Codec: audiostream.CodecAAC{}, ClockRate: 44100, AAC: AACParams{SizeLength: 0, IndexLength: 3, IndexDeltaLength: 3, SamplesPerFrame: 1024}}, ErrInvalidConfig},
 	}
