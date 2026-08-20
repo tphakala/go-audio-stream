@@ -75,16 +75,18 @@ func FuzzParseStreamMuxConfig(f *testing.F) {
 }
 
 // assertAUInvariants checks the invariants every success-path Depacketize
-// return must satisfy, so the fuzz targets assert more than no-panic: the
-// subframe count fits MaxSubFrames, each AU fits MaxMuxSlotBytes, and the AUs'
-// RTPOffsets increase by a constant per-frame step (au[i].RTPOffset == i*step),
-// the multi-subframe timing contract Depacketize documents. All subframes use
-// one frame-length tick count, so the step read from au[1] must hold for every
-// index.
+// return must satisfy, so the fuzz targets assert more than no-panic: the AU
+// count fits MaxMuxElements*MaxSubFrames (a payload may carry several
+// AudioMuxElements, each up to MaxSubFrames subframes), each AU fits
+// MaxMuxSlotBytes, the first RTPOffset is 0, and offsets are non-decreasing.
+// Offsets accumulate across subframes and elements (each subframe advances by the
+// element's per-frame tick count, each element continues from the previous one's
+// span), so they rise monotonically but not necessarily by a single constant step
+// once elements with differing frame lengths appear in one payload.
 func assertAUInvariants(t *testing.T, aus []AU) {
 	t.Helper()
-	if len(aus) > MaxSubFrames {
-		t.Fatalf("AU count %d exceeds MaxSubFrames %d", len(aus), MaxSubFrames)
+	if len(aus) > MaxMuxElements*MaxSubFrames {
+		t.Fatalf("AU count %d exceeds MaxMuxElements*MaxSubFrames %d", len(aus), MaxMuxElements*MaxSubFrames)
 	}
 	if len(aus) == 0 {
 		return
@@ -92,16 +94,12 @@ func assertAUInvariants(t *testing.T, aus []AU) {
 	if aus[0].RTPOffset != 0 {
 		t.Fatalf("aus[0].RTPOffset = %d, want 0", aus[0].RTPOffset)
 	}
-	var step uint32
-	if len(aus) > 1 {
-		step = aus[1].RTPOffset
-	}
 	for i := range aus {
 		if len(aus[i].Data) > MaxMuxSlotBytes {
 			t.Fatalf("aus[%d].Data length %d exceeds MaxMuxSlotBytes %d", i, len(aus[i].Data), MaxMuxSlotBytes)
 		}
-		if want := uint32(i) * step; aus[i].RTPOffset != want {
-			t.Fatalf("aus[%d].RTPOffset = %d, want %d (i*step, step=%d)", i, aus[i].RTPOffset, want, step)
+		if i > 0 && aus[i].RTPOffset < aus[i-1].RTPOffset {
+			t.Fatalf("aus[%d].RTPOffset = %d < aus[%d].RTPOffset = %d (offsets must be non-decreasing)", i, aus[i].RTPOffset, i-1, aus[i-1].RTPOffset)
 		}
 	}
 }
@@ -117,6 +115,8 @@ func FuzzDepacketizeOutOfBand(f *testing.F) {
 	for _, buf := range truncs(v2) {
 		f.Add(buf, true)
 	}
+	// Two concatenated AudioMuxElements: a multi-element payload seed.
+	f.Add(append(append([]byte{}, v2...), v2...), true)
 	f.Fuzz(func(t *testing.T, payload []byte, marker bool) {
 		// A fresh depacketizer per input so each execution owns its buffers and
 		// cannot be influenced by state a prior input left behind.
@@ -146,7 +146,8 @@ func FuzzDepacketizeInBand(f *testing.F) {
 	}
 
 	f.Add(v4, true, v5, true)
-	f.Add(v5, true, v4, true) // v5 first: useSameStreamMux with no prior config (ErrNoConfig).
+	f.Add(v5, true, v4, true)                              // v5 first: useSameStreamMux with no prior config (ErrNoConfig).
+	f.Add(buildInBandTwoElementsSameMux(), true, v4, true) // a two-element in-band payload seed.
 
 	f.Fuzz(func(t *testing.T, p1 []byte, m1 bool, p2 []byte, m2 bool) {
 		d.Reset()
