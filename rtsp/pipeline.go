@@ -94,6 +94,20 @@ type track struct {
 	// re-announces its next resolved config while an out-of-band track
 	// (whose ASC survives the reset unchanged) never spuriously refires.
 	latmASC []byte
+	// pendingGap is the count of lost RTP packets not yet reported through a
+	// Frame.SeqGap. deliverAAC/deliverLATM fold up.Gap into it before
+	// depacketizing and drain it onto the FIRST access unit a packet completes,
+	// so a loss immediately before a buffering AAC fragment (or before a
+	// malformed packet in either codec) that completes no access unit still
+	// surfaces on the next delivered frame instead of vanishing from the
+	// per-frame signal. TrackStats.SeqGaps was already correct; only
+	// Frame.SeqGap was wrong. Reader-owned: only deliverAAC, deliverLATM, and
+	// resetDepacketizer touch it, all on the delivery goroutine, so it needs no
+	// lock. resetDepacketizer clears it only on an SSRC reset, not a plain gap,
+	// so a gap from the old sequence space cannot bleed onto the new source's
+	// first frame. Shared by the AAC and LATM paths: a track is exactly one
+	// codec, so they never contend.
+	pendingGap int
 	// wirePayloadType is the payload type this track has settled on and
 	// wirePTSet says whether it has settled. Until it settles, ptCandidate and
 	// ptRun track the current run of one undeclared type, so a track adopts a
@@ -412,23 +426,33 @@ func (tr *track) deliver(pkt rtp.Packet, up rtp.Update, now time.Time, onFrame f
 }
 
 // deliverAAC runs the RFC 3640 AAC-hbr depacketizer and delivers one frame per
-// access unit. SeqGap is reported on the first AU of the packet and zero on the
-// rest, so summing SeqGap across frames counts each loss once; RTPTime is the
-// packet timestamp for every AU; PTS interpolates by the AU's RTP offset. A
-// malformed packet counts as malformed and yields no frame.
+// access unit. SeqGap is drained onto the FIRST AU a packet completes and zero
+// on the rest, so summing SeqGap across frames counts each loss once; RTPTime
+// is the packet timestamp for every AU; PTS interpolates by the AU's RTP
+// offset. A malformed packet counts as malformed and yields no frame.
+//
+// The gap is drained from tr.pendingGap, not read from up.Gap directly, so a
+// loss immediately before a buffering fragment (which completes no AU) or
+// before a malformed packet (which yields no frame) still surfaces on the next
+// delivered frame instead of being lost. The drain runs even when onFrame is
+// nil, so the counter cannot grow unbounded; when the packet completes no AU
+// the gap stays pending until one does.
 func (tr *track) deliverAAC(pkt rtp.Packet, up rtp.Update, now time.Time, onFrame func(audiostream.Frame)) {
+	tr.pendingGap += up.Gap
 	aus, err := tr.aac.Depacketize(pkt.Payload, pkt.Header.Marker, pkt.Header.Timestamp)
 	if err != nil {
+		// The pending gap is retained for the next delivered frame.
 		tr.malformed.Add(1)
-		return
-	}
-	if onFrame == nil {
 		return
 	}
 	for i := range aus {
 		gap := 0
 		if i == 0 {
-			gap = up.Gap
+			gap = tr.pendingGap
+			tr.pendingGap = 0
+		}
+		if onFrame == nil {
+			continue
 		}
 		onFrame(audiostream.Frame{
 			TrackID:    tr.id,
@@ -444,8 +468,10 @@ func (tr *track) deliverAAC(pkt rtp.Packet, up rtp.Update, now time.Time, onFram
 // deliverLATM runs the RFC 3016 MP4A-LATM depacketizer and delivers one
 // frame per access unit, exactly like deliverAAC: RTPTime is the packet
 // timestamp for every AU, PTS interpolates by the AU's RTP offset, and SeqGap
-// is reported on the first AU only. A malformed packet counts as malformed
-// and yields no frame.
+// is drained (from tr.pendingGap) onto the first AU only. A malformed packet
+// counts as malformed and yields no frame, retaining the pending gap for the
+// next delivered frame. Unlike AAC, LATM never buffers a fragment across
+// packets, so the only path that completes no AU is the malformed one.
 //
 // Unlike the other codecs, it also carries the OnCodecUpdate integration
 // point: onCodecUpdate is called from HERE, between Depacketize and the AU
@@ -460,8 +486,10 @@ func (tr *track) deliverAAC(pkt rtp.Packet, up rtp.Update, now time.Time, onFram
 func (tr *track) deliverLATM(pkt rtp.Packet, up rtp.Update, now time.Time,
 	onFrame func(audiostream.Frame), onCodecUpdate func(audiostream.CodecUpdate),
 ) {
+	tr.pendingGap += up.Gap
 	aus, err := tr.latm.Depacketize(pkt.Payload, pkt.Header.Marker, pkt.Header.Timestamp)
 	if err != nil {
+		// The pending gap is retained for the next delivered frame.
 		tr.malformed.Add(1)
 		return
 	}
@@ -484,13 +512,14 @@ func (tr *track) deliverLATM(pkt rtp.Packet, up rtp.Update, now time.Time,
 		}
 	}
 
-	if onFrame == nil {
-		return
-	}
 	for i := range aus {
 		gap := 0
 		if i == 0 {
-			gap = up.Gap
+			gap = tr.pendingGap
+			tr.pendingGap = 0
+		}
+		if onFrame == nil {
+			continue
 		}
 		onFrame(audiostream.Frame{
 			TrackID:    tr.id,
@@ -672,6 +701,15 @@ func (tr *track) ptsOf(ts uint64) time.Duration {
 // out-of-band track, so the next packet's deliverLATM sees no change and never
 // fires.
 func (tr *track) resetDepacketizer(onSSRCChange bool) {
+	if onSSRCChange {
+		// A new source restarts the sequence space, so any gap still pending from
+		// the old source must not carry onto the new source's first frame. Cleared
+		// only here (SSRC reset), never on a plain gap, where the pending gap must
+		// survive to drain onto the next completed access unit. This is a
+		// standalone block, not nested under the tr.latm guard below, so it also
+		// runs for an AAC track (whose tr.latm is nil).
+		tr.pendingGap = 0
+	}
 	if tr.aac != nil {
 		tr.aac.Reset()
 	}

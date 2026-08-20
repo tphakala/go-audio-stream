@@ -222,6 +222,18 @@ func buildAUHeaders(aus ...[]byte) []byte {
 	return buf
 }
 
+// buildAUFragment builds an AAC-hbr packet carrying one fragment of an access
+// unit: a 16-bit AU-headers-length, a single 16-bit AU-header whose 13-bit size
+// is the TOTAL size of the complete access unit (declaredSize), then the
+// fragment's data bytes. When declaredSize exceeds len(data) and the RTP marker
+// is clear, the depacketizer buffers this as a fragment start (yielding no AU);
+// the completing fragment carries the same declaredSize with the marker set.
+func buildAUFragment(declaredSize int, data []byte) []byte {
+	buf := binary.BigEndian.AppendUint16(nil, 16)
+	buf = binary.BigEndian.AppendUint16(buf, uint16(declaredSize)<<3)
+	return append(buf, data...)
+}
+
 // newAACDepacketizer returns a depacketizer configured for the common AAC-hbr
 // field widths used across the delivery tests.
 func newAACDepacketizer(t *testing.T) *aac.Depacketizer {
@@ -585,6 +597,145 @@ func TestDeliverAACMalformed(t *testing.T) {
 	}
 	if tr.malformed.Load() != 1 {
 		t.Errorf("malformed = %d, want 1", tr.malformed.Load())
+	}
+}
+
+// TestDeliverAACSeqGapCarriesToReassembledAU is the core regression for issue
+// #103: a loss immediately before a fragment-start packet must surface on the
+// access unit that completes on a later in-order packet, not vanish because the
+// fragment-start packet delivered no frame to carry it.
+func TestDeliverAACSeqGapCarriesToReassembledAU(t *testing.T) {
+	t.Parallel()
+	tr := &track{id: 0, kind: deliverAAC, clockRate: 16000, aac: newAACDepacketizer(t)}
+	tr.baseSet.Store(true)
+
+	// A packet was lost right before the fragment start. The fragment-start
+	// packet (marker clear, only 3 of the 6 declared bytes) completes no AU.
+	frag1 := rtp.Packet{Header: rtp.Header{Timestamp: 100}, Payload: buildAUFragment(6, []byte{1, 2, 3})}
+	n := 0
+	tr.deliver(frag1, rtp.Update{Timestamp: 100, Gap: 1}, time.Unix(1, 0), func(audiostream.Frame) { n++ })
+	if n != 0 {
+		t.Fatalf("fragment start delivered %d frames, want 0 (buffering)", n)
+	}
+
+	// The completing fragment (marker set, the remaining 3 bytes) reassembles the
+	// 6-byte AU. Its SeqGap must be 1, the loss that preceded the fragment start;
+	// before the fix it was 0 because the gap reached no frame.
+	frag2 := rtp.Packet{Header: rtp.Header{Timestamp: 100, Marker: true}, Payload: buildAUFragment(6, []byte{4, 5, 6})}
+	var got audiostream.Frame
+	tr.deliver(frag2, rtp.Update{Timestamp: 100, Gap: 0}, time.Unix(1, 0), func(f audiostream.Frame) {
+		got = copyFrame(&f)
+		n++
+	})
+	if n != 1 {
+		t.Fatalf("completing fragment delivered %d frames, want 1", n)
+	}
+	if want := []byte{1, 2, 3, 4, 5, 6}; !bytes.Equal(got.Data, want) {
+		t.Errorf("reassembled AU = % x, want % x", got.Data, want)
+	}
+	if got.SeqGap != 1 {
+		t.Errorf("SeqGap = %d, want 1 (the loss before the fragment start must carry to the reassembled AU)", got.SeqGap)
+	}
+}
+
+// TestDeliverAACMalformedRetainsGap covers the other no-frame path: a malformed
+// packet carrying a gap must retain that gap and drain it onto the next good
+// frame, and a plain gap in between (resetDepacketizer(false)) must not wipe it.
+func TestDeliverAACMalformedRetainsGap(t *testing.T) {
+	t.Parallel()
+	tr := &track{id: 0, kind: deliverAAC, clockRate: 16000, aac: newAACDepacketizer(t)}
+	tr.baseSet.Store(true)
+
+	// A malformed packet (one byte, too short for the AU-headers-length) carrying
+	// a gap of 2 delivers no frame but must retain the pending gap.
+	bad := rtp.Packet{Header: rtp.Header{Marker: true}, Payload: []byte{0x00}}
+	n := 0
+	tr.deliver(bad, rtp.Update{Gap: 2}, time.Unix(1, 0), func(audiostream.Frame) { n++ })
+	if n != 0 || tr.malformed.Load() != 1 {
+		t.Fatalf("malformed packet: frames=%d malformed=%d, want 0 and 1", n, tr.malformed.Load())
+	}
+
+	// A plain gap (not an SSRC reset) between the two packets must not clear the
+	// retained gap.
+	tr.resetDepacketizer(false)
+
+	good := rtp.Packet{Header: rtp.Header{Timestamp: 100, Marker: true}, Payload: buildAUHeaders([]byte{0x11, 0x22})}
+	var got audiostream.Frame
+	tr.deliver(good, rtp.Update{Timestamp: 100, Gap: 0}, time.Unix(1, 0), func(f audiostream.Frame) { got = copyFrame(&f) })
+	if got.SeqGap != 2 {
+		t.Errorf("SeqGap = %d, want 2 (a gap on a malformed packet must drain onto the next frame)", got.SeqGap)
+	}
+}
+
+// TestDeliverAACAccumulatesStrandedGaps proves the accumulator sums: two
+// separate losses stranded on two no-frame packets drain together onto the next
+// completed AU, so no loss is dropped when several arrive back to back before a
+// frame completes.
+func TestDeliverAACAccumulatesStrandedGaps(t *testing.T) {
+	t.Parallel()
+	tr := &track{id: 0, kind: deliverAAC, clockRate: 16000, aac: newAACDepacketizer(t)}
+	tr.baseSet.Store(true)
+
+	// Two malformed packets, each carrying a distinct gap, deliver no frame; the
+	// gaps must accumulate (2 then 5), not overwrite.
+	bad := rtp.Packet{Header: rtp.Header{Marker: true}, Payload: []byte{0x00}}
+	tr.deliver(bad, rtp.Update{Gap: 2}, time.Unix(1, 0), func(audiostream.Frame) {})
+	tr.deliver(bad, rtp.Update{Gap: 3}, time.Unix(1, 0), func(audiostream.Frame) {})
+
+	good := rtp.Packet{Header: rtp.Header{Timestamp: 100, Marker: true}, Payload: buildAUHeaders([]byte{0x11, 0x22})}
+	var got audiostream.Frame
+	tr.deliver(good, rtp.Update{Timestamp: 100, Gap: 0}, time.Unix(1, 0), func(f audiostream.Frame) { got = copyFrame(&f) })
+	if got.SeqGap != 5 {
+		t.Errorf("SeqGap = %d, want 5 (two stranded gaps of 2 and 3 must drain as their sum)", got.SeqGap)
+	}
+}
+
+// TestDeliverAACSSRCResetClearsPendingGap locks in that an SSRC reset drops a
+// pending gap from the old sequence space, so it cannot bleed onto the new
+// source's first frame.
+func TestDeliverAACSSRCResetClearsPendingGap(t *testing.T) {
+	t.Parallel()
+	tr := &track{id: 0, kind: deliverAAC, clockRate: 16000, aac: newAACDepacketizer(t)}
+	tr.baseSet.Store(true)
+
+	// A malformed packet leaves a gap of 3 pending.
+	bad := rtp.Packet{Header: rtp.Header{Marker: true}, Payload: []byte{0x00}}
+	tr.deliver(bad, rtp.Update{Gap: 3}, time.Unix(1, 0), func(audiostream.Frame) {})
+
+	// The SSRC-reset path clears the pending gap.
+	tr.resetDepacketizer(true)
+
+	good := rtp.Packet{Header: rtp.Header{Timestamp: 0, Marker: true}, Payload: buildAUHeaders([]byte{0x11, 0x22})}
+	var got audiostream.Frame
+	tr.deliver(good, rtp.Update{Timestamp: 0, Gap: 0}, time.Unix(1, 0), func(f audiostream.Frame) { got = copyFrame(&f) })
+	if got.SeqGap != 0 {
+		t.Errorf("SeqGap = %d, want 0 (a gap from the old source must not carry across an SSRC reset)", got.SeqGap)
+	}
+}
+
+// TestDeliverAACNilOnFrameDrainsPendingGap proves the pending gap drains even
+// with no registered callback, so the counter cannot grow unbounded: a fragment
+// buffered under a nil OnFrame, completed under a nil OnFrame, must leave a
+// later frame reporting SeqGap 0 rather than a stale accumulated gap.
+func TestDeliverAACNilOnFrameDrainsPendingGap(t *testing.T) {
+	t.Parallel()
+	tr := &track{id: 0, kind: deliverAAC, clockRate: 16000, aac: newAACDepacketizer(t)}
+	tr.baseSet.Store(true)
+
+	// Fragment start and completion, both with a nil callback. The gap of 4 is
+	// folded on the fragment start and drained on the (nil-callback) completion.
+	frag1 := rtp.Packet{Header: rtp.Header{Timestamp: 0}, Payload: buildAUFragment(6, []byte{1, 2, 3})}
+	tr.deliver(frag1, rtp.Update{Timestamp: 0, Gap: 4}, time.Unix(1, 0), nil)
+	frag2 := rtp.Packet{Header: rtp.Header{Timestamp: 0, Marker: true}, Payload: buildAUFragment(6, []byte{4, 5, 6})}
+	tr.deliver(frag2, rtp.Update{Timestamp: 0, Gap: 0}, time.Unix(1, 0), nil)
+
+	// A following complete AU with a registered callback must report SeqGap 0:
+	// the earlier gap was drained under the nil callback, not accumulated.
+	good := rtp.Packet{Header: rtp.Header{Timestamp: 0, Marker: true}, Payload: buildAUHeaders([]byte{0x11, 0x22})}
+	var got audiostream.Frame
+	tr.deliver(good, rtp.Update{Timestamp: 0, Gap: 0}, time.Unix(1, 0), func(f audiostream.Frame) { got = copyFrame(&f) })
+	if got.SeqGap != 0 {
+		t.Errorf("SeqGap = %d, want 0 (the pending gap must drain under a nil callback, not accumulate)", got.SeqGap)
 	}
 }
 
