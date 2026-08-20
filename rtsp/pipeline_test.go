@@ -739,6 +739,273 @@ func TestDeliverAACNilOnFrameDrainsPendingGap(t *testing.T) {
 	}
 }
 
+// The following tests are the issue #105 regressions: the per-track pendingGap
+// accumulator, added for AAC/LATM in PR #104, must also carry a loss stranded
+// on a no-frame single-frame packet (a malformed Opus/L16 payload) onto the
+// next delivered frame, instead of deliverOne reading up.Gap directly and
+// dropping it. They mirror the AAC gap tests above.
+
+// TestDeliverOpusMalformedRetainsGap is the core issue #105 regression for the
+// single-frame path: a gap on a malformed (empty) Opus packet must drain onto
+// the next delivered frame rather than being lost.
+func TestDeliverOpusMalformedRetainsGap(t *testing.T) {
+	t.Parallel()
+	tr := &track{id: 0, kind: deliverOpus, clockRate: 48000}
+	tr.baseSet.Store(true)
+
+	// An empty payload is malformed and delivers no frame, but must retain the
+	// pending gap of 2.
+	bad := rtp.Packet{Header: rtp.Header{}, Payload: nil}
+	n := 0
+	tr.deliver(bad, rtp.Update{Gap: 2}, time.Unix(1, 0), func(audiostream.Frame) { n++ })
+	if n != 0 || tr.malformed.Load() != 1 {
+		t.Fatalf("malformed packet: frames=%d malformed=%d, want 0 and 1", n, tr.malformed.Load())
+	}
+
+	// A plain gap (not an SSRC reset) between the two packets must not clear the
+	// retained gap.
+	tr.resetDepacketizer(false)
+
+	good := rtp.Packet{Header: rtp.Header{Timestamp: 480}, Payload: []byte{0x78, 0x01, 0x02, 0x03}}
+	gotGap := -1
+	tr.deliver(good, rtp.Update{Timestamp: 480, Gap: 0}, time.Unix(1, 0), func(f audiostream.Frame) { gotGap = f.SeqGap })
+	if gotGap != 2 {
+		t.Errorf("SeqGap = %d, want 2 (a gap on a malformed Opus packet must drain onto the next frame)", gotGap)
+	}
+}
+
+// TestDeliverOpusAccumulatesStrandedGaps proves the accumulator sums for the
+// single-frame path: two losses stranded on two malformed packets drain
+// together onto the next delivered frame.
+func TestDeliverOpusAccumulatesStrandedGaps(t *testing.T) {
+	t.Parallel()
+	tr := &track{id: 0, kind: deliverOpus, clockRate: 48000}
+	tr.baseSet.Store(true)
+
+	bad := rtp.Packet{Header: rtp.Header{}, Payload: nil}
+	tr.deliver(bad, rtp.Update{Gap: 2}, time.Unix(1, 0), func(audiostream.Frame) {})
+	tr.deliver(bad, rtp.Update{Gap: 3}, time.Unix(1, 0), func(audiostream.Frame) {})
+
+	good := rtp.Packet{Header: rtp.Header{Timestamp: 480}, Payload: []byte{0x78, 0x01, 0x02, 0x03}}
+	gotGap := -1
+	tr.deliver(good, rtp.Update{Timestamp: 480, Gap: 0}, time.Unix(1, 0), func(f audiostream.Frame) { gotGap = f.SeqGap })
+	if gotGap != 5 {
+		t.Errorf("SeqGap = %d, want 5 (two stranded gaps of 2 and 3 must drain as their sum)", gotGap)
+	}
+}
+
+// TestDeliverOpusSSRCResetClearsPendingGap locks in that an SSRC reset drops a
+// pending gap from the old sequence space on the single-frame path too.
+func TestDeliverOpusSSRCResetClearsPendingGap(t *testing.T) {
+	t.Parallel()
+	tr := &track{id: 0, kind: deliverOpus, clockRate: 48000}
+	tr.baseSet.Store(true)
+
+	bad := rtp.Packet{Header: rtp.Header{}, Payload: nil}
+	tr.deliver(bad, rtp.Update{Gap: 3}, time.Unix(1, 0), func(audiostream.Frame) {})
+
+	tr.resetDepacketizer(true)
+
+	good := rtp.Packet{Header: rtp.Header{Timestamp: 0}, Payload: []byte{0x78, 0x01, 0x02, 0x03}}
+	gotGap := -1
+	tr.deliver(good, rtp.Update{Timestamp: 0, Gap: 0}, time.Unix(1, 0), func(f audiostream.Frame) { gotGap = f.SeqGap })
+	if gotGap != 0 {
+		t.Errorf("SeqGap = %d, want 0 (a gap from the old source must not carry across an SSRC reset)", gotGap)
+	}
+}
+
+// TestDeliverOpusNilOnFrameDrainsPendingGap proves the pending gap drains even
+// with no registered callback for a codec that always reaches deliverOne on a
+// valid packet, so the counter cannot grow unbounded across a nil-callback
+// stream: deliverOne clears the accumulator before its onFrame==nil check.
+func TestDeliverOpusNilOnFrameDrainsPendingGap(t *testing.T) {
+	t.Parallel()
+	tr := &track{id: 0, kind: deliverOpus, clockRate: 48000}
+	tr.baseSet.Store(true)
+
+	// A malformed packet leaves a gap of 4 pending, then a valid packet under a
+	// nil callback must drain it (deliverOne clears pendingGap even when it
+	// delivers nothing).
+	bad := rtp.Packet{Header: rtp.Header{}, Payload: nil}
+	tr.deliver(bad, rtp.Update{Gap: 4}, time.Unix(1, 0), nil)
+	good := rtp.Packet{Header: rtp.Header{Timestamp: 0}, Payload: []byte{0x78, 0x01, 0x02, 0x03}}
+	tr.deliver(good, rtp.Update{Timestamp: 0, Gap: 0}, time.Unix(1, 0), nil)
+
+	gotGap := -1
+	tr.deliver(good, rtp.Update{Timestamp: 0, Gap: 0}, time.Unix(1, 0), func(f audiostream.Frame) { gotGap = f.SeqGap })
+	if gotGap != 0 {
+		t.Errorf("SeqGap = %d, want 0 (the pending gap must drain under a nil callback, not accumulate)", gotGap)
+	}
+}
+
+// TestDeliverL16MalformedRetainsGap is the L16 counterpart of the Opus
+// regression: a gap on a malformed (odd-length) L16 packet must drain onto the
+// next delivered frame.
+func TestDeliverL16MalformedRetainsGap(t *testing.T) {
+	t.Parallel()
+	tr := &track{id: 0, kind: deliverL16, clockRate: 48000}
+	tr.baseSet.Store(true)
+
+	bad := rtp.Packet{Header: rtp.Header{}, Payload: []byte{0x00, 0x11, 0x22}}
+	n := 0
+	tr.deliver(bad, rtp.Update{Gap: 2}, time.Unix(1, 0), func(audiostream.Frame) { n++ })
+	if n != 0 || tr.malformed.Load() != 1 {
+		t.Fatalf("malformed packet: frames=%d malformed=%d, want 0 and 1", n, tr.malformed.Load())
+	}
+
+	tr.resetDepacketizer(false)
+
+	good := rtp.Packet{Header: rtp.Header{Timestamp: 0}, Payload: []byte{0x00, 0x11}}
+	gotGap := -1
+	tr.deliver(good, rtp.Update{Timestamp: 0, Gap: 0}, time.Unix(1, 0), func(f audiostream.Frame) { gotGap = f.SeqGap })
+	if gotGap != 2 {
+		t.Errorf("SeqGap = %d, want 2 (a gap on a malformed L16 packet must drain onto the next frame)", gotGap)
+	}
+}
+
+// TestDeliverL16AccumulatesStrandedGaps proves the L16 accumulator sums.
+func TestDeliverL16AccumulatesStrandedGaps(t *testing.T) {
+	t.Parallel()
+	tr := &track{id: 0, kind: deliverL16, clockRate: 48000}
+	tr.baseSet.Store(true)
+
+	bad := rtp.Packet{Header: rtp.Header{}, Payload: []byte{0x00, 0x11, 0x22}}
+	tr.deliver(bad, rtp.Update{Gap: 2}, time.Unix(1, 0), func(audiostream.Frame) {})
+	tr.deliver(bad, rtp.Update{Gap: 3}, time.Unix(1, 0), func(audiostream.Frame) {})
+
+	good := rtp.Packet{Header: rtp.Header{Timestamp: 0}, Payload: []byte{0x00, 0x11}}
+	gotGap := -1
+	tr.deliver(good, rtp.Update{Timestamp: 0, Gap: 0}, time.Unix(1, 0), func(f audiostream.Frame) { gotGap = f.SeqGap })
+	if gotGap != 5 {
+		t.Errorf("SeqGap = %d, want 5 (two stranded gaps of 2 and 3 must drain as their sum)", gotGap)
+	}
+}
+
+// TestDeliverL16SSRCResetClearsPendingGap locks in the SSRC-reset clear for L16.
+func TestDeliverL16SSRCResetClearsPendingGap(t *testing.T) {
+	t.Parallel()
+	tr := &track{id: 0, kind: deliverL16, clockRate: 48000}
+	tr.baseSet.Store(true)
+
+	bad := rtp.Packet{Header: rtp.Header{}, Payload: []byte{0x00, 0x11, 0x22}}
+	tr.deliver(bad, rtp.Update{Gap: 3}, time.Unix(1, 0), func(audiostream.Frame) {})
+
+	tr.resetDepacketizer(true)
+
+	good := rtp.Packet{Header: rtp.Header{Timestamp: 0}, Payload: []byte{0x00, 0x11}}
+	gotGap := -1
+	tr.deliver(good, rtp.Update{Timestamp: 0, Gap: 0}, time.Unix(1, 0), func(f audiostream.Frame) { gotGap = f.SeqGap })
+	if gotGap != 0 {
+		t.Errorf("SeqGap = %d, want 0 (a gap from the old source must not carry across an SSRC reset)", gotGap)
+	}
+}
+
+// TestDeliverL16NilOnFrameNoLeak pins L16's narrower guarantee: because L16
+// returns at its own onFrame==nil check before reaching deliverOne (the
+// documented perf skip of the byte-swap), the accumulator is touched only when
+// a callback is registered. A nil-callback stream must never accumulate, so a
+// later registered frame reports SeqGap 0. This differs from the AAC nil test
+// on purpose: folding at the top or leaving the malformed fold unguarded would
+// leak a gap here and make this assertion fail.
+func TestDeliverL16NilOnFrameNoLeak(t *testing.T) {
+	t.Parallel()
+	tr := &track{id: 0, kind: deliverL16, clockRate: 48000}
+	tr.baseSet.Store(true)
+
+	// Malformed packet under a nil callback: counted, but must not accumulate.
+	bad := rtp.Packet{Header: rtp.Header{}, Payload: []byte{0x00, 0x11, 0x22}}
+	tr.deliver(bad, rtp.Update{Gap: 4}, time.Unix(1, 0), nil)
+	if tr.malformed.Load() != 1 {
+		t.Fatalf("malformed = %d, want 1", tr.malformed.Load())
+	}
+	// Valid packet under a nil callback: returns at the nil check before
+	// deliverOne, so it must not accumulate its gap either.
+	good := rtp.Packet{Header: rtp.Header{Timestamp: 0}, Payload: []byte{0x00, 0x11}}
+	tr.deliver(good, rtp.Update{Timestamp: 0, Gap: 5}, time.Unix(1, 0), nil)
+
+	gotGap := -1
+	tr.deliver(good, rtp.Update{Timestamp: 0, Gap: 0}, time.Unix(1, 0), func(f audiostream.Frame) { gotGap = f.SeqGap })
+	if gotGap != 0 {
+		t.Errorf("SeqGap = %d, want 0 (a nil-callback L16 stream must not accumulate a pending gap)", gotGap)
+	}
+}
+
+// TestDeliverG711NilOnFrameNoAccumulate pins that G.711's first-line
+// onFrame==nil return (the perf skip of the companding expansion) runs before
+// the accumulator is touched, so a nil-callback stream never accumulates a gap.
+// G.711 has no reachable malformed path for a track built by newTrack (empty
+// payloads decode to a zero-length frame; ErrUnknownLaw cannot occur), so this
+// nil-callback guard is the behavior-critical case to lock.
+func TestDeliverG711NilOnFrameNoAccumulate(t *testing.T) {
+	t.Parallel()
+	tr := &track{id: 0, kind: deliverG711, clockRate: 8000, law: audiostream.MuLaw}
+	tr.baseSet.Store(true)
+
+	// A packet carrying a gap under a nil callback returns before folding.
+	pkt := rtp.Packet{Header: rtp.Header{}, Payload: []byte{0x00, 0x7f, 0x80, 0xff}}
+	tr.deliver(pkt, rtp.Update{Gap: 4}, time.Unix(1, 0), nil)
+
+	gotGap := -1
+	good := rtp.Packet{Header: rtp.Header{Timestamp: 160}, Payload: []byte{0x00, 0x7f, 0x80, 0xff}}
+	tr.deliver(good, rtp.Update{Timestamp: 160, Gap: 0}, time.Unix(1, 0), func(f audiostream.Frame) { gotGap = f.SeqGap })
+	if gotGap != 0 {
+		t.Errorf("SeqGap = %d, want 0 (a nil-callback G.711 stream must not accumulate a pending gap)", gotGap)
+	}
+}
+
+// TestDeliverRawNilOnFrameDrainsPendingGap proves deliverOne's drain-before-nil
+// check for the raw path, which (like Opus) always reaches deliverOne.
+func TestDeliverRawNilOnFrameDrainsPendingGap(t *testing.T) {
+	t.Parallel()
+	tr := &track{id: 0, kind: deliverRaw, clockRate: 48000}
+	tr.baseSet.Store(true)
+
+	// Raw never malforms; a packet under a nil callback still drains its own gap
+	// through deliverOne, leaving nothing pending for the next frame.
+	raw := rtp.Packet{Header: rtp.Header{Timestamp: 0}, Payload: []byte{0x01, 0x02, 0x03}}
+	tr.deliver(raw, rtp.Update{Timestamp: 0, Gap: 4}, time.Unix(1, 0), nil)
+
+	gotGap := -1
+	tr.deliver(raw, rtp.Update{Timestamp: 0, Gap: 0}, time.Unix(1, 0), func(f audiostream.Frame) { gotGap = f.SeqGap })
+	if gotGap != 0 {
+		t.Errorf("SeqGap = %d, want 0 (raw delivers every packet, so no gap stays pending)", gotGap)
+	}
+}
+
+// TestDeliverG711CarriesGap pins the normal-path fold for a VALID G.711 packet:
+// a valid packet carrying its own gap must report that gap on its frame, with no
+// preceding no-frame packet involved. This guards the fold that deliverG711 does
+// past its onFrame==nil return; without it a valid G.711 packet would silently
+// lose its own SeqGap and the rest of the suite would stay green.
+func TestDeliverG711CarriesGap(t *testing.T) {
+	t.Parallel()
+	tr := &track{id: 0, kind: deliverG711, clockRate: 8000, law: audiostream.MuLaw}
+	tr.baseSet.Store(true)
+
+	pkt := rtp.Packet{Header: rtp.Header{Timestamp: 160}, Payload: []byte{0x00, 0x7f, 0x80, 0xff}}
+	gotGap := -1
+	tr.deliver(pkt, rtp.Update{Timestamp: 160, Gap: 3}, time.Unix(1, 0), func(f audiostream.Frame) { gotGap = f.SeqGap })
+	if gotGap != 3 {
+		t.Errorf("SeqGap = %d, want 3 (a valid G.711 packet must carry its own gap onto its frame)", gotGap)
+	}
+}
+
+// TestDeliverL16CarriesGap pins the normal-path fold for a VALID L16 packet, the
+// counterpart of TestDeliverG711CarriesGap: it guards the fold deliverL16 does on
+// the valid branch past its onFrame==nil return.
+func TestDeliverL16CarriesGap(t *testing.T) {
+	t.Parallel()
+	tr := &track{id: 0, kind: deliverL16, clockRate: 48000}
+	tr.baseSet.Store(true)
+
+	pkt := rtp.Packet{Header: rtp.Header{Timestamp: 0}, Payload: []byte{0x00, 0x11}}
+	gotGap := -1
+	tr.deliver(pkt, rtp.Update{Timestamp: 0, Gap: 3}, time.Unix(1, 0), func(f audiostream.Frame) { gotGap = f.SeqGap })
+	if gotGap != 3 {
+		t.Errorf("SeqGap = %d, want 3 (a valid L16 packet must carry its own gap onto its frame)", gotGap)
+	}
+}
+
 func TestDeliverNilOnFrameCounts(t *testing.T) {
 	t.Parallel()
 	tr := &track{id: 0, kind: deliverOpus, clockRate: 48000}

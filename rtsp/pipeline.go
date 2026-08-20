@@ -95,18 +95,21 @@ type track struct {
 	// (whose ASC survives the reset unchanged) never spuriously refires.
 	latmASC []byte
 	// pendingGap is the count of lost RTP packets not yet reported through a
-	// Frame.SeqGap. deliverAAC/deliverLATM fold up.Gap into it before
-	// depacketizing and drain it onto the FIRST access unit a packet completes,
-	// so a loss immediately before a buffering AAC fragment (or before a
-	// malformed packet in either codec) that completes no access unit still
-	// surfaces on the next delivered frame instead of vanishing from the
+	// Frame.SeqGap. Every delivery path folds up.Gap into it before
+	// depacketizing and drains it onto the next delivered frame (the FIRST
+	// access unit a packet completes, for AAC/LATM; the one frame, for the
+	// single-frame codecs). So a loss immediately before a packet that delivers
+	// no frame (a buffering AAC fragment, or a malformed packet in any codec)
+	// still surfaces on the next delivered frame instead of vanishing from the
 	// per-frame signal. TrackStats.SeqGaps was already correct; only
-	// Frame.SeqGap was wrong. Reader-owned: only deliverAAC, deliverLATM, and
+	// Frame.SeqGap was wrong. Reader-owned: only the deliver* methods and
 	// resetDepacketizer touch it, all on the delivery goroutine, so it needs no
 	// lock. resetDepacketizer clears it only on an SSRC reset, not a plain gap,
 	// so a gap from the old sequence space cannot bleed onto the new source's
-	// first frame. Shared by the AAC and LATM paths: a track is exactly one
-	// codec, so they never contend.
+	// first frame. Shared by every codec path: a track is exactly one codec, so
+	// they never contend. The single-frame codecs (Opus, G.711, L16, raw) drain
+	// it in the shared deliverOne; G.711 and L16 fold only past their
+	// onFrame==nil early return, so a nil-callback stream never accumulates.
 	pendingGap int
 	// wirePayloadType is the payload type this track has settled on and
 	// wirePTSet says whether it has settled. Until it settles, ptCandidate and
@@ -535,8 +538,10 @@ func (tr *track) deliverLATM(pkt rtp.Packet, up rtp.Update, now time.Time,
 // deliverOpus passes the RFC 7587 payload through unchanged, one frame per
 // packet. An empty payload counts as malformed and yields no frame.
 func (tr *track) deliverOpus(pkt rtp.Packet, up rtp.Update, now time.Time, onFrame func(audiostream.Frame)) {
+	tr.pendingGap += up.Gap
 	data, err := opus.Depacketize(pkt.Payload)
 	if err != nil {
+		// The pending gap is retained for the next delivered frame.
 		tr.malformed.Add(1)
 		return
 	}
@@ -558,6 +563,9 @@ func (tr *track) deliverG711(pkt rtp.Packet, up rtp.Update, now time.Time, onFra
 	if onFrame == nil {
 		return
 	}
+	// Folded past the nil-callback return above, not before it: with no callback
+	// deliverOne is never reached to drain, so accumulating here would leak.
+	tr.pendingGap += up.Gap
 	need := 2 * len(pkt.Payload)
 	if cap(tr.pcmBuf) < need {
 		tr.pcmBuf = make([]byte, need, need+need/4)
@@ -566,6 +574,7 @@ func (tr *track) deliverG711(pkt rtp.Packet, up rtp.Update, now time.Time, onFra
 	}
 	n, err := g711.Depacketize(tr.pcmBuf, pkt.Payload, tr.law)
 	if err != nil {
+		// The pending gap is retained for the next delivered frame.
 		tr.malformed.Add(1)
 		return
 	}
@@ -594,11 +603,22 @@ func (tr *track) deliverL16(pkt rtp.Packet, up rtp.Update, now time.Time, onFram
 	frame := max(tr.l16FrameSize, 2)
 	if n == 0 || n%frame != 0 {
 		tr.malformed.Add(1)
+		// Retain this packet's gap for the next delivered frame, but only when a
+		// callback will consume one: with a nil callback deliverOne is never
+		// reached to drain, so accumulating would leak. malformed is counted
+		// first, before the nil check, so the statistic does not depend on a
+		// callback being registered.
+		if onFrame != nil {
+			tr.pendingGap += up.Gap
+		}
 		return
 	}
 	if onFrame == nil {
 		return
 	}
+	// Folded past the nil-callback return, mirroring the malformed branch: the
+	// accumulator is touched only when a frame will be delivered to drain it.
+	tr.pendingGap += up.Gap
 	if cap(tr.pcmBuf) < n {
 		tr.pcmBuf = make([]byte, n, n+n/4)
 	} else {
@@ -618,12 +638,27 @@ func (tr *track) deliverL16(pkt rtp.Packet, up rtp.Update, now time.Time, onFram
 // unrecognized codec, a non-audio media kind, an AAC mode other than AAC-hbr,
 // and an AAC fmtp whose field widths are invalid.
 func (tr *track) deliverRaw(pkt rtp.Packet, up rtp.Update, now time.Time, onFrame func(audiostream.Frame)) {
+	tr.pendingGap += up.Gap
 	tr.deliverOne(pkt.Payload, pkt, up, now, onFrame)
 }
 
 // deliverOne delivers a single-frame codec's payload, shared by Opus, G.711,
 // L16, and raw. onFrame may be nil.
+//
+// SeqGap is drained from tr.pendingGap, not read from up.Gap directly, so a loss
+// stranded on a preceding malformed single-frame packet (which yields no frame)
+// still surfaces on the next delivered frame instead of being lost, exactly as
+// deliverAAC/deliverLATM do. Each caller folds up.Gap into tr.pendingGap before
+// calling here (Opus and raw at the top; G.711 and L16 only once past their
+// onFrame==nil early return, since those skip the byte-level transform when
+// nothing consumes it). The drain runs even when onFrame is nil, so on the paths
+// that reach deliverOne (raw on every packet; Opus, G.711 and L16 on every valid
+// packet) the counter cannot grow unbounded: a stranded gap is retained only
+// across consecutive no-frame packets and drains on the next delivered frame,
+// exactly as deliverAAC/deliverLATM drain on the first completed AU.
 func (tr *track) deliverOne(data []byte, pkt rtp.Packet, up rtp.Update, now time.Time, onFrame func(audiostream.Frame)) {
+	gap := tr.pendingGap
+	tr.pendingGap = 0
 	if onFrame == nil {
 		return
 	}
@@ -633,7 +668,7 @@ func (tr *track) deliverOne(data []byte, pkt rtp.Packet, up rtp.Update, now time
 		RTPTime:    pkt.Header.Timestamp,
 		PTS:        tr.ptsOf(up.Timestamp),
 		ReceivedAt: now,
-		SeqGap:     up.Gap,
+		SeqGap:     gap,
 	})
 }
 
@@ -705,9 +740,10 @@ func (tr *track) resetDepacketizer(onSSRCChange bool) {
 		// A new source restarts the sequence space, so any gap still pending from
 		// the old source must not carry onto the new source's first frame. Cleared
 		// only here (SSRC reset), never on a plain gap, where the pending gap must
-		// survive to drain onto the next completed access unit. This is a
-		// standalone block, not nested under the tr.latm guard below, so it also
-		// runs for an AAC track (whose tr.latm is nil).
+		// survive to drain onto the next delivered frame. This is a standalone
+		// block, not nested under the tr.latm guard below, so it runs for every
+		// track: AAC and the single-frame codecs (Opus, G.711, L16, raw) all use
+		// the accumulator, and none of them owns a tr.latm.
 		tr.pendingGap = 0
 	}
 	if tr.aac != nil {
