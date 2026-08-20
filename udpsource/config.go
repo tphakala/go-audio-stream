@@ -18,7 +18,8 @@ const (
 	// ModeRTP treats each datagram as one RTP packet: it is parsed, checked for
 	// sequence continuity (gaps, duplicates, SSRC changes, timestamp unwrap), and
 	// depacketized according to the configured payload type. Out-of-order
-	// datagrams are dropped, not reordered.
+	// datagrams are dropped, not reordered, unless Config.Reorder opts into the
+	// resequencing path.
 	ModeRTP Mode = iota
 	// ModePCM treats each datagram as raw interleaved 16-bit PCM samples,
 	// delivered as one frame.
@@ -74,6 +75,16 @@ type Config struct {
 	ClockRate int
 	// Channels is the channel count reported for a PCM codec (ModeRTP).
 	Channels int
+
+	// Reorder enables RTP resequencing for ModeRTP: late-but-in-window datagrams
+	// are recovered and delivered in ascending sequence order through the shared
+	// rtsp/rtp.Reorderer, instead of the default immediate-delivery path that
+	// drops any backward-sequence datagram as a duplicate. It trades a small,
+	// bounded resequencing latency and one heap copy per datagram for
+	// out-of-order recovery, so it is opt-in: the default (false) keeps the
+	// zero-copy, zero-alloc steady-state delivery path byte-for-byte unchanged.
+	// It has no effect in ModePCM, whose datagrams carry no sequence numbers.
+	Reorder bool
 
 	// Format describes the raw PCM datagrams (ModePCM). Required for ModePCM.
 	Format PCMFormat
