@@ -1,18 +1,18 @@
-package rtsp
+package rtp
 
 import (
 	"testing"
 	"time"
 )
 
-// ntpTime decodes a 64-bit RTCP NTP timestamp into a time.Time. The seconds
+// NTPTime decodes a 64-bit RTCP NTP timestamp into a time.Time. The seconds
 // field is read through the RFC 5905 era-1 pivot so a sender clock in the
 // post-2036 era decodes correctly, and the fraction is the binary fraction of
 // a second.
 func TestNTPTime(t *testing.T) {
 	// The NTP-epoch seconds value that lands exactly on the Unix epoch; its
 	// high bit is set, so it decodes in era 0 with no pivot.
-	const unixEpochNTPSeconds = uint64(ntpUnixOffset)
+	const unixEpochNTPSeconds = uint64(NTPUnixOffset)
 
 	cases := []struct {
 		name string
@@ -35,15 +35,15 @@ func TestNTPTime(t *testing.T) {
 			// era 1: 2^32 + 1 seconds after 1900.
 			name: "era-1 pivot",
 			ts:   uint64(0x1) << 32,
-			want: time.Unix((int64(1)<<32)+1-ntpUnixOffset, 0),
+			want: time.Unix((int64(1)<<32)+1-NTPUnixOffset, 0),
 		},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := ntpTime(tc.ts)
+			got := NTPTime(tc.ts)
 			if !got.Equal(tc.want) {
-				t.Errorf("ntpTime(%#016x) = %v, want %v", tc.ts, got.UTC(), tc.want.UTC())
+				t.Errorf("NTPTime(%#016x) = %v, want %v", tc.ts, got.UTC(), tc.want.UTC())
 			}
 		})
 	}
