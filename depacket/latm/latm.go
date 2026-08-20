@@ -26,8 +26,8 @@ const (
 	// payload (RFC 3016 permits more than one). Realistic senders pack one or a
 	// few; 64 bounds the outer element loop, and with MaxSubFrames it bounds the
 	// total access units per payload at MaxMuxElements*MaxSubFrames. A payload
-	// declaring more (after any trailing-zero padding is stopped) yields
-	// ErrTooManyElements once at least one element has been delivered.
+	// carrying more (after any trailing-zero padding is stopped) has its leading
+	// MaxMuxElements delivered and the rest dropped.
 	MaxMuxElements = 64
 )
 
@@ -56,10 +56,6 @@ var (
 	// ErrPayloadOverflow is returned when a MuxSlotLengthBytes value exceeds
 	// MaxMuxSlotBytes or the payload data present.
 	ErrPayloadOverflow = errors.New("latm: payload length exceeds available data")
-	// ErrTooManyElements is returned when a single RTP payload carries more than
-	// MaxMuxElements AudioMuxElements. It fires only once at least one element has
-	// been parsed; the already-parsed leading access units are still returned.
-	ErrTooManyElements = errors.New("latm: too many AudioMuxElements in one payload")
 )
 
 // Config configures a Depacketizer. The caller maps these from its SDP fmtp

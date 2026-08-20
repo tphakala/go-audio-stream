@@ -2,9 +2,9 @@ package rtp
 
 import "time"
 
-// NTPUnixOffset is the seconds from the NTP epoch (1900-01-01) to the Unix
+// ntpUnixOffset is the seconds from the NTP epoch (1900-01-01) to the Unix
 // epoch (1970-01-01).
-const NTPUnixOffset = 2208988800
+const ntpUnixOffset = 2208988800
 
 // NTPTime decodes a 64-bit NTP timestamp (RFC 5905: upper 32 bits whole
 // seconds since 1900, lower 32 bits binary fraction) into a time.Time. A
@@ -17,5 +17,5 @@ func NTPTime(ts uint64) time.Time {
 		sec += 1 << 32
 	}
 	nsec := ((ts & 0xFFFFFFFF) * uint64(time.Second)) >> 32
-	return time.Unix(sec-NTPUnixOffset, int64(nsec))
+	return time.Unix(sec-ntpUnixOffset, int64(nsec))
 }

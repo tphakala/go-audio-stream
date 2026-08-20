@@ -59,8 +59,10 @@ func (d *Depacketizer) subFrameLayout() (frameLenTicks uint32, err error) {
 // zero trailing remainder is treated as byte-alignment or RTP padding and
 // dropped. A malformed leading (first) element returns a sentinel error with no
 // access units; a malformed trailing element delivers the complete leading
-// elements and stops. More than MaxMuxElements elements returns ErrTooManyElements
-// after delivering the leading ones. Any error is a sentinel and never a panic.
+// elements and stops. More than MaxMuxElements elements delivers the leading
+// MaxMuxElements and drops the rest (a bound against a crafted payload; legitimate
+// traffic never packs that many). Any error is a sentinel and never a panic, and
+// a non-nil error always means no access units were produced.
 //
 // A limitation of consuming several elements in one call: an inline config change
 // mid-payload (a second in-band element with useSameStreamMux==0 carrying a
@@ -108,7 +110,10 @@ func (d *Depacketizer) Depacketize(payload []byte, marker bool, rtpTime uint32) 
 		if elem >= MaxMuxElements {
 			// The leading elements are valid audio; deliver them and stop rather
 			// than dropping the whole packet or looping unbounded on a crafted one.
-			return d.aus, ErrTooManyElements
+			// Return nil, not an error: the consumer treats a non-nil error as "no
+			// usable access units", and the trailing-malformed path already returns
+			// nil for the same deliver-leading reason, so the cap matches it.
+			return d.aus, nil
 		}
 		auMark := len(d.aus)
 		for i := 0; i <= d.smc.numSubFrames; i++ {
@@ -178,7 +183,10 @@ func (d *Depacketizer) depacketizeInBand(payload []byte) ([]AU, error) {
 	var elemBaseTicks uint32
 	for elem := 0; ; elem++ {
 		if elem >= MaxMuxElements {
-			return d.aus, ErrTooManyElements
+			// Deliver the leading elements and stop; nil error for the same reason
+			// as the out-of-band cap and the trailing-malformed path (the consumer
+			// treats err != nil as no usable access units).
+			return d.aus, nil
 		}
 		auMark := len(d.aus)
 		span, err := d.depacketizeInBandElement(br, elemBaseTicks)

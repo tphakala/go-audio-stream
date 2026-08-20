@@ -21,6 +21,9 @@ import (
 // loopbackAddr is the wildcard-port loopback bind used across the source tests.
 const loopbackAddr = "127.0.0.1:0"
 
+// rtpMap90k is the opaque-codec rtpmap used across the ModeRTP source tests.
+const rtpMap90k = "X/90000"
+
 // --- shared test helpers ---------------------------------------------------
 
 // rtpPacket builds a minimal RTP packet (version 2, no padding/extension/CSRC,
@@ -169,7 +172,7 @@ func deliveredSeqMarkers(frames []audiostream.Frame) []byte {
 //nolint:gocritic // Test helper mirrors Open's documented by-value Config signature.
 func opaqueReorderCfg(reorder bool, onFrame func(audiostream.Frame)) Config {
 	return Config{
-		Mode: ModeRTP, PayloadType: 96, Codec: audiostream.CodecUnknown{RTPMap: "X/90000"},
+		Mode: ModeRTP, PayloadType: 96, Codec: audiostream.CodecUnknown{RTPMap: rtpMap90k},
 		ClockRate: 90000, Reorder: reorder, OnFrame: onFrame,
 	}
 }
@@ -260,7 +263,7 @@ func TestRTPOpusPassthrough(t *testing.T) {
 func TestRTPOpaquePassthrough(t *testing.T) {
 	var col collector
 	c := openOK(t, Config{
-		Mode: ModeRTP, PayloadType: 120, Codec: audiostream.CodecUnknown{RTPMap: "X/90000"},
+		Mode: ModeRTP, PayloadType: 120, Codec: audiostream.CodecUnknown{RTPMap: rtpMap90k},
 		ClockRate: 90000, OnFrame: col.onFrame,
 	})
 	defer func() { _ = c.Close() }()

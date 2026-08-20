@@ -144,13 +144,15 @@ type Client struct {
 	// Config.RTCPMux is set (both zero-value-inert). rtcpConn is the second socket
 	// for the separate-port model (nil for mux or when RTCP is disabled); rtcpWG
 	// tracks its receive goroutine so Wait joins it and Close leaks nothing.
-	// mediaSSRC and baseSet are published by the RTP reader so the RTCP path can
-	// match a Sender Report to this stream's source and gate publication until the
-	// first accepted packet identifies that source; srClock holds the most recent
-	// RTP-to-wall-clock correspondence (nil until a usable Sender Report arrives,
-	// cleared on an SSRC change). The three atomics are written by the RTP reader
-	// goroutine and read by the RTCP goroutine, so they are atomic even though the
-	// mux path reads them on the same reader goroutine.
+	// mediaSSRC and baseSet are published by the RTP reader (processRTP) so the RTCP
+	// path can match a Sender Report to this stream's source and gate publication
+	// until the first accepted packet identifies that source; they are read by
+	// handleRTCP. srClock holds the most recent RTP-to-wall-clock correspondence
+	// (nil until a usable Sender Report arrives): it has TWO writers, the RTP reader
+	// (clears it on an SSRC change) and, on the separate-socket path, the RTCP
+	// goroutine (publishes it in handleRTCP), and is read by Stats on any external
+	// goroutine. All three are therefore atomic; the mux path happens to run
+	// handleRTCP on the reader goroutine, but the atomics are correct either way.
 	rtcpConn  *net.UDPConn
 	rtcpWG    sync.WaitGroup
 	mediaSSRC atomic.Uint32
@@ -523,10 +525,18 @@ func (c *Client) processRTP(pkt rtp.Packet, now time.Time) {
 		// single-frame codec) must not carry onto the new source's first frame.
 		c.resetAAC()
 		c.pendingGap = 0
-		// A new source invalidates the old source's Sender Report mapping; clear it
-		// until the new source's first Sender Report re-establishes one, mirroring
-		// the rtsp UDP path. handleRTCP republishes once a report matching the new
-		// mediaSSRC (set below) arrives.
+		// Gate the RTCP publisher shut for the whole reset window before touching
+		// mediaSSRC: clear baseSet so handleRTCP (which returns early on !baseSet)
+		// does not publish a mapping while mediaSSRC still names the old source, then
+		// invalidate the old source's Sender Report mapping. baseSet is restored
+		// below once mediaSSRC names the new source, so a delayed old-source Sender
+		// Report racing the reset is rejected by the !baseSet gate instead of
+		// republishing a stale mapping against the new timeline. A few-instruction
+		// TOCTOU window remains (an RTCP goroutine that already read baseSet==true
+		// could still store once after this clear), but it is advisory-only and
+		// self-corrects on the new source's first report. Mirrors the rtsp UDP path,
+		// which clears baseSet across the same window.
+		c.baseSet.Store(false)
 		c.srClock.Store(nil)
 	}
 	// Re-seed the PTS origin on the first packet and on every SSRC change, so the
@@ -537,7 +547,8 @@ func (c *Client) processRTP(pkt rtp.Packet, now time.Time) {
 		// Publish the media source identity for the RTCP path. Store mediaSSRC
 		// before baseSet: sync/atomic operations are sequentially consistent, so an
 		// RTCP goroutine that observes baseSet true is guaranteed to also see the
-		// matching mediaSSRC.
+		// matching mediaSSRC. baseSet is stored last, reopening the RTCP publish gate
+		// only once mediaSSRC names the current source.
 		c.mediaSSRC.Store(pkt.Header.SSRC)
 		c.baseSet.Store(true)
 	}

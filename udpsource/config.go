@@ -106,8 +106,9 @@ type Config struct {
 	// CodecAAC the AU-header widths come from AAC below, since a raw RTP source
 	// carries no SDP fmtp to derive them from.
 	Codec audiostream.Codec
-	// ClockRate is the RTP timestamp clock in Hz (ModeRTP), used for PTS and, for
-	// a PCM codec (G.711, L16), as the delivered sample rate. Required for ModeRTP.
+	// ClockRate is the RTP timestamp clock in Hz (ModeRTP), used for PTS, for a PCM
+	// codec (G.711, L16) as the delivered sample rate, and, when RTCP is enabled, as
+	// the TrackStats.SenderClock clock rate. Required for ModeRTP.
 	ClockRate int
 	// Channels is the channel count reported for a PCM codec (ModeRTP).
 	Channels int

@@ -2,7 +2,6 @@ package latm
 
 import (
 	"bytes"
-	"errors"
 	"testing"
 )
 
@@ -123,24 +122,40 @@ func TestOutOfBandTrailingMalformedDeliversLeading(t *testing.T) {
 	wantAUs(t, aus, [][]byte{{0x11, 0x22}, {0x33, 0x44, 0x55}}, []uint32{0, 1024})
 }
 
-func TestOutOfBandTooManyElements(t *testing.T) {
+func TestOutOfBandElementCap(t *testing.T) {
 	t.Parallel()
-	d, err := New(Config{MuxConfigPresent: false, StreamMuxConfig: v3})
-	if err != nil {
-		t.Fatalf("New: %v", err)
+	// v3 has numSubFrames 1, so each minimal element {0x01,0xAA, 0x01,0xBB} yields
+	// two access units. Both cases return nil error: at the cap every element is
+	// delivered; over the cap the leading MaxMuxElements are delivered and the rest
+	// dropped (the consumer treats a non-nil error as no usable access units, so
+	// the cap must not use one).
+	cases := []struct {
+		name     string
+		elements int
+		wantAUs  int
+	}{
+		{"exactly at cap", MaxMuxElements, MaxMuxElements * 2},
+		{"over cap drops the excess", MaxMuxElements + 1, MaxMuxElements * 2},
 	}
-	// MaxMuxElements+1 minimal two-subframe elements. The cap fires after the
-	// leading MaxMuxElements are parsed, returning them plus ErrTooManyElements.
-	var payload []byte
-	for range MaxMuxElements + 1 {
-		payload = append(payload, 0x01, 0xAA, 0x01, 0xBB)
-	}
-	aus, err := d.Depacketize(payload, true, 0)
-	if !errors.Is(err, ErrTooManyElements) {
-		t.Fatalf("err = %v, want ErrTooManyElements", err)
-	}
-	if len(aus) != MaxMuxElements*2 {
-		t.Fatalf("AU count = %d, want %d", len(aus), MaxMuxElements*2)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			d, err := New(Config{MuxConfigPresent: false, StreamMuxConfig: v3})
+			if err != nil {
+				t.Fatalf("New: %v", err)
+			}
+			payload := make([]byte, 0, 4*tc.elements)
+			for range tc.elements {
+				payload = append(payload, 0x01, 0xAA, 0x01, 0xBB)
+			}
+			aus, err := d.Depacketize(payload, true, 0)
+			if err != nil {
+				t.Fatalf("Depacketize: want nil, got %v", err)
+			}
+			if len(aus) != tc.wantAUs {
+				t.Fatalf("AU count = %d, want %d", len(aus), tc.wantAUs)
+			}
+		})
 	}
 }
 

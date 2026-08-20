@@ -9,7 +9,6 @@ import (
 	"time"
 
 	audiostream "github.com/tphakala/go-audio-stream"
-	"github.com/tphakala/go-audio-stream/rtsp/rtp"
 )
 
 // buildSR builds a minimal RTCP Sender Report datagram (version 2, no padding,
@@ -29,10 +28,14 @@ func buildSR(ssrc uint32, ntp uint64, rtpTS, pktCount, octetCount uint32) []byte
 	return b
 }
 
+// ntpEpochOffset is the seconds from the NTP epoch (1900) to the Unix epoch
+// (1970), the same constant rtp.NTPTime decodes against.
+const ntpEpochOffset = 2208988800
+
 // ntpAt encodes a whole-second Unix time as a 64-bit NTP timestamp with a zero
 // fraction, so rtp.NTPTime round-trips it back to time.Unix(sec, 0).
 func ntpAt(unixSec int64) uint64 {
-	return uint64(unixSec+rtp.NTPUnixOffset) << 32
+	return uint64(unixSec+ntpEpochOffset) << 32
 }
 
 // senderForAddr dials an arbitrary UDP address so a test can push datagrams to a
@@ -166,7 +169,7 @@ func TestHandleRTCPMalformedIgnored(t *testing.T) {
 
 func TestOpenRTCPValidation(t *testing.T) {
 	base := func() Config {
-		return Config{Mode: ModeRTP, PayloadType: 96, Codec: audiostream.CodecUnknown{RTPMap: "X/90000"}, ClockRate: 90000, ListenAddr: loopbackAddr}
+		return Config{Mode: ModeRTP, PayloadType: 96, Codec: audiostream.CodecUnknown{RTPMap: rtpMap90k}, ClockRate: 90000, ListenAddr: loopbackAddr}
 	}
 	cases := []struct {
 		name   string
@@ -199,7 +202,7 @@ func TestOpenRTCPValidation(t *testing.T) {
 
 // rtcpE2ECfg is an opaque ModeRTP config (payload type 96) with an OnFrame sink.
 func rtcpE2ECfg(onFrame func(audiostream.Frame)) Config {
-	return Config{Mode: ModeRTP, PayloadType: 96, Codec: audiostream.CodecUnknown{RTPMap: "X/90000"}, ClockRate: 90000, OnFrame: onFrame}
+	return Config{Mode: ModeRTP, PayloadType: 96, Codec: audiostream.CodecUnknown{RTPMap: rtpMap90k}, ClockRate: 90000, OnFrame: onFrame}
 }
 
 func TestRTCPMuxPopulatesSenderClock(t *testing.T) {

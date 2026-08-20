@@ -35,9 +35,12 @@ func (c *Client) rtcpReader() {
 	}
 }
 
-// recoverRTCP turns a panic in the RTCP goroutine into a logged non-event.
-// Unlike the reader's recover it does not funnel shutdown: an advisory
-// diagnostic path must never crash the process or end the media session.
+// recoverRTCP turns a panic on the RTCP path into a logged non-event. Unlike the
+// reader's recover it does not funnel shutdown: an advisory diagnostic path must
+// never crash the process or end the media session. It guards both the
+// separate-socket receive goroutine and each handleRTCP call (so the mux path,
+// which runs handleRTCP on the reader goroutine, does not reach the reader's
+// shutdown-funnelling recover).
 func (c *Client) recoverRTCP() {
 	if r := recover(); r != nil && c.cfg.Logger != nil {
 		c.cfg.Logger.Error("udpsource: RTCP receiver panic", "recovered", r)
@@ -61,8 +64,11 @@ func isRTCP(datagram []byte) bool {
 // for a different source, or a compound arriving before the media source is
 // identified all leave the mapping unchanged, and nothing here ever ends the
 // session or touches media delivery. Safe to call from either the RTCP goroutine
-// (separate socket) or the reader goroutine (mux).
+// (separate socket) or the reader goroutine (mux); it recovers from its own panic
+// so that on the mux path a parse panic cannot reach the reader's
+// shutdown-funnelling recover and end the media session.
 func (c *Client) handleRTCP(datagram []byte, now time.Time) {
+	defer c.recoverRTCP()
 	reports, err := rtp.ParseCompound(datagram)
 	if err != nil || len(reports) == 0 {
 		return

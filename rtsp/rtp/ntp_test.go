@@ -12,7 +12,7 @@ import (
 func TestNTPTime(t *testing.T) {
 	// The NTP-epoch seconds value that lands exactly on the Unix epoch; its
 	// high bit is set, so it decodes in era 0 with no pivot.
-	const unixEpochNTPSeconds = uint64(NTPUnixOffset)
+	const unixEpochNTPSeconds = uint64(ntpUnixOffset)
 
 	cases := []struct {
 		name string
@@ -35,7 +35,7 @@ func TestNTPTime(t *testing.T) {
 			// era 1: 2^32 + 1 seconds after 1900.
 			name: "era-1 pivot",
 			ts:   uint64(0x1) << 32,
-			want: time.Unix((int64(1)<<32)+1-NTPUnixOffset, 0),
+			want: time.Unix((int64(1)<<32)+1-ntpUnixOffset, 0),
 		},
 	}
 
