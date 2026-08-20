@@ -12,7 +12,9 @@ import (
 	"time"
 
 	audiostream "github.com/tphakala/go-audio-stream"
+	"github.com/tphakala/go-audio-stream/depacket/aac"
 	"github.com/tphakala/go-audio-stream/depacket/g711"
+	"github.com/tphakala/go-audio-stream/internal/mediatime"
 	"github.com/tphakala/go-audio-stream/rtsp/rtp"
 )
 
@@ -477,7 +479,8 @@ func TestOpenInvalidConfig(t *testing.T) {
 		{"rtp pcm codec missing channels", Config{ListenAddr: loopbackAddr, Mode: ModeRTP, Codec: audiostream.CodecG711{Law: audiostream.MuLaw}, ClockRate: 8000}, ErrInvalidConfig},
 		{"pcm missing rate", Config{ListenAddr: loopbackAddr, Mode: ModePCM, Format: PCMFormat{Channels: 1}}, ErrInvalidConfig},
 		{"bad source ip", Config{ListenAddr: loopbackAddr, Mode: ModeRTP, Codec: audiostream.CodecOpus{}, ClockRate: 48000, SourceIP: "not-an-ip"}, ErrInvalidConfig},
-		{"unsupported codec", Config{ListenAddr: loopbackAddr, Mode: ModeRTP, Codec: audiostream.CodecAAC{}, ClockRate: 90000}, ErrUnsupportedCodec},
+		{"unsupported codec", Config{ListenAddr: loopbackAddr, Mode: ModeRTP, Codec: audiostream.CodecMP3{}, ClockRate: 90000}, ErrUnsupportedCodec},
+		{"aac invalid widths", Config{ListenAddr: loopbackAddr, Mode: ModeRTP, PayloadType: 97, Codec: audiostream.CodecAAC{}, ClockRate: 44100, AAC: AACParams{SizeLength: 0, IndexLength: 3, IndexDeltaLength: 3, SamplesPerFrame: 1024}}, ErrInvalidConfig},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -947,5 +950,392 @@ func TestReorderIgnoredInPCMMode(t *testing.T) {
 	waitCount(t, &col, 1, 2*time.Second)
 	if got := col.snapshot()[0].Data; !bytes.Equal(got, datagram) {
 		t.Fatalf("PCM delivery = %x, want %x", got, datagram)
+	}
+}
+
+// --- AAC over raw RTP tests ------------------------------------------------
+
+// aacAUHeader16 packs one AAC-hbr AU-header into 16 bits big-endian: the 13-bit
+// size in the high bits and the 3-bit index (or index-delta) in the low bits,
+// matching the depacket/aac test builders.
+func aacAUHeader16(size, index int) []byte {
+	v := uint16(size<<3) | uint16(index&0x07)
+	return []byte{byte(v >> 8), byte(v)}
+}
+
+// buildAACHBR assembles an AAC-hbr payload: a 16-bit AU-headers-length in bits
+// (16 * len(headers)), then the packed headers, then the concatenated AU data.
+func buildAACHBR(headers, data [][]byte) []byte {
+	bits := len(headers) * 16
+	out := []byte{byte(bits >> 8), byte(bits)}
+	for _, h := range headers {
+		out = append(out, h...)
+	}
+	for _, d := range data {
+		out = append(out, d...)
+	}
+	return out
+}
+
+// withMarker sets the RTP marker (M) bit on a packet built by rtpPacket, which
+// clears it. The final fragment of a fragmented access unit carries the marker.
+func withMarker(datagram []byte) []byte {
+	datagram[1] |= 0x80
+	return datagram
+}
+
+// aacRTPCfg is the shared AAC-hbr config: payload type 97, a 44100 Hz clock, and
+// the ubiquitous 13/3/3 AU-header widths at 1024 samples per frame.
+//
+//nolint:gocritic // Test helper mirrors Open's documented by-value Config signature.
+func aacRTPCfg(onFrame func(audiostream.Frame)) Config {
+	return Config{
+		Mode: ModeRTP, PayloadType: 97, Codec: audiostream.CodecAAC{}, ClockRate: 44100,
+		AAC:     AACParams{SizeLength: 13, IndexLength: 3, IndexDeltaLength: 3, SamplesPerFrame: 1024},
+		OnFrame: onFrame,
+	}
+}
+
+func TestRTPAACSingleAU(t *testing.T) {
+	var col collector
+	c := openOK(t, aacRTPCfg(col.onFrame))
+	defer func() { _ = c.Close() }()
+
+	data := []byte{0xAA, 0xBB, 0xCC, 0xDD}
+	pkt := buildAACHBR([][]byte{aacAUHeader16(len(data), 0)}, [][]byte{data})
+	_, _ = senderFor(t, c).Write(withMarker(rtpPacket(97, 1, 1000, 5, pkt)))
+	waitCount(t, &col, 1, 2*time.Second)
+
+	f := col.snapshot()[0]
+	if !bytes.Equal(f.Data, data) {
+		t.Errorf("AU data = % x, want % x", f.Data, data)
+	}
+	if f.PTS != 0 {
+		t.Errorf("PTS = %v, want 0 (rebased to the origin)", f.PTS)
+	}
+	if f.SeqGap != 0 {
+		t.Errorf("SeqGap = %d, want 0", f.SeqGap)
+	}
+	if p := c.Stats().Tracks[0].Packets; p != 1 {
+		t.Errorf("Packets = %d, want 1", p)
+	}
+}
+
+func TestRTPAACMultiAU(t *testing.T) {
+	var col collector
+	c := openOK(t, aacRTPCfg(col.onFrame))
+	defer func() { _ = c.Close() }()
+
+	d0 := []byte{0x11, 0x22, 0x33}
+	d1 := []byte{0x44, 0x55, 0x66, 0x77, 0x88}
+	pkt := buildAACHBR(
+		[][]byte{aacAUHeader16(len(d0), 0), aacAUHeader16(len(d1), 0)},
+		[][]byte{d0, d1},
+	)
+	_, _ = senderFor(t, c).Write(withMarker(rtpPacket(97, 1, 2000, 5, pkt)))
+	waitCount(t, &col, 2, 2*time.Second)
+
+	frames := col.snapshot()
+	if !bytes.Equal(frames[0].Data, d0) || frames[0].PTS != 0 || frames[0].SeqGap != 0 {
+		t.Errorf("AU0 = % x @ %v gap %d, want % x @ 0 gap 0", frames[0].Data, frames[0].PTS, frames[0].SeqGap, d0)
+	}
+	// The second access unit advances by one SamplesPerFrame (1024) at 44100 Hz.
+	if want := mediatime.PTSFromSamples(1024, 44100); frames[1].PTS != want {
+		t.Errorf("AU1 PTS = %v, want %v", frames[1].PTS, want)
+	}
+	if !bytes.Equal(frames[1].Data, d1) {
+		t.Errorf("AU1 data = % x, want % x", frames[1].Data, d1)
+	}
+	// One RTP packet is one Packet regardless of how many access units it carries.
+	if p := c.Stats().Tracks[0].Packets; p != 1 {
+		t.Errorf("Packets = %d, want 1", p)
+	}
+}
+
+func TestRTPAACFragmentedAU(t *testing.T) {
+	var col collector
+	c := openOK(t, aacRTPCfg(col.onFrame))
+	defer func() { _ = c.Close() }()
+	send := senderFor(t, c)
+
+	full := []byte{1, 2, 3, 4, 5, 6}
+	// Two fragments of one access unit share the RTP timestamp. The first declares
+	// the full size but carries only the first half (marker clear); the second
+	// carries the rest with the marker set to complete the unit.
+	frag1 := buildAACHBR([][]byte{aacAUHeader16(len(full), 0)}, [][]byte{full[:3]})
+	frag2 := buildAACHBR([][]byte{aacAUHeader16(len(full), 0)}, [][]byte{full[3:]})
+	sendAndSettle(t, c, send, rtpPacket(97, 1, 1000, 5, frag1))
+	sendAndSettle(t, c, send, withMarker(rtpPacket(97, 2, 1000, 5, frag2)))
+	waitCount(t, &col, 1, 2*time.Second)
+
+	frames := col.snapshot()
+	if len(frames) != 1 {
+		t.Fatalf("delivered %d frames, want 1 (the reassembled access unit)", len(frames))
+	}
+	if !bytes.Equal(frames[0].Data, full) {
+		t.Errorf("reassembled AU = % x, want % x", frames[0].Data, full)
+	}
+	if frames[0].PTS != 0 {
+		t.Errorf("PTS = %v, want 0 (both fragments carry the origin timestamp)", frames[0].PTS)
+	}
+	if p := c.Stats().Tracks[0].Packets; p != 2 {
+		t.Errorf("Packets = %d, want 2 (both fragment packets accepted)", p)
+	}
+}
+
+func TestRTPAACMalformedCounted(t *testing.T) {
+	var col collector
+	c := openOK(t, aacRTPCfg(col.onFrame))
+	defer func() { _ = c.Close() }()
+	send := senderFor(t, c)
+
+	// A zero AU-headers-length is a truncated/inconsistent header: counted
+	// malformed, no frame. A following well-formed packet must still deliver,
+	// proving the reader kept running. sendAndSettle keeps the malformed packet
+	// ahead of the good one, since delivery order is load-bearing here.
+	sendAndSettle(t, c, send, rtpPacket(97, 1, 1000, 5, []byte{0x00, 0x00}))
+	good := []byte{0x9A, 0x9B}
+	sendAndSettle(t, c, send, withMarker(rtpPacket(97, 2, 1000, 5, buildAACHBR([][]byte{aacAUHeader16(len(good), 0)}, [][]byte{good}))))
+	waitCount(t, &col, 1, 2*time.Second)
+
+	if got := col.snapshot()[0].Data; !bytes.Equal(got, good) {
+		t.Errorf("recovered AU = % x, want % x", got, good)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for c.Stats().Tracks[0].Malformed == 0 && time.Now().Before(deadline) {
+		time.Sleep(2 * time.Millisecond)
+	}
+	if m := c.Stats().Tracks[0].Malformed; m != 1 {
+		t.Errorf("Malformed = %d, want 1", m)
+	}
+}
+
+func TestRTPAACPTSProgression(t *testing.T) {
+	var col collector
+	c := openOK(t, aacRTPCfg(col.onFrame))
+	defer func() { _ = c.Close() }()
+	send := senderFor(t, c)
+
+	one := func(seq uint16, ts uint32, b byte) []byte {
+		return withMarker(rtpPacket(97, seq, ts, 5, buildAACHBR([][]byte{aacAUHeader16(1, 0)}, [][]byte{{b}})))
+	}
+	sendAndSettle(t, c, send, one(1, 5000, 0x01))      // base 5000 -> PTS 0
+	sendAndSettle(t, c, send, one(2, 5000+1024, 0x02)) // +1024 samples at 44100
+	waitCount(t, &col, 2, 2*time.Second)
+
+	frames := col.snapshot()
+	if frames[0].PTS != 0 {
+		t.Errorf("frame 0 PTS = %v, want 0", frames[0].PTS)
+	}
+	if want := mediatime.PTSFromSamples(1024, 44100); frames[1].PTS != want {
+		t.Errorf("frame 1 PTS = %v, want %v", frames[1].PTS, want)
+	}
+}
+
+func TestRTPAACFragmentResetOnGap(t *testing.T) {
+	var col collector
+	c := openOK(t, aacRTPCfg(col.onFrame))
+	defer func() { _ = c.Close() }()
+	send := senderFor(t, c)
+
+	// Begin a fragmented access unit (marker clear, declared size exceeds the
+	// bytes present), then jump the sequence forward so a packet is lost. The gap
+	// must drop the partial reassembly, so the next clean packet delivers its own
+	// access unit rather than a corrupt splice of the abandoned fragment.
+	frag1 := buildAACHBR([][]byte{aacAUHeader16(6, 0)}, [][]byte{{1, 2, 3}})
+	sendAndSettle(t, c, send, rtpPacket(97, 1, 1000, 5, frag1))
+
+	clean := []byte{0x77, 0x88}
+	cleanPkt := buildAACHBR([][]byte{aacAUHeader16(len(clean), 0)}, [][]byte{clean})
+	sendAndSettle(t, c, send, withMarker(rtpPacket(97, 3, 2000, 5, cleanPkt))) // seq 2 lost
+	waitCount(t, &col, 1, 2*time.Second)
+
+	frames := col.snapshot()
+	if len(frames) != 1 {
+		t.Fatalf("delivered %d frames, want 1 (the abandoned fragment must not surface)", len(frames))
+	}
+	if !bytes.Equal(frames[0].Data, clean) {
+		t.Errorf("post-gap AU = % x, want % x (no splice of the dropped fragment)", frames[0].Data, clean)
+	}
+	if frames[0].SeqGap != 1 {
+		t.Errorf("SeqGap = %d, want 1 (the lost seq 2)", frames[0].SeqGap)
+	}
+}
+
+func TestRTPAACFragmentResetOnSSRCReset(t *testing.T) {
+	var col collector
+	c := openOK(t, aacRTPCfg(col.onFrame))
+	defer func() { _ = c.Close() }()
+	send := senderFor(t, c)
+
+	// Begin a fragmented access unit on one source, then switch SSRC. The new
+	// source restarts the media timeline, so the partial reassembly from the old
+	// source must be dropped; the new source's first clean packet delivers its own
+	// access unit instead of a corrupt splice.
+	frag1 := buildAACHBR([][]byte{aacAUHeader16(6, 0)}, [][]byte{{1, 2, 3}})
+	sendAndSettle(t, c, send, rtpPacket(97, 1, 1000, 0xAAAA, frag1))
+
+	clean := []byte{0x55, 0x66}
+	cleanPkt := buildAACHBR([][]byte{aacAUHeader16(len(clean), 0)}, [][]byte{clean})
+	sendAndSettle(t, c, send, withMarker(rtpPacket(97, 100, 7000, 0xBBBB, cleanPkt))) // new SSRC
+	waitCount(t, &col, 1, 2*time.Second)
+
+	frames := col.snapshot()
+	if len(frames) != 1 {
+		t.Fatalf("delivered %d frames, want 1 (the old source's fragment must not surface)", len(frames))
+	}
+	if !bytes.Equal(frames[0].Data, clean) {
+		t.Errorf("post-reset AU = % x, want % x (no splice of the dropped fragment)", frames[0].Data, clean)
+	}
+	if frames[0].PTS != 0 {
+		t.Errorf("PTS = %v, want 0 (re-based on the new source)", frames[0].PTS)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for c.Stats().Tracks[0].SSRCResets == 0 && time.Now().Before(deadline) {
+		time.Sleep(2 * time.Millisecond)
+	}
+	if r := c.Stats().Tracks[0].SSRCResets; r != 1 {
+		t.Errorf("SSRCResets = %d, want 1", r)
+	}
+}
+
+func TestRTPAACSeqGapCarriesToReassembledAU(t *testing.T) {
+	var col collector
+	c := openOK(t, aacRTPCfg(col.onFrame))
+	defer func() { _ = c.Close() }()
+	send := senderFor(t, c)
+
+	// A complete AU establishes the stream, then a packet is lost immediately
+	// before a fragment START (which completes no access unit). The gap must be
+	// carried onto the reassembled AU's frame, not swallowed because the
+	// fragment-start packet delivered nothing.
+	first := buildAACHBR([][]byte{aacAUHeader16(1, 0)}, [][]byte{{0xA0}})
+	sendAndSettle(t, c, send, withMarker(rtpPacket(97, 1, 0, 5, first)))
+
+	full := []byte{1, 2, 3, 4, 5, 6}
+	frag1 := buildAACHBR([][]byte{aacAUHeader16(len(full), 0)}, [][]byte{full[:3]})
+	frag2 := buildAACHBR([][]byte{aacAUHeader16(len(full), 0)}, [][]byte{full[3:]})
+	sendAndSettle(t, c, send, rtpPacket(97, 3, 1024, 5, frag1))             // seq 2 lost; fragment start, no frame
+	sendAndSettle(t, c, send, withMarker(rtpPacket(97, 4, 1024, 5, frag2))) // completes the AU
+	waitCount(t, &col, 2, 2*time.Second)
+
+	frames := col.snapshot()
+	if len(frames) != 2 {
+		t.Fatalf("delivered %d frames, want 2", len(frames))
+	}
+	if !bytes.Equal(frames[1].Data, full) {
+		t.Errorf("reassembled AU = % x, want % x", frames[1].Data, full)
+	}
+	if frames[1].SeqGap != 1 {
+		t.Errorf("SeqGap = %d, want 1 (the loss before the fragment start must carry onto this AU)", frames[1].SeqGap)
+	}
+}
+
+func TestRTPAACReorderDeliversInSequence(t *testing.T) {
+	var col collector
+	cfg := aacRTPCfg(col.onFrame)
+	cfg.Reorder = true
+	c := openOK(t, cfg)
+	defer func() { _ = c.Close() }()
+	send := senderFor(t, c)
+
+	one := func(seq uint16, b byte) []byte {
+		return withMarker(rtpPacket(97, seq, 1000, 5, buildAACHBR([][]byte{aacAUHeader16(1, 0)}, [][]byte{{b}})))
+	}
+	// Deliver out of order; the resequencer feeds processRTP in ascending order,
+	// so the depacketizer sees seq 1,2,3 and the access units emerge in order.
+	sendAndSettle(t, c, send, one(1, 0x01))
+	sendAndSettle(t, c, send, one(3, 0x03)) // early, buffered
+	sendAndSettle(t, c, send, one(2, 0x02)) // fills the hole, releases 2 then 3
+	waitCount(t, &col, 3, 2*time.Second)
+
+	if got := deliveredSeqMarkers(col.snapshot()); !bytes.Equal(got, []byte{1, 2, 3}) {
+		t.Fatalf("recovered AAC delivery order = %v, want [1 2 3]", got)
+	}
+	if ts := c.Stats().Tracks[0]; ts.Duplicates != 0 || ts.SeqGaps != 0 {
+		t.Errorf("Duplicates=%d SeqGaps=%d, want 0/0 (the hole was filled)", ts.Duplicates, ts.SeqGaps)
+	}
+}
+
+func TestRTPAACSamplesPerFrameDefaults(t *testing.T) {
+	// Leaving SamplesPerFrame zero must default to 1024 (AAC-LC), not merely let
+	// Open succeed: a two-AU packet must space AU1 by exactly 1024 ticks, which
+	// fails if the default is any other value.
+	var col collector
+	c := openOK(t, Config{
+		Mode: ModeRTP, PayloadType: 97, Codec: audiostream.CodecAAC{}, ClockRate: 44100,
+		AAC:     AACParams{SizeLength: 13, IndexLength: 3, IndexDeltaLength: 3}, // SamplesPerFrame omitted -> 1024
+		OnFrame: col.onFrame,
+	})
+	defer func() { _ = c.Close() }()
+
+	d0, d1 := []byte{0x11, 0x22}, []byte{0x33, 0x44}
+	pkt := buildAACHBR([][]byte{aacAUHeader16(len(d0), 0), aacAUHeader16(len(d1), 0)}, [][]byte{d0, d1})
+	_, _ = senderFor(t, c).Write(withMarker(rtpPacket(97, 1, 0, 5, pkt)))
+	waitCount(t, &col, 2, 2*time.Second)
+
+	frames := col.snapshot()
+	if want := mediatime.PTSFromSamples(1024, 44100); frames[1].PTS != want {
+		t.Errorf("AU1 PTS = %v, want %v (default SamplesPerFrame must be 1024)", frames[1].PTS, want)
+	}
+}
+
+func TestRTPAACExplicitCodecASCWinsOverParams(t *testing.T) {
+	// The doc contract: an AudioSpecificConfig set on the CodecAAC value itself
+	// takes precedence over AACParams.AudioSpecificConfig, which is only the
+	// fallback. Set both, differently, and assert the codec value wins.
+	codecASC := []byte{0x11, 0x90}
+	paramsASC := []byte{0x22, 0x88}
+	c := openOK(t, Config{
+		Mode: ModeRTP, PayloadType: 97, Codec: audiostream.CodecAAC{AudioSpecificConfig: codecASC}, ClockRate: 44100,
+		AAC: AACParams{SizeLength: 13, IndexLength: 3, IndexDeltaLength: 3, SamplesPerFrame: 1024, AudioSpecificConfig: paramsASC},
+	})
+	defer func() { _ = c.Close() }()
+
+	got, ok := c.Format().Codec.(audiostream.CodecAAC)
+	if !ok {
+		t.Fatalf("Format().Codec = %T, want audiostream.CodecAAC", c.Format().Codec)
+	}
+	if !bytes.Equal(got.AudioSpecificConfig, codecASC) {
+		t.Errorf("reported ASC = % x, want the CodecAAC value's % x (not the AACParams fallback)", got.AudioSpecificConfig, codecASC)
+	}
+}
+
+func TestRTPAACConfigInvalidWrapsCause(t *testing.T) {
+	_, err := Open(context.Background(), Config{
+		ListenAddr: loopbackAddr, Mode: ModeRTP, PayloadType: 97, Codec: audiostream.CodecAAC{}, ClockRate: 44100,
+		AAC: AACParams{SizeLength: 0, IndexLength: 3, IndexDeltaLength: 3, SamplesPerFrame: 1024},
+	})
+	if !errors.Is(err, ErrInvalidConfig) {
+		t.Errorf("Open error = %v, want ErrInvalidConfig", err)
+	}
+	if !errors.Is(err, aac.ErrConfigInvalid) {
+		t.Errorf("Open error = %v, want it to wrap aac.ErrConfigInvalid", err)
+	}
+}
+
+func TestRTPAACFormatReportsASC(t *testing.T) {
+	asc := []byte{0x12, 0x10}
+	c := openOK(t, Config{
+		Mode: ModeRTP, PayloadType: 97, Codec: audiostream.CodecAAC{}, ClockRate: 44100,
+		AAC: AACParams{SizeLength: 13, IndexLength: 3, IndexDeltaLength: 3, SamplesPerFrame: 1024, AudioSpecificConfig: asc},
+	})
+	defer func() { _ = c.Close() }()
+
+	f := c.Format()
+	got, ok := f.Codec.(audiostream.CodecAAC)
+	if !ok {
+		t.Fatalf("Format().Codec = %T, want audiostream.CodecAAC", f.Codec)
+	}
+	if !bytes.Equal(got.AudioSpecificConfig, asc) {
+		t.Errorf("reported ASC = % x, want % x", got.AudioSpecificConfig, asc)
+	}
+	if f.Kind != audiostream.PayloadKindFor(audiostream.CodecAAC{}) {
+		t.Errorf("Kind = %v, want the CodecAAC payload kind", f.Kind)
+	}
+	// A compressed codec reports no PCM geometry; sample rate and channels come
+	// from the ASC, read by a downstream decoder, not from this descriptor.
+	if f.SampleRate != 0 || f.Channels != 0 {
+		t.Errorf("SampleRate=%d Channels=%d, want 0/0 for a compressed codec", f.SampleRate, f.Channels)
 	}
 }

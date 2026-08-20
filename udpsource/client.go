@@ -10,6 +10,7 @@ import (
 	"time"
 
 	audiostream "github.com/tphakala/go-audio-stream"
+	"github.com/tphakala/go-audio-stream/depacket/aac"
 	"github.com/tphakala/go-audio-stream/depacket/g711"
 	"github.com/tphakala/go-audio-stream/depacket/opus"
 	"github.com/tphakala/go-audio-stream/internal/mediatime"
@@ -25,6 +26,7 @@ const (
 	kindG711                    // expand companded G.711 to s16le
 	kindL16                     // byte-swap big-endian L16 to s16le
 	kindOpus                    // deliver the Opus packet (compressed) unchanged
+	kindAAC                     // run the RFC 3640 AAC-hbr depacketizer, one CodecAAC frame per access unit
 )
 
 // Client is a single raw-UDP audio source. It binds one UDP socket and, for the
@@ -87,6 +89,23 @@ type Client struct {
 	stream  rtp.Stream
 	samples uint64
 	pcmBuf  []byte
+
+	// aac is the per-stream AAC-hbr depacketizer, built once in resolveFormat and
+	// nil for every non-AAC source (nil is the "not the AAC path" gate). It owns
+	// its own reused scratch and reassembly buffers, so the AAC path needs no
+	// udpsource-side copy: an access unit is delivered synchronously to OnFrame
+	// before the next Depacketize call that could overwrite its aliased backing.
+	aac *aac.Depacketizer
+
+	// aacPendingGap carries an observed sequence gap forward to the next AAC
+	// frame actually delivered. A gap can land on a packet that completes no
+	// access unit (a buffering fragment start, or a malformed payload); without
+	// this the loss would reach no Frame.SeqGap, and the access unit that
+	// completes on a later in-order packet would report SeqGap 0, hiding the
+	// discontinuity from a consumer that conceals per frame. The single-frame
+	// codecs never need this because each packet delivers exactly one frame.
+	// Reader-owned; only the reader goroutine touches it.
+	aacPendingGap int
 
 	// tsBase rebases the RTP timestamp so the first delivered frame is at PTS 0,
 	// as the other sources deliver. Stream.Observe reports the absolute unwrapped
@@ -175,6 +194,31 @@ func (c *Client) resolveFormat() error {
 			c.kind = kindL16
 		case audiostream.CodecOpus:
 			c.kind = kindOpus
+		case audiostream.CodecAAC:
+			c.kind = kindAAC
+			// Build the depacketizer once (applyDefaults has already filled
+			// SamplesPerFrame). Surface a bad width as this package's own
+			// ErrInvalidConfig: aac.ErrConfigInvalid is an internal detail, and
+			// wrapping it keeps the udpsource error contract stable while still
+			// letting errors.Is reach the precise cause through the chain.
+			dp, derr := aac.New(aac.Config{
+				SizeLength:       c.cfg.AAC.SizeLength,
+				IndexLength:      c.cfg.AAC.IndexLength,
+				IndexDeltaLength: c.cfg.AAC.IndexDeltaLength,
+				SamplesPerFrame:  c.cfg.AAC.SamplesPerFrame,
+			})
+			if derr != nil {
+				return fmt.Errorf("%w: AAC params: %w", ErrInvalidConfig, derr)
+			}
+			c.aac = dp
+			// If the caller left the reported ASC empty but supplied one via
+			// AACParams, fold it onto the stored CodecAAC value once here so
+			// Format() reports it with no per-call allocation. An ASC set on the
+			// CodecAAC value itself wins; AACParams.AudioSpecificConfig is the
+			// fallback.
+			if len(codec.AudioSpecificConfig) == 0 && len(c.cfg.AAC.AudioSpecificConfig) > 0 {
+				c.cfg.Codec = audiostream.CodecAAC{AudioSpecificConfig: c.cfg.AAC.AudioSpecificConfig}
+			}
 		case audiostream.CodecUnknown:
 			c.kind = kindOpaque
 		case nil:
@@ -398,6 +442,12 @@ func (c *Client) processRTP(pkt rtp.Packet, now time.Time) {
 	up := c.stream.Observe(pkt.Header)
 	if up.SSRCReset {
 		c.ssrcResets.Add(1)
+		// A new source restarts the media timeline, so any AAC access unit half
+		// reassembled from the old source must be dropped before its first packet,
+		// and any gap still pending from the old source's sequence space must not
+		// carry onto the new source's first frame.
+		c.resetAAC()
+		c.aacPendingGap = 0
 	}
 	// Re-seed the PTS origin on the first packet and on every SSRC change, so the
 	// media timeline starts at 0 and restarts cleanly for a new stream.
@@ -411,15 +461,36 @@ func (c *Client) processRTP(pkt rtp.Packet, now time.Time) {
 	}
 	if up.Gap > 0 {
 		c.seqGaps.Add(uint64(up.Gap))
+		// A sequence gap means a lost packet, which for AAC may be a lost
+		// fragment; drop the partial reassembly so the missing bytes cannot be
+		// spliced onto the next access unit, mirroring rtsp.resetDepacketizer. The
+		// gap branch is after the duplicate return, so a duplicate (no real hole)
+		// never discards a valid in-progress fragment.
+		c.resetAAC()
 	}
 	c.packets.Add(1)
 	c.deliverRTP(pkt, up, now)
+}
+
+// resetAAC drops any partially reassembled AAC access unit. It is a no-op for
+// every non-AAC source (c.aac is nil), so the shared processRTP path can call it
+// unconditionally on a discontinuity.
+func (c *Client) resetAAC() {
+	if c.aac != nil {
+		c.aac.Reset()
+	}
 }
 
 // deliverRTP depacketizes the RTP payload per the resolved codec kind and hands
 // one frame to OnFrame. out aliases either pkt.Payload (opaque/Opus) or the
 // reader-owned pcmBuf (G.711/L16), both valid only for the callback.
 func (c *Client) deliverRTP(pkt rtp.Packet, up rtp.Update, now time.Time) {
+	if c.kind == kindAAC {
+		// AAC yields zero-or-more access units per packet, not a single output
+		// slice, so it has its own delivery loop.
+		c.deliverAAC(pkt, up, now)
+		return
+	}
 	var out []byte
 	switch c.kind {
 	case kindG711:
@@ -457,23 +528,85 @@ func (c *Client) deliverRTP(pkt rtp.Packet, up rtp.Update, now time.Time) {
 	if c.cfg.OnFrame == nil {
 		return
 	}
-	// Rebase the timestamp to the origin. A conformant sender keeps the timestamp
-	// monotonic with the sequence, so this is a plain subtraction; guard the
-	// unsigned underflow for a non-conformant sender whose forward-sequence packet
-	// carries a timestamp before the origin (which would otherwise wrap to a
-	// nonsense PTS) by clamping such a frame to PTS 0.
-	var rel uint64
-	if up.Timestamp > c.tsBase {
-		rel = up.Timestamp - c.tsBase
-	}
 	c.cfg.OnFrame(audiostream.Frame{
 		TrackID:    0,
 		Data:       out,
 		RTPTime:    pkt.Header.Timestamp,
-		PTS:        mediatime.PTSFromSamples(rel, c.cfg.ClockRate),
+		PTS:        mediatime.PTSFromSamples(c.relTicks(up.Timestamp), c.cfg.ClockRate),
 		ReceivedAt: now,
 		SeqGap:     up.Gap,
 	})
+}
+
+// relTicks rebases an absolute unwrapped RTP timestamp to the media origin
+// (tsBase). A conformant sender keeps the timestamp monotonic with the sequence,
+// so this is a plain subtraction; the guard clamps a non-conformant sender whose
+// forward-sequence packet carries a timestamp before the origin to 0 rather than
+// letting the unsigned subtraction wrap to a nonsense PTS.
+func (c *Client) relTicks(ts uint64) uint64 {
+	if ts > c.tsBase {
+		return ts - c.tsBase
+	}
+	return 0
+}
+
+// deliverAAC depacketizes one RTP payload through the AAC-hbr depacketizer and
+// hands each completed access unit to OnFrame as its own CodecAAC frame. A packet
+// may complete several access units (a multi-AU packet), exactly one (a single-AU
+// packet or the final fragment of a fragmented unit), or none (a buffering
+// fragment). A malformed payload is counted once and skipped, keeping the reader
+// running, matching the single-frame codecs.
+//
+// Each AU.Data is valid only until the next Depacketize call: within one packet
+// the multi-AU slices are disjoint windows into pkt.Payload, and a reassembled
+// fragment aliases the depacketizer's own buffer. The reader is single-threaded
+// and calls OnFrame synchronously here before any further Depacketize, so the
+// aliased bytes stay valid for the callback and no copy is needed. The AAC path
+// therefore allocates nothing in steady state, the same posture as the opaque and
+// Opus paths.
+func (c *Client) deliverAAC(pkt rtp.Packet, up rtp.Update, now time.Time) {
+	// Fold this packet's gap into the pending total. If the packet completes no
+	// access unit (buffering fragment or malformed), the gap stays pending and
+	// surfaces on the next delivered frame, so a loss immediately before a
+	// fragmented access unit is not lost from Frame.SeqGap. In the common
+	// no-loss case up.Gap is 0 and this is inert.
+	c.aacPendingGap += up.Gap
+	aus, err := c.aac.Depacketize(pkt.Payload, pkt.Header.Marker, pkt.Header.Timestamp)
+	if err != nil {
+		// A malformed AAC payload (truncated headers, an AU size past the payload,
+		// fragment overflow, or interleaving) is counted once; the depacketizer
+		// self-resets its fragment state on the error, so the next packet starts
+		// clean. The pending gap is retained for the next delivered frame.
+		c.malformed.Add(1)
+		return
+	}
+	// A buffering fragment completes no access unit yet: not a frame and not an
+	// error. Its wire bytes are already counted; it surfaces as a frame when its
+	// final fragment arrives.
+	for i := range aus {
+		c.payload.Add(uint64(len(aus[i].Data)))
+		// Report the pending gap on the first AU only and clear it, so summing
+		// SeqGap across the frames of this packet counts each loss once. The drain
+		// happens even when OnFrame is nil so the counter cannot grow unbounded.
+		seqGap := 0
+		if i == 0 {
+			seqGap = c.aacPendingGap
+			c.aacPendingGap = 0
+		}
+		if c.cfg.OnFrame == nil {
+			continue
+		}
+		// Each access unit's PTS advances by its RTPOffset within the packet, so a
+		// multi-AU packet spaces its units by SamplesPerFrame.
+		c.cfg.OnFrame(audiostream.Frame{
+			TrackID:    0,
+			Data:       aus[i].Data,
+			RTPTime:    pkt.Header.Timestamp,
+			PTS:        mediatime.PTSFromSamples(c.relTicks(up.Timestamp+uint64(aus[i].RTPOffset)), c.cfg.ClockRate),
+			ReceivedAt: now,
+			SeqGap:     seqGap,
+		})
+	}
 }
 
 // deliverPCM delivers one raw-PCM datagram as a frame, byte-swapping a

@@ -13,8 +13,10 @@ var (
 	// or channel count. It is returned by Open.
 	ErrInvalidConfig = errors.New("udpsource: invalid config")
 	// ErrUnsupportedCodec reports a Config.Codec this source does not carry over
-	// raw RTP. The MVP frames G.711, L16, and Opus, and passes an unrecognized
-	// codec through opaquely; AAC and MP3 over raw RTP are not yet supported.
+	// raw RTP. It frames G.711, L16, Opus, and AAC, and passes an unrecognized
+	// codec through opaquely; other codecs (for example MP3) over raw RTP are not
+	// yet supported. A CodecAAC with invalid AU-header widths returns
+	// ErrInvalidConfig, not this.
 	ErrUnsupportedCodec = errors.New("udpsource: unsupported codec")
 	// ErrBind reports that the UDP socket could not be bound to ListenAddr.
 	ErrBind = errors.New("udpsource: cannot bind UDP socket")
