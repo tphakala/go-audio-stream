@@ -11,6 +11,12 @@ import (
 // a single ReadFromUDP never truncates a packet.
 const defaultReadBufSize = 65535
 
+// defaultAACSamplesPerFrame is the AAC-LC frame length in samples, the default
+// for AACParams.SamplesPerFrame. A raw RTP stream carries no fmtp, and 960 (the
+// other common frame length) cannot be distinguished from 1024 by the RTP stream
+// alone, so a 960-sample stream must set SamplesPerFrame explicitly.
+const defaultAACSamplesPerFrame = 1024
+
 // Mode selects how each received datagram is interpreted.
 type Mode uint8
 
@@ -52,6 +58,34 @@ type PCMFormat struct {
 	BigEndian bool
 }
 
+// AACParams holds the RFC 3640 MPEG4-GENERIC AU-header field widths (mode
+// AAC-hbr) that Config supplies for CodecAAC over raw RTP, the raw-path analogue
+// of the SDP fmtp an RTSP client would parse. The common AAC-hbr case is
+// SizeLength 13, IndexLength 3, IndexDeltaLength 3. The fields map one-to-one
+// onto depacket/aac.Config, so a caller that already has an SDP fmtp can copy
+// them across directly.
+type AACParams struct {
+	// SizeLength is the AU-size field width in bits (AAC-hbr: 13). Required.
+	SizeLength int
+	// IndexLength is the AU-Index field width in bits for the first AU-header in
+	// a packet (AAC-hbr: 3). Required.
+	IndexLength int
+	// IndexDeltaLength is the AU-Index-delta field width in bits for every
+	// non-first AU-header in a packet (AAC-hbr: 3). Required.
+	IndexDeltaLength int
+	// SamplesPerFrame is the RTP timestamp increment per access unit, equal to
+	// the samples one AAC frame decodes to (RFC 3640 clocks AAC at the audio
+	// sample rate). Zero defaults to 1024 (AAC-LC); a 960-sample stream must set
+	// it explicitly, since the two cannot be told apart from the RTP stream alone.
+	SamplesPerFrame int
+	// AudioSpecificConfig is the optional raw ASC reported through
+	// Format().Codec (CodecAAC.AudioSpecificConfig) for a downstream decoder. It
+	// is not needed to depacketize (the AU parser reads only the widths above), so
+	// a caller without it may leave it nil. An AudioSpecificConfig set on the
+	// CodecAAC value itself takes precedence; this is the fallback.
+	AudioSpecificConfig []byte
+}
+
 // Config configures a raw UDP audio source. It carries no SDP, so for ModeRTP
 // the caller supplies the payload type and its codec, clock rate, and channel
 // count directly (the mapping RTSP would otherwise derive from SDP).
@@ -67,14 +101,23 @@ type Config struct {
 	// A datagram whose payload type differs is counted malformed and dropped.
 	PayloadType uint8
 	// Codec identifies the RTP payload's codec (ModeRTP): CodecG711, CodecL16,
-	// CodecOpus, or CodecUnknown for an opaque passthrough. It selects the
-	// depacketizer and, via PayloadKindFor, the delivered payload kind.
+	// CodecOpus, CodecAAC, or CodecUnknown for an opaque passthrough. It selects
+	// the depacketizer and, via PayloadKindFor, the delivered payload kind. For
+	// CodecAAC the AU-header widths come from AAC below, since a raw RTP source
+	// carries no SDP fmtp to derive them from.
 	Codec audiostream.Codec
 	// ClockRate is the RTP timestamp clock in Hz (ModeRTP), used for PTS and, for
 	// a PCM codec (G.711, L16), as the delivered sample rate. Required for ModeRTP.
 	ClockRate int
 	// Channels is the channel count reported for a PCM codec (ModeRTP).
 	Channels int
+
+	// AAC carries the RFC 3640 AAC-hbr AU-header widths for CodecAAC over raw
+	// RTP. It is consulted only when Codec is CodecAAC and Mode is ModeRTP, and
+	// is ignored otherwise, so it is a zero-value-inert addition that leaves every
+	// existing config unaffected. There is no SDP fmtp on the raw path, so the
+	// caller supplies the widths directly (see AACParams).
+	AAC AACParams
 
 	// Reorder enables RTP resequencing for ModeRTP: late-but-in-window datagrams
 	// are recovered and delivered in ascending sequence order through the shared
@@ -115,5 +158,11 @@ type Config struct {
 func (c *Config) applyDefaults() {
 	if c.readBufSize <= 0 {
 		c.readBufSize = defaultReadBufSize
+	}
+	// Default the AAC-LC frame length when the caller leaves it zero, so a common
+	// AAC-hbr config need only set the three AU-header widths. Only an AAC config
+	// is touched; every other codec is left exactly as given.
+	if _, ok := c.Codec.(audiostream.CodecAAC); ok && c.AAC.SamplesPerFrame == 0 {
+		c.AAC.SamplesPerFrame = defaultAACSamplesPerFrame
 	}
 }

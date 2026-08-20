@@ -11,9 +11,12 @@
 // its payload is depacketized according to the configured payload type. Because
 // there is no SDP, the caller supplies the payload type and its codec, clock
 // rate, and channel count in Config. G.711 (companded to s16le), L16
-// (byte-swapped from big-endian to s16le), and Opus (delivered as a compressed
-// packet) are framed by reusing the library's existing depacketizers; an
-// unrecognized codec is passed through opaquely. ModePCM treats each datagram as
+// (byte-swapped from big-endian to s16le), Opus (delivered as a compressed
+// packet), and AAC (RFC 3640 AAC-hbr, delivered as one CodecAAC access unit per
+// frame, still compressed since the library does not decode) are framed by
+// reusing the library's existing depacketizers; an unrecognized codec is passed
+// through opaquely. Because a raw RTP stream carries no SDP fmtp, the AAC-hbr
+// AU-header widths come from Config.AAC. ModePCM treats each datagram as
 // interleaved 16-bit PCM at the configured rate and channel count, delivering
 // the whole-sample-frame prefix and byte-swapping a big-endian source to s16le.
 //
@@ -28,16 +31,18 @@
 // goroutine. An optional Config.SourceIP restricts accepted datagrams to one
 // sender IP; by default any sender on the bound port is accepted.
 //
-// Scope: this version frames G.711, L16, and Opus over raw RTP and raw s16 PCM
-// datagrams. By default an out-of-order datagram is dropped and surfaces only as
-// a sequence gap, not delivered late for the consumer to reorder; because each
-// supported codec here carries a self-contained payload with its own timestamp,
-// that loss is non-corrupting (a dropped frame, not a desynchronized stream).
-// Config.Reorder opts into resequencing through the shared rtsp/rtp.Reorderer, so
-// a late-but-in-window datagram is recovered and delivered in sequence order at
-// the cost of a bounded latency and one heap copy per datagram. AAC over raw RTP
-// (which needs the fmtp depacketizer widths) remains a follow-up. There is no
-// RTCP handling, so TrackStats.SenderClock stays invalid.
+// Scope: this version frames G.711, L16, Opus, and AAC over raw RTP and raw s16
+// PCM datagrams. By default an out-of-order datagram is dropped and surfaces only as
+// a sequence gap, not delivered late for the consumer to reorder. That loss is
+// non-corrupting: G.711, L16, and Opus each carry a self-contained payload with its
+// own timestamp, so a dropped datagram is a dropped frame, not a desynchronized
+// stream; AAC access units may span several datagrams, but a gap or SSRC change
+// drops any partial reassembly and carries the discontinuity onto the next delivered
+// frame's SeqGap, so a lost fragment costs only its access unit rather than
+// corrupting the next one. Config.Reorder opts into resequencing through the shared
+// rtsp/rtp.Reorderer, so a late-but-in-window datagram is recovered and delivered in
+// sequence order at the cost of a bounded latency and one heap copy per datagram.
+// There is no RTCP handling, so TrackStats.SenderClock stays invalid.
 //
 // Open binds the socket and returns an already-receiving source. Its ctx bounds
 // only the bind and does not end the stream afterward; Close does. A Client
