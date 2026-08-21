@@ -57,9 +57,9 @@ chmod +x stream-doctor-*
 ./stream-doctor-* -version       # prints: stream-doctor X.Y.Z
 ```
 
-The macOS binaries are signed with an Apple Developer ID and notarized, so
-Gatekeeper allows them (an online check on first run). If Gatekeeper still
-quarantines a copy, for example when the machine is offline, clear the flag:
+The macOS binaries are not yet code-signed or notarized, so Gatekeeper
+quarantines a downloaded copy and refuses the first launch. Clear the quarantine
+flag once:
 
 ```sh
 xattr -d com.apple.quarantine stream-doctor-*
