@@ -221,9 +221,11 @@ func TestParseRejectsSegmentWithoutExtinf(t *testing.T) {
 }
 
 func TestParseRejectsBadExtinf(t *testing.T) {
-	body := "#EXTM3U\n#EXT-X-TARGETDURATION:6\n#EXTINF:notanumber,\na.ts\n"
-	if _, _, err := parsePlaylist([]byte(body), mustURL(t, "https://h/x.m3u8")); !errors.Is(err, ErrMalformedPlaylist) {
-		t.Errorf("bad EXTINF = %v, want ErrMalformedPlaylist", err)
+	for _, field := range []string{"notanumber", "NaN", "Inf", "-1", "999999999"} {
+		body := "#EXTM3U\n#EXT-X-TARGETDURATION:6\n#EXTINF:" + field + ",\na.ts\n"
+		if _, _, err := parsePlaylist([]byte(body), mustURL(t, "https://h/x.m3u8")); !errors.Is(err, ErrMalformedPlaylist) {
+			t.Errorf("EXTINF %q = %v, want ErrMalformedPlaylist", field, err)
+		}
 	}
 }
 

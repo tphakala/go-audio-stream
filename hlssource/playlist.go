@@ -2,6 +2,7 @@ package hlssource
 
 import (
 	"fmt"
+	"math"
 	"net/url"
 	"strconv"
 	"strings"
@@ -279,7 +280,9 @@ const maxPlaylistSeconds = 24 * 60 * 60
 func parseExtinf(attr string) (time.Duration, error) {
 	field, _, _ := strings.Cut(attr, ",")
 	secs, err := strconv.ParseFloat(strings.TrimSpace(field), 64)
-	if err != nil || secs < 0 || secs > maxPlaylistSeconds {
+	// ParseFloat accepts "NaN" and the infinities; NaN passes both range checks,
+	// so reject any non-finite value before scaling it to a time.Duration.
+	if err != nil || math.IsNaN(secs) || secs < 0 || secs > maxPlaylistSeconds {
 		return 0, fmt.Errorf("%w: bad EXTINF duration %q", ErrMalformedPlaylist, field)
 	}
 	return time.Duration(secs * float64(time.Second)), nil

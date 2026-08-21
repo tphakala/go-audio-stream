@@ -22,12 +22,6 @@ const (
 	streamTypeMP3a = 0x03
 	streamTypeMP3b = 0x04
 	streamTypeLATM = 0x11
-
-	// maxPSISection bounds PSI section reassembly. A section_length is 12 bits, so
-	// a whole section is at most 3+4095 bytes; a reassembly that exceeds this
-	// without completing is malformed (or a crafted continuation run), and the
-	// buffer is dropped rather than grown.
-	maxPSISection = 4098
 )
 
 // tsDemux demuxes AAC access units out of an MPEG-TS byte stream, one segment at
@@ -349,13 +343,10 @@ func psiSection(buf *[]byte, payload []byte, pusi bool) ([]byte, bool) {
 	if len(sec) < 3 {
 		return nil, false
 	}
+	// section_length is 12 bits, so total is at most 3+4095; the buffer therefore
+	// completes (and clears) within 4098 bytes and cannot grow without bound.
 	total := 3 + (int(sec[1]&0x0F)<<8 | int(sec[2]))
 	if len(sec) < total {
-		if len(sec) > maxPSISection {
-			// A section that never completes within the cap is malformed or a
-			// crafted continuation run: drop the buffer so it cannot grow further.
-			*buf = (*buf)[:0]
-		}
 		return nil, false
 	}
 	// Clear the buffer once the section is complete, so subsequent continuation

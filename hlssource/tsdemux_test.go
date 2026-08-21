@@ -213,6 +213,24 @@ func TestTSDemuxGapCountAccumulatesAcrossReset(t *testing.T) {
 	}
 }
 
+func TestTSDemuxDropsPESWithBadStartCode(t *testing.T) {
+	// Enough frames that the first audio packet is a full 184-byte payload (no
+	// adaptation field), so the PES start code sits at a known offset. Corrupting
+	// it makes the PES unparseable: the demux drops it rather than feeding the
+	// header to the framer, so no access unit is delivered and nothing panics.
+	stream, _ := adtsStream(6, 40)
+	seg := buildTSSegment(stream, 0x1000, 0x0100)
+	// PAT and PMT are packets 0 and 1; the first audio packet is packet 2, whose
+	// payload begins at byte 4 (afc payload-only). Break packet_start_code_prefix.
+	seg[2*tsPacketLen+6] = 0xFF
+	d := newTSDemux()
+	got := collectAUs(t, d, seg, false)
+	d.end(func(au []byte, _ time.Duration) { got = append(got, au) })
+	if len(got) != 0 {
+		t.Errorf("delivered %d AUs from a PES with a broken start code, want 0", len(got))
+	}
+}
+
 func TestTSDemuxDiscontinuityResetsAndFlushes(t *testing.T) {
 	// Two independent domains: after a discontinuity the demuxer re-acquires
 	// PAT/PMT and keeps delivering. Both domains' AUs arrive.
