@@ -4,12 +4,10 @@ import (
 	"crypto/tls"
 	"fmt"
 	"log/slog"
-	"net/url"
-	"strconv"
-	"strings"
 	"time"
 
 	audiostream "github.com/tphakala/go-audio-stream"
+	"github.com/tphakala/go-audio-stream/internal/httptarget"
 )
 
 // Client defaults. A zero Config field falls back to these.
@@ -128,56 +126,18 @@ type target struct {
 // https) and the port range, extracts credentials (a non-empty URL userinfo
 // overrides Config) and rejects CR, LF and NUL in them, and strips the userinfo
 // and fragment from the request URL so neither reaches the server. It returns
-// ErrInvalidURL (wrapped) on any malformed input.
+// ErrInvalidURL (wrapped) on any malformed input. The parsing itself is shared
+// with the other HTTP-family sources via internal/httptarget so a fix to the
+// credential handling cannot land in one copy only.
 func parseTarget(cfg *Config) (target, error) {
-	raw := strings.TrimSpace(cfg.URL)
-	if raw == "" {
-		return target{}, fmt.Errorf("%w: empty URL", ErrInvalidURL)
-	}
-	u, err := url.Parse(raw)
+	t, err := httptarget.Parse(cfg.URL, cfg.Username, cfg.Password)
 	if err != nil {
 		return target{}, fmt.Errorf("%w: %w", ErrInvalidURL, err)
 	}
-
-	switch strings.ToLower(u.Scheme) {
-	case "http", schemeHTTPS:
-	default:
-		return target{}, fmt.Errorf("%w: unsupported scheme %q", ErrInvalidURL, u.Scheme)
-	}
-
-	host := u.Hostname()
-	if host == "" {
-		return target{}, fmt.Errorf("%w: missing host", ErrInvalidURL)
-	}
-	if port := u.Port(); port != "" {
-		n, perr := strconv.Atoi(port)
-		if perr != nil || n < 1 || n > 65535 {
-			return target{}, fmt.Errorf("%w: port %q out of range", ErrInvalidURL, port)
-		}
-	}
-
-	username, password := cfg.Username, cfg.Password
-	// A wholly empty userinfo ("http://@host") is treated as absent rather than
-	// as an override, so it cannot silently discard Config credentials.
-	if u.User != nil {
-		urlUser := u.User.Username()
-		urlPass, _ := u.User.Password()
-		if urlUser != "" || urlPass != "" {
-			username, password = urlUser, urlPass
-		}
-	}
-	if strings.ContainsAny(username, "\r\n\x00") || strings.ContainsAny(password, "\r\n\x00") {
-		return target{}, fmt.Errorf("%w: CR, LF or NUL in credentials", ErrInvalidURL)
-	}
-
-	reqURL := *u
-	reqURL.User = nil
-	reqURL.Fragment = ""
-	reqURL.RawFragment = ""
 	return target{
-		requestURL: reqURL.String(),
-		host:       u.Host, // host:port, for same-origin credential gating
-		username:   username,
-		password:   password,
+		requestURL: t.RequestURL,
+		host:       t.Host, // host:port, for same-origin credential gating
+		username:   t.Username,
+		password:   t.Password,
 	}, nil
 }

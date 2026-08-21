@@ -20,12 +20,32 @@ func FuzzTSDemux(f *testing.F) {
 	f.Fuzz(func(t *testing.T, seg []byte) {
 		d := newTSDemux()
 		delivered := 0
-		_ = d.demux(seg, false, func(au []byte, _ time.Duration) {
+		checkAU := func(au []byte, dur time.Duration) {
+			// A delivered access unit is the ADTS payload with its header stripped,
+			// so it cannot be re-parsed as a frame; assert the invariants that do
+			// hold for every AU the framer yields. adts.Parse rejects a frame no
+			// longer than its header, so the payload is never empty, and it rejects
+			// the reserved/escape sample-rate indices, so the frame duration derived
+			// from a valid rate is always positive.
+			if len(au) == 0 {
+				t.Fatal("demux delivered a zero-length access unit")
+			}
+			if dur <= 0 {
+				t.Fatalf("demux delivered an access unit with non-positive duration %v", dur)
+			}
+		}
+		_ = d.demux(seg, false, func(au []byte, dur time.Duration) {
 			delivered++
 			if delivered > len(seg)+16 {
 				t.Fatal("demux delivered more access units than the input can hold")
 			}
+			checkAU(au, dur)
 		})
-		d.end(func([]byte, time.Duration) {})
+		d.end(checkAU)
+		// Once any frame has been delivered the resolved AudioSpecificConfig is a
+		// well-formed 2-byte AAC config; nil before the first frame is fine.
+		if asc := d.audioSpecificConfig(); asc != nil && len(asc) != 2 {
+			t.Fatalf("audioSpecificConfig len = %d, want 2", len(asc))
+		}
 	})
 }
