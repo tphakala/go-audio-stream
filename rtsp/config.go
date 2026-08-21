@@ -6,12 +6,12 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
-	"net/url"
 	"strconv"
 	"strings"
 	"time"
 
 	audiostream "github.com/tphakala/go-audio-stream"
+	"github.com/tphakala/go-audio-stream/internal/urltarget"
 )
 
 // Client defaults. A zero Config field falls back to these.
@@ -212,13 +212,14 @@ type target struct {
 // rtsps) and the port range, supplies the default port when absent, extracts
 // credentials (a non-empty URL userinfo overrides Config) and rejects CR, LF
 // and NUL in them, and strips the userinfo and fragment from the request
-// URL. It returns ErrInvalidURL (wrapped) on any malformed input.
+// URL. It returns ErrInvalidURL (wrapped) on any malformed input. The
+// security-relevant scheme-independent core, leak-safe URL parsing and
+// credential resolution, is shared with the other network sources via
+// internal/urltarget so a fix to it cannot land in one copy only; only the
+// rtsp-specific scheme set, default-port supply, and dial-address building stay
+// here.
 func parseTarget(cfg *Config) (target, error) {
-	raw := strings.TrimSpace(cfg.URL)
-	if raw == "" {
-		return target{}, fmt.Errorf("%w: empty URL", ErrInvalidURL)
-	}
-	u, err := url.Parse(raw)
+	u, err := urltarget.ParseURL(cfg.URL)
 	if err != nil {
 		return target{}, fmt.Errorf("%w: %w", ErrInvalidURL, err)
 	}
@@ -251,43 +252,15 @@ func parseTarget(cfg *Config) (target, error) {
 		}
 	}
 
-	username, password := cfg.Username, cfg.Password
-	// A wholly empty userinfo ("rtsp://@host" or "rtsp://:@host", what a URL
-	// template produces when its substitution variables are unset) is treated
-	// as absent rather than as an override, so it cannot silently discard the
-	// credentials the caller supplied in Config. Note url.User is non-nil for
-	// both of those and User.String() is ":" for the second, so neither a nil
-	// check nor an empty-string check catches them.
-	//
-	// Gating on the username alone would be too broad: "rtsp://:secret@host"
-	// carries a real password-only credential, which some cameras accept, and
-	// dropping it would surface as an unexplainable 401.
-	if u.User != nil {
-		urlUser := u.User.Username()
-		urlPass, _ := u.User.Password()
-		if urlUser != "" || urlPass != "" {
-			username, password = urlUser, urlPass
-		}
-	}
-	// Userinfo is percent-decoded, so url.Parse's rejection of raw control
-	// characters does not cover "%0D%0A". These values flow into an
-	// Authorization header; MarshalRequest would catch CRLF one hop later, but
-	// the boundary that extracts them from an untrusted URL is where they
-	// should be rejected.
-	if strings.ContainsAny(username, "\r\n\x00") || strings.ContainsAny(password, "\r\n\x00") {
-		return target{}, fmt.Errorf("%w: CR, LF or NUL in credentials", ErrInvalidURL)
+	username, password, err := urltarget.ResolveCredentials(u, cfg.Username, cfg.Password)
+	if err != nil {
+		return target{}, fmt.Errorf("%w: %w", ErrInvalidURL, err)
 	}
 
-	reqURL := *u
-	reqURL.User = nil
-	// A fragment is a client-side construct and has no meaning on an RTSP
-	// request line; leaving it on would send it to the server verbatim.
-	reqURL.Fragment = ""
-	reqURL.RawFragment = ""
 	return target{
 		tls:        tlsOn,
 		address:    net.JoinHostPort(host, port),
-		requestURL: reqURL.String(),
+		requestURL: urltarget.StripUserinfoFragment(u),
 		serverName: host,
 		username:   username,
 		password:   password,
