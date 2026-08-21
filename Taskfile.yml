@@ -65,7 +65,9 @@ tasks:
       - go test -run '^$' -fuzz '^FuzzParseTransport$' -fuzztime=2m ./rtsp
       - go test -run '^$' -fuzz '^FuzzParseSession$' -fuzztime=2m ./rtsp
       - go test -run '^$' -fuzz '^FuzzParse$' -fuzztime=2m ./internal/adts
-      - go test -run '^$' -fuzz '^FuzzADTSFramer$' -fuzztime=2m ./httpsource
+      - go test -run '^$' -fuzz '^FuzzStream$' -fuzztime=2m ./internal/adtsframe
+      - go test -run '^$' -fuzz '^FuzzParsePlaylist$' -fuzztime=2m ./hlssource
+      - go test -run '^$' -fuzz '^FuzzTSDemux$' -fuzztime=2m ./hlssource
       - go test -run '^$' -fuzz '^FuzzParseRTPInfoEntry$' -fuzztime=2m ./rtsp
       - go test -run '^$' -fuzz '^FuzzParseWAVHeader$' -fuzztime=2m ./httpsource
       - go test -run '^$' -fuzz '^FuzzMP3Stream$' -fuzztime=2m ./httpsource

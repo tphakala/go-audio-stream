@@ -252,9 +252,9 @@ func TestLooksLikeID3(t *testing.T) {
 func TestMP3FramerReconfirmsAfterLostSync(t *testing.T) {
 	_, f := mp3Frames(3)
 	s := &mp3Stream{}
-	s.feed(f[0])
-	s.feed(f[1])
-	s.feed(f[2])
+	s.Feed(f[0])
+	s.Feed(f[1])
+	s.Feed(f[2])
 	delivered := 0
 	for {
 		if _, _, ok := s.next(); ok {
@@ -263,13 +263,13 @@ func TestMP3FramerReconfirmsAfterLostSync(t *testing.T) {
 			break
 		}
 	}
-	s.compact()
+	s.Compact()
 	if delivered != 3 || !s.synced {
 		t.Fatalf("setup: delivered=%d synced=%v, want 3 and synced", delivered, s.synced)
 	}
 
 	// A run of non-header garbage breaks sync.
-	s.feed(bytes.Repeat([]byte{'x'}, 50))
+	s.Feed(bytes.Repeat([]byte{'x'}, 50))
 	for {
 		if _, _, ok := s.next(); ok {
 			t.Fatal("garbage was delivered as a frame")
@@ -277,13 +277,13 @@ func TestMP3FramerReconfirmsAfterLostSync(t *testing.T) {
 			break
 		}
 	}
-	s.compact()
+	s.Compact()
 	if s.synced {
 		t.Fatal("sync was not cleared after a garbage run")
 	}
 
 	// A lone valid frame with no following header must be held for confirmation.
-	s.feed(f[0])
+	s.Feed(f[0])
 	if _, _, ok := s.next(); ok {
 		t.Fatal("delivered an unconfirmed frame on a stale synced flag after losing sync")
 	}
@@ -457,16 +457,16 @@ func FuzzMP3Stream(f *testing.F) {
 				}
 				emitted += len(frame)
 			}
-			s.compact()
+			s.Compact()
 		}
 		for off := 0; off < len(data); off += chunk {
 			end := min(off+chunk, len(data))
-			s.feed(data[off:end])
+			s.Feed(data[off:end])
 			drain()
 		}
 		s.ended = true
 		drain()
-		s.finish()
+		s.Finish()
 		if emitted > len(data) {
 			t.Fatalf("emitted %d bytes from %d bytes of input", emitted, len(data))
 		}

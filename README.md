@@ -16,8 +16,11 @@ response or raw L16/PCM delivered as the same s16le frames, or a compressed MP3
 or ADTS AAC (Icecast/SHOUTcast) stream framed and delivered as coded frames. A
 third source, `udpsource`, receives raw `udp://` / `rtp://` audio that no RTSP
 session negotiated, framing either RTP packets or interleaved s16 PCM datagrams
-the caller describes. All three satisfy one `Source` interface, so a consumer
-can drive any of them uniformly. No cgo, no runtime dependencies.
+the caller describes. A fourth source, `hlssource`, follows an HLS (m3u8)
+playlist, live or VOD, and demuxes AAC access units out of the MPEG-TS segments,
+delivering them with the same AudioSpecificConfig an RTSP AAC track carries. All
+four satisfy one `Source` interface, so a consumer can drive any of them
+uniformly. No cgo, no runtime dependencies.
 
 Where the rest of the family reads and writes files, this library brings audio
 in off the network, so it sits one step upstream of them: the frames it delivers
