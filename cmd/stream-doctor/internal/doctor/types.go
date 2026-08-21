@@ -25,6 +25,27 @@ type CapturedFrame struct {
 	SeqGap int
 }
 
+// CaptureProgress is a lightweight snapshot of the counters accumulated so far
+// during a capture window, rendered by the live progress meter each second so
+// the wait no longer looks like a hang. It mirrors the subset of the final
+// capture block that changes visibly second to second. A prober exposes it
+// through the optional captureProgressReporter interface.
+type CaptureProgress struct {
+	// Frames is the number of audio frames delivered so far (from the shared
+	// capture sink). It is meaningful for every source, including HTTP
+	// progressive sources that do not meter RTP packets.
+	Frames int
+	// Packets is the number of RTP packets accepted so far (from the library
+	// Stats); zero for a source that does not meter packets.
+	Packets uint64
+	// Lost is the number of packets lost per sequence tracking so far (from
+	// the library Stats.SeqGaps).
+	Lost uint64
+	// Malformed is the number of packets discarded without delivery so far
+	// (from the library Stats.Malformed).
+	Malformed uint64
+}
+
 // EndReason records why capture stopped.
 type EndReason int
 
@@ -103,6 +124,10 @@ type HandshakeStep struct {
 	OK      bool
 	Elapsed time.Duration
 	Detail  string // one-line negotiated detail or failure reason
+	// Hint is an optional actionable suggestion shown under a failed step's
+	// detail (for example "try -transport tcp"), "" when there is nothing to
+	// suggest. It is classifier-authored, host-free text, so it carries no PII.
+	Hint string
 }
 
 // Env is the injected machine context, so report and walkthrough golden tests

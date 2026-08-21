@@ -106,7 +106,7 @@ target: rtsp://[redacted]/stream
 
 handshake
   DIAL       ok    12ms   auth Digest, keepalive GET_PARAMETER
-  DESCRIBE   ok     8ms   1 audio track, 1 video track
+  DESCRIBE   ok     8ms   1 audio track, 1 video track, Digest auth OK
   SETUP      ok     6ms   track 0, channels 0-1
   PLAY       ok     7ms   session timeout 60s
 

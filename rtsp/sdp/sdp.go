@@ -38,6 +38,16 @@ type Session struct {
 	// Control is the session-level a=control value, "" if absent. Stored
 	// verbatim (no URL resolution; that is the RTSP client's job in M4).
 	Control string
+	// Name is the session name from the s= line, "" if absent. It is
+	// server-controlled free text (for example a camera's stream label),
+	// stored verbatim and never interpreted; a consumer that displays it must
+	// treat it as untrusted.
+	Name string
+	// Tool is the session-level a=tool value, "" if absent. Cameras and RTSP
+	// servers commonly set it to their streaming stack and version (for
+	// example "BC Streaming Media v..."), which is a useful identity hint.
+	// Server-controlled free text, stored verbatim and never interpreted.
+	Tool string
 	// Media holds the m= sections in the order they appeared.
 	Media []Media
 }

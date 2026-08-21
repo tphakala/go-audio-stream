@@ -103,6 +103,16 @@ type SessionInfo struct {
 	// is a diagnostic aid for identifying a camera's RTSP stack; it is not
 	// interpreted and may carry arbitrary vendor text.
 	Server string
+	// SDPSessionName is the session name from the DESCRIBE SDP s= line, "" if
+	// absent. Like Server, it is server-controlled free text captured as a
+	// diagnostic identity hint (a camera's stream label), not interpreted, and
+	// may carry arbitrary vendor text.
+	SDPSessionName string
+	// SDPTool is the DESCRIBE SDP session-level a=tool value, "" if absent.
+	// Cameras and RTSP servers commonly set it to their streaming stack and
+	// version (for example "BC Streaming Media v..."), the single most useful
+	// in-band identity hint. Server-controlled free text, never interpreted.
+	SDPTool string
 	// Channels lists the assigned interleaved channel pairs, one per set-up
 	// track, in Setup order. Freshly allocated; never internal state.
 	Channels []ChannelPair
@@ -176,6 +186,12 @@ type Client struct {
 	sessionTimeout  time.Duration
 	keepaliveMethod string
 	serverHeader    string
+	// sdpSessionName and sdpTool are the SDP session identity from the last
+	// DESCRIBE (s= and a=tool), "" when absent. Server-controlled free text,
+	// surfaced through SessionInfo purely as a diagnostic identity hint and
+	// never interpreted.
+	sdpSessionName string
+	sdpTool        string
 	// dialURL is the credential-stripped target the session was opened
 	// against. Unlike baseURL, which Describe rewrites from Content-Base, it
 	// is set once by newClient and never changes, so it backs SourceInfo.URL
@@ -572,6 +588,8 @@ func (c *Client) SessionInfo() SessionInfo {
 		AuthScheme:      c.auth.challenge.Scheme,
 		KeepaliveMethod: c.keepaliveMethod,
 		Server:          c.serverHeader,
+		SDPSessionName:  c.sdpSessionName,
+		SDPTool:         c.sdpTool,
 		Channels:        chans,
 		Transport:       c.sessionTransport,
 		UDPEndpoints:    udpEnds,

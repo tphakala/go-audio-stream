@@ -94,7 +94,7 @@ func (c *Client) Describe(ctx context.Context) ([]Track, error) {
 		return nil, cerr
 	}
 
-	tracks, base, described, rerr := resolveTracks(describeURL, resp, c.cfg.Logger)
+	dr, rerr := resolveTracks(describeURL, resp, c.cfg.Logger)
 	if rerr != nil {
 		return nil, rerr
 	}
@@ -113,11 +113,13 @@ func (c *Client) Describe(ctx context.Context) ([]Track, error) {
 		c.mu.Unlock()
 		return nil, terr
 	}
-	c.baseURL = base
-	c.described = described
+	c.baseURL = dr.base
+	c.described = dr.described
+	c.sdpSessionName = dr.name
+	c.sdpTool = dr.tool
 	c.commitState(methodDescribe)
 	c.mu.Unlock()
-	return tracks, nil
+	return dr.tracks, nil
 }
 
 // checkSDPContentType validates a DESCRIBE Content-Type: the base media type
@@ -138,28 +140,41 @@ func checkSDPContentType(value string) error {
 	return nil
 }
 
+// describeResult is everything Describe commits from one DESCRIBE: the public
+// tracks, the internal per-track descriptors, the resolved aggregate control
+// base, and the session identity (SDP s= name and a=tool) surfaced through
+// SessionInfo for diagnostics. Grouping them keeps resolveTracks to a single
+// value return as the fields grew.
+type describeResult struct {
+	tracks    []Track
+	base      string
+	described []describedTrack
+	name      string // SDP session name (s=), "" if absent; untrusted free text
+	tool      string // SDP a=tool, "" if absent; untrusted free text
+}
+
 // resolveTracks resolves the session base URL and builds the public Track slice
 // plus the internal descriptor slice from a DESCRIBE response. The session base
 // is Content-Base (or Content-Location, or the request URL) further resolved
 // against a non-"*" session-level a=control. Each track's control is resolved
 // against that base. logger receives a warning when an out-of-band LATM
 // track's StreamMuxConfig cannot be parsed; see resolveLATMASC.
-func resolveTracks(describeURL string, resp *Response, logger *slog.Logger) ([]Track, string, []describedTrack, error) {
+func resolveTracks(describeURL string, resp *Response, logger *slog.Logger) (describeResult, error) {
 	headerBase, err := ResolveBaseURL(describeURL, resp.Header.Get("Content-Base"), resp.Header.Get("Content-Location"))
 	if err != nil {
-		return nil, "", nil, err
+		return describeResult{}, err
 	}
 
 	session, err := sdp.Parse(resp.Body)
 	if err != nil {
-		return nil, "", nil, err
+		return describeResult{}, err
 	}
 
 	base := headerBase
 	if session.Control != "" && session.Control != "*" {
 		base, err = ResolveControlURL(headerBase, session.Control)
 		if err != nil {
-			return nil, "", nil, err
+			return describeResult{}, err
 		}
 	}
 
@@ -170,7 +185,7 @@ func resolveTracks(describeURL string, resp *Response, logger *slog.Logger) ([]T
 		dt := &dts[i]
 		control, cerr := ResolveControlURL(base, dt.Control)
 		if cerr != nil {
-			return nil, "", nil, cerr
+			return describeResult{}, cerr
 		}
 		codec, latmDepack, latmResolved := resolveLATMASC(dt.Codec, logger)
 		tracks = append(tracks, Track{
@@ -194,7 +209,7 @@ func resolveTracks(describeURL string, resp *Response, logger *slog.Logger) ([]T
 			latmResolved: latmResolved,
 		})
 	}
-	return tracks, base, described, nil
+	return describeResult{tracks: tracks, base: base, described: described, name: session.Name, tool: session.Tool}, nil
 }
 
 // resolveLATMASC extracts the out-of-band AudioSpecificConfig for a

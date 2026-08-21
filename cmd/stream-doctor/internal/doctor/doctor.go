@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	audiostream "github.com/tphakala/go-audio-stream"
@@ -50,6 +51,10 @@ func Run(ctx context.Context, opts Options, prober Prober, out io.Writer, errOut
 		scrubber: newPIIScrubber(opts.URL),
 		report:   Report{RedactedURL: redactTarget(opts.URL), Window: opts.Duration},
 	}
+	// Stream live only in the default (non-report) mode with an interactive
+	// terminal: report mode's artifact is the markdown on stdout, and a
+	// non-terminal out is captured or piped, where in-place progress is noise.
+	r.live = !opts.Report && isTerminal(out)
 	return r.run()
 }
 
@@ -75,6 +80,16 @@ type runner struct {
 	audio     rtsp.Track
 	discarded int
 	frames    []CapturedFrame
+
+	// live is true when the run streams the walkthrough to out as it happens:
+	// the default (non-report) mode with an interactive terminal on out. It
+	// gates the up-front banner and per-step row streaming; a non-terminal out
+	// (a pipe, a file, a test buffer) leaves it false and the batch renderer
+	// emits everything once at the end, byte-identical to before.
+	live bool
+	// connectingShown records that the transient "connecting..." line is on
+	// screen, so the first streamed step row clears it before drawing.
+	connectingShown bool
 }
 
 // run drives the pre-capture steps in order, stopping at the first that fails,
@@ -82,6 +97,7 @@ type runner struct {
 // by the prober's negotiation surface: the RTSP handshake group, or a single
 // HTTP OPEN. The shared capture, finish, listen, and render steps run for both.
 func (r *runner) run() (Result, error) {
+	r.emitLiveBanner()
 	var pre []func() bool
 	switch p := r.prober.(type) {
 	case HTTPProber:
@@ -192,7 +208,11 @@ func (r *runner) describe() bool {
 		}
 	}
 	r.report.Tracks = scrubbed
-	r.okStep(stepDescribe, elapsed, describeDetail(tracks))
+	// The 401 challenge/response happens inside Describe, so the negotiated auth
+	// scheme is known only now. Snapshot the session so the describe detail can
+	// report the login outcome and the report's session block shows the scheme.
+	r.refreshSession()
+	r.okStep(stepDescribe, elapsed, describeDetail(tracks, r.report.Session.AuthScheme))
 	return true
 }
 
@@ -263,7 +283,9 @@ func (r *runner) play() bool {
 // error, so the captured frame count and end reason drive the exit code.
 func (r *runner) capture() {
 	audio := r.audio
+	stopProgress := r.startProgressMeter()
 	cr, _ := r.prober.Collect(r.ctx, audio, r.opts.Duration)
+	stopProgress()
 	// Adopt an in-band codec config the capture learned after Describe (an
 	// MP4A-LATM cpresent=1 AudioSpecificConfig delivered via OnCodecUpdate), so
 	// the tracks block renders its asc and the listen check can decode it.
@@ -295,7 +317,9 @@ func (r *runner) capture() {
 	if ok {
 		detail = fmt.Sprintf("%d frames, %s", len(cr.Frames), cr.Reason)
 	}
-	r.report.Steps = append(r.report.Steps, HandshakeStep{Name: stepCapture, OK: ok, Elapsed: cr.Elapsed, Detail: detail})
+	// A successful CAPTURE step is hidden from the handshake block (its detail
+	// is the capture statistics block); a failed one streams as a row.
+	r.addStep(HandshakeStep{Name: stepCapture, OK: ok, Elapsed: cr.Elapsed, Detail: detail})
 }
 
 // applyLearnedCodec overlays a codec the capture learned after Describe onto
@@ -432,15 +456,60 @@ func sanitizeWriteErr(err error) string {
 	return "wav write failed: " + err.Error()
 }
 
-// render writes the walkthrough (and, under --report, the Markdown report)
-// to the configured writers.
+// render writes the run's authoritative output, exactly once, to out. Report
+// mode writes the Markdown report; the live mode has already streamed the
+// header and every step row, so it emits only the trailing sections here; the
+// batch mode (a non-terminal out) writes the whole walkthrough in one call.
+//
+// Report mode no longer also writes the walkthrough to errOut: emitting both a
+// fenced Markdown report and a plain walkthrough duplicated the whole run on
+// screen. The artifact is the report on stdout (redirect it to a file); errOut
+// carries only the ephemeral banner and capture meter.
 func (r *runner) render() {
-	if r.opts.Report {
+	switch {
+	case r.opts.Report:
 		_, _ = io.WriteString(r.out, renderReport(r.report, r.env))
-		renderWalkthrough(r.errOut, r.report, r.env)
+	case r.live:
+		var b strings.Builder
+		renderTrailingTo(&b, &r.report)
+		_, _ = io.WriteString(r.out, b.String())
+	default:
+		renderWalkthrough(r.out, r.report, r.env)
+	}
+}
+
+// emitLiveBanner streams the header and the "handshake" section label up front,
+// the instant the run starts, so a slow connect never looks frozen. It leaves a
+// transient "connecting..." line that the first streamed step row clears. It is
+// a no-op unless the run is live.
+func (r *runner) emitLiveBanner() {
+	if !r.live {
 		return
 	}
-	renderWalkthrough(r.out, r.report, r.env)
+	var b strings.Builder
+	renderHeaderTo(&b, &r.report, r.env)
+	fmt.Fprintln(&b, "handshake")
+	b.WriteString("  connecting...\r")
+	_, _ = io.WriteString(r.out, b.String())
+	r.connectingShown = true
+}
+
+// addStep records a handshake step and, when the run is live and the step is
+// not hidden, streams its row to out immediately (clearing the transient
+// "connecting..." line before the first one). The batch and report renderers
+// read the recorded steps later; only the live path emits here.
+func (r *runner) addStep(s HandshakeStep) {
+	r.report.Steps = append(r.report.Steps, s)
+	if !r.live || stepHidden(&s) {
+		return
+	}
+	var b strings.Builder
+	if r.connectingShown {
+		b.WriteString("\r\033[K") // clear the transient connecting line
+		r.connectingShown = false
+	}
+	renderStepRow(&b, &s)
+	_, _ = io.WriteString(r.out, b.String())
 }
 
 // refreshSession snapshots the negotiated session into the report and scrubs
@@ -449,12 +518,18 @@ func (r *runner) render() {
 // fence. Called after each step that can advance the negotiated details.
 func (r *runner) refreshSession() {
 	r.report.Session = r.rtsp.SessionInfo()
+	// Server, SDP session name, and SDP tool are all camera-controlled free
+	// text that both renderers display, so scrub each once here at the boundary
+	// so a hostile stream cannot leak PII or break the report's code fence.
 	r.report.Session.Server = r.scrubber.scrubString(r.report.Session.Server)
+	r.report.Session.SDPSessionName = r.scrubber.scrubString(r.report.Session.SDPSessionName)
+	r.report.Session.SDPTool = r.scrubber.scrubString(r.report.Session.SDPTool)
 }
 
-// okStep appends a successful handshake step.
+// okStep records a successful handshake step (streamed live when the run is
+// live).
 func (r *runner) okStep(name string, elapsed time.Duration, detail string) {
-	r.report.Steps = append(r.report.Steps, HandshakeStep{Name: name, OK: true, Elapsed: elapsed, Detail: detail})
+	r.addStep(HandshakeStep{Name: name, OK: true, Elapsed: elapsed, Detail: detail})
 }
 
 // failStep appends a failed handshake step and records the phase, result
@@ -463,10 +538,21 @@ func (r *runner) okStep(name string, elapsed time.Duration, detail string) {
 // agrees with mapExit's classification (ExitAuth), whichever step the 401
 // surfaced on.
 func (r *runner) failStep(name string, elapsed time.Duration, phase Phase, phrase string, err error) {
-	if isAuthErr(err) {
+	detail := r.scrubber.scrubError(err)
+	var hint string
+	// A recognized failure gets a plain-language reason, a specific top-line
+	// result phrase, and an optional hint, all classifier-authored and
+	// host-free. An unrecognized one keeps the caller's generic phrase and the
+	// scrubbed raw error, with the auth override preserved so a 401 the taxonomy
+	// somehow missed still reads as an auth failure and agrees with mapExit.
+	if c, ok := classifyFailure(name, err, r.opts); ok {
+		phrase = c.result
+		detail = sanitizeLine(c.reason)
+		hint = sanitizeLine(c.hint)
+	} else if isAuthErr(err) {
 		phrase = authFailedPhrase
 	}
-	r.report.Steps = append(r.report.Steps, HandshakeStep{Name: name, Elapsed: elapsed, Detail: r.scrubber.scrubError(err)})
+	r.addStep(HandshakeStep{Name: name, Elapsed: elapsed, Detail: detail, Hint: hint})
 	r.report.Result = phrase
 	r.res.Phase = phase
 	r.termErr = err

@@ -28,6 +28,18 @@ type Prober interface {
 	Close() error
 }
 
+// captureProgressReporter is the optional capability a Prober may implement to
+// surface live capture counters while its Collect is blocked on the window. The
+// production rtspProber and httpProber implement it; the runner type-asserts
+// for it and only draws a live progress meter when the prober supports it and
+// the meter's writer is an interactive terminal. Test fakes need not implement
+// it, so the engine's golden output stays byte-stable. Progress must be safe to
+// call concurrently with an in-flight Collect: both production implementations
+// read only atomics and mutex-guarded state.
+type captureProgressReporter interface {
+	Progress() CaptureProgress
+}
+
 // RTSPProber is the RTSP negotiation surface: the timed DIAL, DESCRIBE, SETUP,
 // PLAY handshake plus its session snapshot. rtspProber and the test fakeProber
 // implement it.
@@ -103,6 +115,15 @@ func (s *frameSink) onFrame(f audiostream.Frame) {
 		return
 	}
 	s.truncated = true
+}
+
+// count returns the number of frames captured so far under the sink lock. It
+// is the cheap, allocation-free read the live progress meter polls each second,
+// distinct from snapshot which copies the whole slice for the final report.
+func (s *frameSink) count() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.frames)
 }
 
 // snapshot returns an owned copy of the frames captured so far and the
@@ -228,6 +249,24 @@ func (p *rtspProber) Setup(ctx context.Context, track rtsp.Track, opts rtsp.Setu
 // Play starts the stream.
 func (p *rtspProber) Play(ctx context.Context) error {
 	return p.client.Play(ctx)
+}
+
+// Progress reports the live capture counters for the audio target track,
+// polled by the runner's progress meter each second during Collect. It reads
+// the shared sink's frame count and the client's atomic Stats, both safe to
+// touch while Wait is blocked. Before Dial has created the client, or before
+// Setup has recorded the audio track, only the (zero) frame count is known.
+func (p *rtspProber) Progress() CaptureProgress {
+	prog := CaptureProgress{Frames: p.sink.count()}
+	if p.client == nil {
+		return prog
+	}
+	//nolint:gosec // audioTrackID was stored from an int track ID; the round trip through int32 is exact.
+	ts := p.client.Stats().Tracks[int(p.audioTrackID.Load())]
+	prog.Packets = ts.Packets
+	prog.Lost = ts.SeqGaps
+	prog.Malformed = ts.Malformed
+	return prog
 }
 
 // SessionInfo returns the negotiated session snapshot known so far, or the zero

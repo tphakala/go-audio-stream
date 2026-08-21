@@ -33,6 +33,12 @@ func TestParseReolink(t *testing.T) {
 	if s.Control != "rtsp://192.0.2.10:554/h264Preview_01_main/" {
 		t.Errorf("session control = %q", s.Control)
 	}
+	if s.Name != "Media Presentation" {
+		t.Errorf("session name = %q, want %q", s.Name, "Media Presentation")
+	}
+	if s.Tool != "" {
+		t.Errorf("session tool = %q, want empty (fixture has no a=tool)", s.Tool)
+	}
 	if len(s.Media) != 2 {
 		t.Fatalf("media count = %d, want 2", len(s.Media))
 	}
@@ -70,6 +76,33 @@ func TestParseReolink(t *testing.T) {
 	}
 	if fm := a.FMTPs[97]; !strings.Contains(fm, "config=1408") {
 		t.Errorf("media[1] fmtp = %q", fm)
+	}
+}
+
+// TestParseSessionIdentity covers the session name (s=) and tool (a=tool:)
+// capture with an inline body modeled on a real Reolink camera, whose tool line
+// identifies the Baichuan streaming stack. A per-media a=tool must not overwrite
+// the session-level one.
+func TestParseSessionIdentity(t *testing.T) {
+	t.Parallel()
+	body := "v=0\r\n" +
+		"o=- 1787316399865599 1 IN IP4 192.0.2.10\r\n" +
+		"s=Session streamed by \"preview\"\r\n" +
+		"t=0 0\r\n" +
+		"a=tool:BC Streaming Media v202210012022.10.01\r\n" +
+		"a=control:*\r\n" +
+		"m=audio 0 RTP/AVP 97\r\n" +
+		"a=tool:should-be-ignored\r\n" +
+		"a=rtpmap:97 MPEG4-GENERIC/16000/1\r\n"
+	s, err := sdp.Parse([]byte(body))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if s.Name != `Session streamed by "preview"` {
+		t.Errorf("session name = %q", s.Name)
+	}
+	if s.Tool != "BC Streaming Media v202210012022.10.01" {
+		t.Errorf("session tool = %q, want the session-level a=tool", s.Tool)
 	}
 }
 

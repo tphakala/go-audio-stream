@@ -120,6 +120,24 @@ func (p *httpProber) Collect(ctx context.Context, track rtsp.Track, window time.
 	}, nil
 }
 
+// Progress reports the live capture counters for the single synthesized track
+// (ID 0), polled by the runner's progress meter each second during Collect. It
+// reads the shared sink's frame count and the client's Stats, both safe to
+// touch while Wait is blocked. Before Open has created the client only the
+// (zero) frame count is known. An HTTP progressive source does not meter RTP
+// packets, so Frames is its meaningful liveness signal.
+func (p *httpProber) Progress() CaptureProgress {
+	prog := CaptureProgress{Frames: p.sink.count()}
+	if p.client == nil {
+		return prog
+	}
+	ts := p.client.Stats().Tracks[0]
+	prog.Packets = ts.Packets
+	prog.Lost = ts.SeqGaps
+	prog.Malformed = ts.Malformed
+	return prog
+}
+
 // Close ends the stream; idempotent. Safe before Open has created the client,
 // so a deferred Close after a failed Open does not panic.
 func (p *httpProber) Close() error {

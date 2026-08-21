@@ -37,6 +37,13 @@ func Parse(body []byte) (*Session, error) {
 		val := line[2:]
 
 		switch typ {
+		case 's':
+			// The session name is session-level and appears once; keep the
+			// first, ignore any stray later s= line. Stored verbatim as
+			// untrusted free text.
+			if s.Name == "" {
+				s.Name = val
+			}
 		case 'm':
 			if len(s.Media) >= MaxMediaSections {
 				return nil, ErrTooManyMedia
@@ -58,8 +65,8 @@ func Parse(body []byte) (*Session, error) {
 			}
 			parseAttribute(val, s, current)
 		default:
-			// v, o, s, c, t, b, e, and unknown types carry nothing this
-			// parser needs.
+			// v, o, c, t, b, e, and unknown types carry nothing this parser
+			// needs (s is handled above, a below).
 		}
 	}
 
@@ -137,6 +144,12 @@ func parseAttribute(val string, s *Session, current *Media) {
 			return
 		}
 		parseFMTP(value, current)
+	case "tool":
+		// Session-level only; a per-media a=tool is not standard and is
+		// ignored. Keep the first, stored verbatim as untrusted free text.
+		if current == nil && s.Tool == "" {
+			s.Tool = value
+		}
 	default:
 		// unknown attribute names are ignored
 	}

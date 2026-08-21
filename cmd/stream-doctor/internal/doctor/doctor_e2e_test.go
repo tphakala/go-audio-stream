@@ -265,8 +265,11 @@ func TestRunListenWriteFailureRedactsPath(t *testing.T) {
 }
 
 // TestRunReportModeSeparation confirms the --report stream contract: the
-// markdown report goes to out and the handshake walkthrough goes to errOut,
-// never mixed into the same stream.
+// markdown report goes to out, and errOut carries no duplicate plain-text
+// walkthrough (that duplication, a fenced report on stdout plus a plain
+// walkthrough on stderr, was the reported double-output). errOut is reserved
+// for the ephemeral banner and capture meter, neither of which a non-terminal
+// writer (this test's buffer) receives.
 func TestRunReportModeSeparation(t *testing.T) {
 	t.Parallel()
 	f := &fakeProber{
@@ -294,12 +297,10 @@ func TestRunReportModeSeparation(t *testing.T) {
 	if !strings.Contains(out.String(), reportFence) {
 		t.Errorf("stdout does not contain the fenced report:\n%s", out.String())
 	}
-	if !strings.Contains(errOut.String(), "handshake") {
-		t.Errorf("stderr does not contain the walkthrough:\n%s", errOut.String())
-	}
-	// The walkthrough is never fenced, so the fence in stderr would mean the
-	// report leaked onto the walkthrough stream.
-	if strings.Contains(errOut.String(), reportFence) {
-		t.Errorf("stderr contains the report fence, want the walkthrough only:\n%s", errOut.String())
+	// No duplicate walkthrough on stderr: a non-terminal errOut (this buffer)
+	// receives neither the banner nor the meter, so it stays empty. In
+	// particular it must not carry a second, plain-text copy of the run.
+	if got := errOut.String(); got != "" {
+		t.Errorf("stderr is not empty in report mode, want no duplicate output:\n%s", got)
 	}
 }

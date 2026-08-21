@@ -60,6 +60,9 @@ func reportHandshake(b *strings.Builder, r *Report) {
 		// The reason is on its own line, not a table cell, so a long error
 		// string stays readable. Detail was scrubbed at failStep.
 		fmt.Fprintf(b, "failure: %s - %s\n", failed.Name, failed.Detail)
+		if failed.Hint != "" {
+			fmt.Fprintf(b, "hint: %s\n", failed.Hint)
+		}
 	}
 }
 
@@ -79,6 +82,12 @@ func reportSession(b *strings.Builder, r *Report) {
 	fmt.Fprintln(b, "session")
 	if r.Session.Server != "" {
 		fmt.Fprintf(b, "  server: %s\n", r.Session.Server)
+	}
+	if r.Session.SDPSessionName != "" {
+		fmt.Fprintf(b, "  sdp-name: %s\n", r.Session.SDPSessionName)
+	}
+	if r.Session.SDPTool != "" {
+		fmt.Fprintf(b, "  sdp-tool: %s\n", r.Session.SDPTool)
 	}
 	fmt.Fprintf(b, "  auth: %s\n", r.Session.AuthScheme)
 	setupOK := hasStepOK(r.Steps, stepSetup)

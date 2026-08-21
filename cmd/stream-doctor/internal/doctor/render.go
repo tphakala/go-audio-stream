@@ -164,15 +164,52 @@ func writeTracksSection(b *strings.Builder, tracks []rtsp.Track) {
 //nolint:gocritic // hugeParam: Report/Env are the documented rendering signature, called once per run.
 func renderWalkthrough(w io.Writer, r Report, env Env) {
 	var b strings.Builder
-	fmt.Fprintf(&b, "stream-doctor %s (%s/%s)\n", env.Version, env.OS, env.Arch)
-	fmt.Fprintf(&b, "target: %s\n", r.RedactedURL)
-	fmt.Fprintln(&b)
+	renderHeaderTo(&b, &r, env)
 	renderHandshake(&b, &r)
-	writeTracksSection(&b, r.Tracks)
-	writeNoAudioSection(&b, &r)
-	renderCapture(&b, &r)
-	writeListenSection(&b, &r)
+	renderTrailingTo(&b, &r)
 	_, _ = io.WriteString(w, b.String())
+}
+
+// renderHeaderTo writes the two-line header (version/platform and target)
+// followed by a blank line. Split out so the live path can stream it up front,
+// before any step has run, while the batch path composes it inline.
+func renderHeaderTo(b *strings.Builder, r *Report, env Env) {
+	fmt.Fprintf(b, "stream-doctor %s (%s/%s)\n", env.Version, env.OS, env.Arch)
+	fmt.Fprintf(b, "target: %s\n", r.RedactedURL)
+	fmt.Fprintln(b)
+}
+
+// renderTrailingTo writes everything after the handshake block: the tracks
+// summary, the no-audio notice, the capture statistics, and the listen result.
+// Split out so the live path can emit it once at the end, after the step rows
+// have already streamed.
+func renderTrailingTo(b *strings.Builder, r *Report) {
+	writeTracksSection(b, r.Tracks)
+	renderIdentity(b, &r.Session)
+	writeNoAudioSection(b, r)
+	renderCapture(b, r)
+	writeListenSection(b, r)
+}
+
+// renderIdentity writes a best-effort camera-identity block from the SDP the
+// DESCRIBE returned: the session name (s=) and the tool (a=tool:), the latter
+// often naming the streaming stack and version. Each line appears only when the
+// stream advertised it, and the whole block is omitted when it advertised
+// neither, so a terse camera adds no noise. Both values are server-controlled
+// and were scrubbed at the orchestration boundary. The RTSP Server header is
+// not repeated here; it already shows in the DIAL detail.
+func renderIdentity(b *strings.Builder, si *rtsp.SessionInfo) {
+	if si.SDPSessionName == "" && si.SDPTool == "" {
+		return
+	}
+	fmt.Fprintln(b)
+	fmt.Fprintln(b, "identity")
+	if si.SDPSessionName != "" {
+		fmt.Fprintf(b, "  %-10s%s\n", "sdp name", si.SDPSessionName)
+	}
+	if si.SDPTool != "" {
+		fmt.Fprintf(b, "  %-10s%s\n", "sdp tool", si.SDPTool)
+	}
 }
 
 // renderHandshake writes the "handshake" block. A successful CAPTURE step is
@@ -182,12 +219,35 @@ func renderHandshake(b *strings.Builder, r *Report) {
 	fmt.Fprintln(b, "handshake")
 	for i := range r.Steps {
 		s := r.Steps[i]
-		if s.Name == stepCapture && s.OK {
+		if stepHidden(&s) {
 			continue
 		}
-		fmt.Fprintf(b, stepRowFmt, s.Name, stepStatus(s.OK), formatElapsed(s.Elapsed), s.Detail)
+		renderStepRow(b, &s)
 	}
 }
+
+// stepHidden reports whether a step is omitted from the handshake block: a
+// successful CAPTURE step, whose detail is the dedicated capture block. It is
+// the single source of truth for the skip rule, shared by the batch renderer
+// and the live per-step streamer so they agree on which rows appear.
+func stepHidden(s *HandshakeStep) bool {
+	return s.Name == stepCapture && s.OK
+}
+
+// renderStepRow writes one handshake step row and, when present, its hint
+// continuation line. Shared by the batch renderer and the live streamer so a
+// row looks identical whichever path emits it.
+func renderStepRow(b *strings.Builder, s *HandshakeStep) {
+	fmt.Fprintf(b, stepRowFmt, s.Name, stepStatus(s.OK), formatElapsed(s.Elapsed), s.Detail)
+	if s.Hint != "" {
+		fmt.Fprintf(b, "%shint: %s\n", hintIndent, s.Hint)
+	}
+}
+
+// hintIndent aligns a hint continuation line under the detail column of a
+// failed handshake row: 2 leading spaces + the 11-wide name + "FAIL" (4) +
+// the 8-wide elapsed + 3 spaces = 28 columns.
+const hintIndent = "                            " // 28 spaces
 
 // writeNoAudioSection writes the no-audio-track notice when Describe succeeded
 // but no audio track was present. Shared by the report and the walkthrough.
@@ -370,8 +430,12 @@ func openDetail(track rtsp.Track, server string) string {
 	return d
 }
 
-// describeDetail counts the discovered tracks by media kind.
-func describeDetail(tracks []rtsp.Track) string {
+// describeDetail counts the discovered tracks by media kind and reports the
+// login outcome. The 401 challenge is answered inside DESCRIBE, so this is the
+// step that makes authentication visible: a scheme was negotiated ("Digest auth
+// OK") or the stream was open ("no auth required"). auth is the scheme snapshot
+// taken right after Describe returned.
+func describeDetail(tracks []rtsp.Track, auth rtsp.AuthScheme) string {
 	var audio, video, other int
 	for i := range tracks {
 		switch tracks[i].Media {
@@ -393,10 +457,22 @@ func describeDetail(tracks []rtsp.Track) string {
 	if other > 0 {
 		parts = append(parts, fmt.Sprintf("%d other track%s", other, pluralSuffix(other)))
 	}
-	if len(parts) == 0 {
-		return "no tracks"
+	base := "no tracks"
+	if len(parts) > 0 {
+		base = strings.Join(parts, ", ")
 	}
-	return strings.Join(parts, ", ")
+	return base + ", " + authOutcome(auth)
+}
+
+// authOutcome renders the login result for the describe detail: the negotiated
+// scheme when the stream required authentication, or a plain note that it did
+// not. AuthNone is the zero value, so an anonymous stream reads "no auth
+// required".
+func authOutcome(auth rtsp.AuthScheme) string {
+	if auth == rtsp.AuthNone {
+		return "no auth required"
+	}
+	return fmt.Sprintf("%s auth OK", auth)
 }
 
 // setupDetail summarizes the target track, its negotiated channels, and any
