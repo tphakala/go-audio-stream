@@ -1,6 +1,9 @@
 package httptarget
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 // Shared literals, extracted so the table rows do not trip goconst.
 const (
@@ -148,5 +151,24 @@ func TestParseErrors(t *testing.T) {
 				t.Fatalf("Parse(%q, %q, %q) = nil error, want non-nil", tt.rawURL, tt.cfgUser, tt.cfgPass)
 			}
 		})
+	}
+}
+
+func TestParseURLErrorDoesNotLeakCredentials(t *testing.T) {
+	// url.Parse returns a *url.Error whose Error() embeds the whole input URL,
+	// userinfo included. A malformed URL carrying credentials must not leak them
+	// through the returned error, or the wrapped error reaches caller logs and
+	// defeats the never-logged guarantee on the password. The DEL control byte
+	// makes url.Parse fail while the userinfo is present.
+	const secret = "s3cretp4ss"
+	_, err := Parse("http://user:"+secret+"@cam.local/\x7f", "", "")
+	if err == nil {
+		t.Fatal("Parse of a control-character URL = nil error, want non-nil")
+	}
+	if strings.Contains(err.Error(), secret) {
+		t.Fatalf("error text leaked the credential: %q", err.Error())
+	}
+	if strings.Contains(err.Error(), "cam.local") {
+		t.Fatalf("error text leaked the URL host: %q", err.Error())
 	}
 }

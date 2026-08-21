@@ -46,7 +46,15 @@ func Parse(rawURL, cfgUser, cfgPass string) (Target, error) {
 	}
 	u, err := url.Parse(raw)
 	if err != nil {
-		return Target{}, err
+		// url.Error.Error() prints the whole input URL verbatim, userinfo included,
+		// so a URL carrying credentials would leak them through the wrapped error
+		// into caller logs, defeating the never-logged guarantee on the password.
+		// Return only the underlying cause, never the URL text.
+		var uerr *url.Error
+		if errors.As(err, &uerr) {
+			return Target{}, fmt.Errorf("malformed URL: %w", uerr.Err)
+		}
+		return Target{}, errors.New("malformed URL")
 	}
 
 	var tlsOn bool
