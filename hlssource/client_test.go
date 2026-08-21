@@ -1,0 +1,425 @@
+package hlssource
+
+import (
+	"bytes"
+	"context"
+	"errors"
+	"net/http"
+	"net/http/httptest"
+	"sync"
+	"testing"
+	"time"
+
+	audiostream "github.com/tphakala/go-audio-stream"
+)
+
+// Repeated segment paths, factored to satisfy goconst.
+const (
+	segURL  = "/s.ts"
+	segURL0 = "/s0.ts"
+	segURL1 = "/s1.ts"
+	segRel0 = "s0.ts"
+	segRel1 = "s1.ts"
+)
+
+// fastReload shrinks the live-reload cadence for deterministic tests and returns
+// a cleanup that restores the production cadence.
+func fastReload(t *testing.T) {
+	t.Helper()
+	prev := reloadDelayFor
+	reloadDelayFor = func(_ time.Duration, _ bool) time.Duration { return 5 * time.Millisecond }
+	t.Cleanup(func() { reloadDelayFor = prev })
+}
+
+// hlsServer is an in-process HLS origin. It serves segments from a fixed map and
+// a playlist from a function of the reload count, so a live test can evolve it.
+type hlsServer struct {
+	mu       sync.Mutex
+	segments map[string][]byte
+	playlist func(reloadN int) (body string, status int)
+	reloads  int
+}
+
+func (h *hlsServer) start(t *testing.T) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if body, ok := h.segment(r.URL.Path); ok {
+			w.Header().Set("Content-Type", "video/mp2t")
+			_, _ = w.Write(body)
+			return
+		}
+		h.mu.Lock()
+		h.reloads++
+		n := h.reloads
+		fn := h.playlist
+		h.mu.Unlock()
+		body, status := fn(n)
+		w.Header().Set("Content-Type", "application/vnd.apple.mpegurl")
+		w.WriteHeader(status)
+		_, _ = w.Write([]byte(body))
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+func (h *hlsServer) segment(path string) ([]byte, bool) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	b, ok := h.segments[path]
+	return b, ok
+}
+
+// collector accumulates delivered frames for assertions after Wait.
+type collector struct {
+	mu     sync.Mutex
+	frames []audiostream.Frame
+	datas  [][]byte
+}
+
+//nolint:gocritic // OnFrame is func(audiostream.Frame); the value parameter is required by that signature.
+func (c *collector) onFrame(f audiostream.Frame) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.datas = append(c.datas, append([]byte(nil), f.Data...))
+	c.frames = append(c.frames, f)
+}
+
+func (c *collector) count() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return len(c.frames)
+}
+
+// vodServer builds a server hosting a VOD playlist referencing segs (path ->
+// TS bytes) in order with an ENDLIST.
+func vodServer(t *testing.T, order []string, segs map[string][]byte) *httptest.Server {
+	t.Helper()
+	specs := make([]segSpec, len(order))
+	for i, p := range order {
+		specs[i] = segSpec{uri: p[1:], duration: 1.0} // strip leading "/" for a relative URI
+	}
+	body := buildMediaPlaylist(1, 0, true, specs)
+	h := &hlsServer{
+		segments: segs,
+		playlist: func(int) (string, int) { return body, http.StatusOK },
+	}
+	return h.start(t)
+}
+
+func TestOpenResolvesASC(t *testing.T) {
+	stream, _ := adtsStream(3, 40)
+	seg := buildTSSegment(stream, 0x1000, 0x0100)
+	srv := vodServer(t, []string{"/seg0.ts"}, map[string][]byte{"/seg0.ts": seg})
+	c, err := Open(context.Background(), Config{URL: srv.URL + "/vod.m3u8"})
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer func() { _ = c.Close() }()
+	f := c.Format()
+	aac, ok := f.Codec.(audiostream.CodecAAC)
+	if !ok {
+		t.Fatalf("codec = %T, want CodecAAC", f.Codec)
+	}
+	if !bytes.Equal(aac.AudioSpecificConfig, wantASC) {
+		t.Errorf("ASC = %x, want %x", aac.AudioSpecificConfig, wantASC)
+	}
+	if f.Kind != audiostream.KindCompressed || f.SampleRate != 0 || f.Channels != 0 {
+		t.Errorf("format = %+v, want KindCompressed with zero rate/channels", f)
+	}
+}
+
+func TestVODDeliversAllSegmentsThenEnds(t *testing.T) {
+	var wantAUs [][]byte
+	segs := map[string][]byte{}
+	order := []string{segURL0, segURL1, "/s2.ts"}
+	for i, p := range order {
+		stream, aus := adtsStream(2, 40+i) // distinct payload lengths per segment
+		segs[p] = buildTSSegment(stream, 0x1000, 0x0100)
+		wantAUs = append(wantAUs, aus...)
+	}
+	srv := vodServer(t, order, segs)
+	col := &collector{}
+	c, err := Open(context.Background(), Config{URL: srv.URL + "/vod.m3u8", OnFrame: col.onFrame})
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if err := c.Wait(context.Background()); !errors.Is(err, ErrStreamEnded) {
+		t.Fatalf("Wait = %v, want ErrStreamEnded", err)
+	}
+	if col.count() != len(wantAUs) {
+		t.Fatalf("delivered %d AUs, want %d", col.count(), len(wantAUs))
+	}
+	// PTS strictly increasing from 0.
+	var prev time.Duration = -1
+	for i, f := range col.frames {
+		if f.PTS <= prev && i > 0 {
+			t.Errorf("frame %d PTS %v not increasing (prev %v)", i, f.PTS, prev)
+		}
+		prev = f.PTS
+	}
+	if col.frames[0].PTS != 0 {
+		t.Errorf("first PTS = %v, want 0", col.frames[0].PTS)
+	}
+	st := c.Stats().Tracks[0]
+	if st.Packets != uint64(len(wantAUs)) {
+		t.Errorf("Stats packets = %d, want %d", st.Packets, len(wantAUs))
+	}
+}
+
+func TestMasterSelectsMediaPlaylist(t *testing.T) {
+	stream, aus := adtsStream(2, 40)
+	seg := buildTSSegment(stream, 0x1000, 0x0100)
+	mediaBody := buildMediaPlaylist(1, 0, true, []segSpec{{uri: "seg.ts", duration: 1.0}})
+	master := "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=128000\nmedia.m3u8\n"
+	h := &hlsServer{
+		segments: map[string][]byte{"/seg.ts": seg},
+		playlist: func(n int) (string, int) {
+			// First request is the master, subsequent are the media playlist.
+			if n == 1 {
+				return master, http.StatusOK
+			}
+			return mediaBody, http.StatusOK
+		},
+	}
+	srv := h.start(t)
+	col := &collector{}
+	c, err := Open(context.Background(), Config{URL: srv.URL + "/master.m3u8", OnFrame: col.onFrame})
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if err := c.Wait(context.Background()); !errors.Is(err, ErrStreamEnded) {
+		t.Fatalf("Wait = %v, want ErrStreamEnded", err)
+	}
+	if col.count() != len(aus) {
+		t.Errorf("delivered %d AUs via master, want %d", col.count(), len(aus))
+	}
+}
+
+func TestLiveReloadDeliversNewSegments(t *testing.T) {
+	fastReload(t)
+	s0, au0 := adtsStream(2, 40)
+	s1, au1 := adtsStream(2, 45)
+	segs := map[string][]byte{
+		segURL0: buildTSSegment(s0, 0x1000, 0x0100),
+		segURL1: buildTSSegment(s1, 0x1000, 0x0100),
+	}
+	v1 := buildMediaPlaylist(1, 0, false, []segSpec{{uri: segRel0, duration: 1.0}})
+	v2 := buildMediaPlaylist(1, 0, true, []segSpec{
+		{uri: segRel0, duration: 1.0}, {uri: segRel1, duration: 1.0},
+	})
+	h := &hlsServer{
+		segments: segs,
+		playlist: func(n int) (string, int) {
+			if n == 1 {
+				return v1, http.StatusOK
+			}
+			return v2, http.StatusOK // reload gains s1 and ENDLIST
+		},
+	}
+	srv := h.start(t)
+	col := &collector{}
+	c, err := Open(context.Background(), Config{URL: srv.URL + "/live.m3u8", OnFrame: col.onFrame})
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if err := c.Wait(context.Background()); !errors.Is(err, ErrStreamEnded) {
+		t.Fatalf("Wait = %v, want ErrStreamEnded", err)
+	}
+	want := len(au0) + len(au1)
+	if col.count() != want {
+		t.Fatalf("delivered %d AUs across reload, want %d", col.count(), want)
+	}
+}
+
+func TestExtXGapAdvancesAndSignalsLoss(t *testing.T) {
+	s0, au0 := adtsStream(2, 40)
+	s2, au2 := adtsStream(2, 50)
+	segs := map[string][]byte{
+		segURL0:  buildTSSegment(s0, 0x1000, 0x0100),
+		"/s2.ts": buildTSSegment(s2, 0x1000, 0x0100),
+	}
+	body := buildMediaPlaylist(1, 0, true, []segSpec{
+		{uri: segRel0, duration: 1.0},
+		{uri: "gap.ts", duration: 1.0, gap: true},
+		{uri: "s2.ts", duration: 1.0},
+	})
+	h := &hlsServer{segments: segs, playlist: func(int) (string, int) { return body, http.StatusOK }}
+	srv := h.start(t)
+	col := &collector{}
+	c, err := Open(context.Background(), Config{URL: srv.URL + "/vod.m3u8", OnFrame: col.onFrame})
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if err := c.Wait(context.Background()); !errors.Is(err, ErrStreamEnded) {
+		t.Fatalf("Wait = %v, want ErrStreamEnded", err)
+	}
+	if col.count() != len(au0)+len(au2) {
+		t.Fatalf("delivered %d AUs, want %d (gap not fetched)", col.count(), len(au0)+len(au2))
+	}
+	// The first frame after the gap must carry the loss as SeqGap > 0.
+	firstAfterGap := col.frames[len(au0)]
+	if firstAfterGap.SeqGap == 0 {
+		t.Error("frame after gap has SeqGap 0, want > 0")
+	}
+}
+
+func TestNilOnFrameStillCounts(t *testing.T) {
+	stream, aus := adtsStream(3, 40)
+	seg := buildTSSegment(stream, 0x1000, 0x0100)
+	srv := vodServer(t, []string{segURL}, map[string][]byte{segURL: seg})
+	c, err := Open(context.Background(), Config{URL: srv.URL + "/vod.m3u8"})
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	_ = c.Wait(context.Background())
+	if got := c.Stats().Tracks[0].Packets; got != uint64(len(aus)) {
+		t.Errorf("Stats packets with nil OnFrame = %d, want %d", got, len(aus))
+	}
+}
+
+func TestCloseFromInsideOnFrame(t *testing.T) {
+	stream, _ := adtsStream(8, 40)
+	seg := buildTSSegment(stream, 0x1000, 0x0100)
+	srv := vodServer(t, []string{segURL}, map[string][]byte{segURL: seg})
+	var c *Client
+	// started gates the callback until c is assigned, so reading c inside OnFrame
+	// (on the reader goroutine) happens-after the assignment: no data race.
+	started := make(chan struct{})
+	closed := make(chan struct{})
+	var once sync.Once
+	cfg := Config{URL: srv.URL + "/vod.m3u8", OnFrame: func(audiostream.Frame) {
+		<-started
+		once.Do(func() { _ = c.Close(); close(closed) })
+	}}
+	var err error
+	c, err = Open(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	close(started)
+	<-closed
+	if werr := c.Wait(context.Background()); werr == nil {
+		t.Error("Wait returned nil after Close from OnFrame")
+	}
+}
+
+func TestWatchdogFiresOnStalledSegment(t *testing.T) {
+	stream, _ := adtsStream(2, 40)
+	seg := buildTSSegment(stream, 0x1000, 0x0100)
+	// The playlist references a second segment the server never answers (it
+	// blocks), so no segment read completes and the read-idle watchdog fires.
+	block := make(chan struct{})
+	t.Cleanup(func() { close(block) })
+	body := buildMediaPlaylist(1, 0, true, []segSpec{
+		{uri: segRel0, duration: 1.0}, {uri: "stall.ts", duration: 1.0},
+	})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/s0.ts":
+			w.Header().Set("Content-Type", "video/mp2t")
+			_, _ = w.Write(seg)
+		case "/stall.ts":
+			// Block until the client cancels the request (the watchdog firing) or
+			// the test ends, so the server handler unblocks and Close can complete.
+			select {
+			case <-block:
+			case <-r.Context().Done():
+			}
+		default:
+			w.Header().Set("Content-Type", "application/vnd.apple.mpegurl")
+			_, _ = w.Write([]byte(body))
+		}
+	}))
+	t.Cleanup(srv.Close)
+	c, err := Open(context.Background(), Config{
+		URL:      srv.URL + "/vod.m3u8",
+		ReadIdle: 100 * time.Millisecond,
+		Timeout:  5 * time.Second,
+	})
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if werr := c.Wait(context.Background()); !errors.Is(werr, audiostream.ErrReadTimeout) {
+		t.Errorf("Wait = %v, want ErrReadTimeout", werr)
+	}
+}
+
+func TestOpenInvalidURL(t *testing.T) {
+	for _, u := range []string{"", "ftp://h/x.m3u8", "http://h:99999/x.m3u8"} {
+		if _, err := Open(context.Background(), Config{URL: u}); !errors.Is(err, ErrInvalidURL) {
+			t.Errorf("Open(%q) = %v, want ErrInvalidURL", u, err)
+		}
+	}
+}
+
+func TestOpenBadStatus(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	t.Cleanup(srv.Close)
+	_, err := Open(context.Background(), Config{URL: srv.URL + "/missing.m3u8"})
+	var se *StatusError
+	if !errors.As(err, &se) || se.Code != http.StatusNotFound {
+		t.Errorf("Open = %v, want *StatusError 404", err)
+	}
+	if !errors.Is(err, ErrBadStatus) {
+		t.Errorf("Open error does not match ErrBadStatus: %v", err)
+	}
+}
+
+func TestOpenMalformedPlaylist(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("this is not a playlist"))
+	}))
+	t.Cleanup(srv.Close)
+	if _, err := Open(context.Background(), Config{URL: srv.URL + "/x.m3u8"}); !errors.Is(err, ErrMalformedPlaylist) {
+		t.Errorf("Open = %v, want ErrMalformedPlaylist", err)
+	}
+}
+
+func TestOpenPlaylistTooLarge(t *testing.T) {
+	big := make([]byte, 1024)
+	for i := range big {
+		big[i] = 'a'
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write(big)
+	}))
+	t.Cleanup(srv.Close)
+	_, err := Open(context.Background(), Config{URL: srv.URL + "/x.m3u8", MaxPlaylistBytes: 256})
+	if !errors.Is(err, ErrPlaylistTooLarge) {
+		t.Errorf("Open = %v, want ErrPlaylistTooLarge", err)
+	}
+}
+
+func TestOpenSegmentTooLarge(t *testing.T) {
+	stream, _ := adtsStream(3, 40)
+	seg := buildTSSegment(stream, 0x1000, 0x0100)
+	srv := vodServer(t, []string{segURL}, map[string][]byte{segURL: seg})
+	_, err := Open(context.Background(), Config{URL: srv.URL + "/vod.m3u8", MaxSegmentBytes: 100})
+	if !errors.Is(err, ErrSegmentTooLarge) {
+		t.Errorf("Open = %v, want ErrSegmentTooLarge", err)
+	}
+}
+
+func TestInfoStripsCredentials(t *testing.T) {
+	srv := vodServer(t, []string{segURL}, map[string][]byte{
+		segURL: buildTSSegment(func() []byte { s, _ := adtsStream(2, 40); return s }(), 0x1000, 0x0100),
+	})
+	c, err := Open(context.Background(), Config{URL: srv.URL + "/vod.m3u8", Username: "u", Password: "p"})
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer func() { _ = c.Close() }()
+	if got := c.Info().URL; got != srv.URL+"/vod.m3u8" {
+		t.Errorf("Info().URL = %q, should carry no credentials", got)
+	}
+}
+
+func TestOpenExpiredContext(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := Open(ctx, Config{URL: "https://h/x.m3u8"}); !errors.Is(err, context.Canceled) {
+		t.Errorf("Open with cancelled ctx = %v, want context.Canceled", err)
+	}
+}
