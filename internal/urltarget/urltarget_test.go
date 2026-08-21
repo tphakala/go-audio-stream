@@ -1,6 +1,7 @@
-package httptarget
+package urltarget
 
 import (
+	"net/url"
 	"strings"
 	"testing"
 )
@@ -10,6 +11,7 @@ const (
 	host   = "cam.local"
 	user   = "bob"
 	reqURL = "http://cam.local/s.m3u8"
+	keep   = "keep"
 )
 
 func TestParseValid(t *testing.T) {
@@ -71,12 +73,12 @@ func TestParseValid(t *testing.T) {
 			name:     "wholly empty userinfo keeps config credentials",
 			rawURL:   "http://@cam.local/s.m3u8",
 			cfgUser:  user,
-			cfgPass:  "keep",
+			cfgPass:  keep,
 			wantReq:  reqURL,
 			wantHost: host,
 			wantName: host,
 			wantUser: user,
-			wantPass: "keep",
+			wantPass: keep,
 		},
 		{
 			name:     "userinfo and fragment stripped from request URL",
@@ -101,9 +103,9 @@ func TestParseValid(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := Parse(tt.rawURL, tt.cfgUser, tt.cfgPass)
+			got, err := ParseHTTP(tt.rawURL, tt.cfgUser, tt.cfgPass)
 			if err != nil {
-				t.Fatalf("Parse(%q) unexpected error: %v", tt.rawURL, err)
+				t.Fatalf("ParseHTTP(%q) unexpected error: %v", tt.rawURL, err)
 			}
 			if got.TLS != tt.wantTLS {
 				t.Errorf("TLS = %v, want %v", got.TLS, tt.wantTLS)
@@ -147,8 +149,66 @@ func TestParseErrors(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if _, err := Parse(tt.rawURL, tt.cfgUser, tt.cfgPass); err == nil {
-				t.Fatalf("Parse(%q, %q, %q) = nil error, want non-nil", tt.rawURL, tt.cfgUser, tt.cfgPass)
+			if _, err := ParseHTTP(tt.rawURL, tt.cfgUser, tt.cfgPass); err == nil {
+				t.Fatalf("ParseHTTP(%q, %q, %q) = nil error, want non-nil", tt.rawURL, tt.cfgUser, tt.cfgPass)
+			}
+		})
+	}
+}
+
+func TestParseURL(t *testing.T) {
+	if _, err := ParseURL(""); err == nil {
+		t.Error("ParseURL(\"\") = nil error, want non-nil")
+	}
+	if _, err := ParseURL("   "); err == nil {
+		t.Error("ParseURL(whitespace) = nil error, want non-nil")
+	}
+	u, err := ParseURL("  rtsp://cam.local:554/stream  ")
+	if err != nil {
+		t.Fatalf("ParseURL(valid) unexpected error: %v", err)
+	}
+	if u.Scheme != "rtsp" || u.Host != "cam.local:554" {
+		t.Errorf("ParseURL = scheme %q host %q, want rtsp / cam.local:554", u.Scheme, u.Host)
+	}
+}
+
+func TestResolveCredentials(t *testing.T) {
+	mustParse := func(raw string) *url.URL {
+		u, err := url.Parse(raw)
+		if err != nil {
+			t.Fatalf("url.Parse(%q): %v", raw, err)
+		}
+		return u
+	}
+	tests := []struct {
+		name             string
+		rawURL           string
+		cfgUser, cfgPass string
+		wantUser         string
+		wantPass         string
+		wantErr          bool
+	}{
+		{name: "config used when no userinfo", rawURL: "rtsp://cam.local/s", cfgUser: user, cfgPass: "pw", wantUser: user, wantPass: "pw"},
+		{name: "userinfo overrides config", rawURL: "rtsp://a:b@cam.local/s", cfgUser: user, cfgPass: "pw", wantUser: "a", wantPass: "b"},
+		{name: "password-only userinfo is real", rawURL: "rtsp://:only@cam.local/s", cfgUser: user, cfgPass: "pw", wantUser: "", wantPass: "only"},
+		{name: "empty userinfo keeps config", rawURL: "rtsp://@cam.local/s", cfgUser: user, cfgPass: keep, wantUser: user, wantPass: keep},
+		{name: "CR in encoded userinfo rejected", rawURL: "rtsp://a%0d:b@cam.local/s", wantErr: true},
+		{name: "NUL in config password rejected", rawURL: "rtsp://cam.local/s", cfgPass: "a\x00b", wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotUser, gotPass, err := ResolveCredentials(mustParse(tt.rawURL), tt.cfgUser, tt.cfgPass)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("ResolveCredentials(%q) = nil error, want non-nil", tt.rawURL)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("ResolveCredentials(%q) unexpected error: %v", tt.rawURL, err)
+			}
+			if gotUser != tt.wantUser || gotPass != tt.wantPass {
+				t.Errorf("ResolveCredentials = (%q, %q), want (%q, %q)", gotUser, gotPass, tt.wantUser, tt.wantPass)
 			}
 		})
 	}
@@ -161,9 +221,9 @@ func TestParseURLErrorDoesNotLeakCredentials(t *testing.T) {
 	// defeats the never-logged guarantee on the password. The DEL control byte
 	// makes url.Parse fail while the userinfo is present.
 	const secret = "s3cretp4ss"
-	_, err := Parse("http://user:"+secret+"@cam.local/\x7f", "", "")
+	_, err := ParseHTTP("http://user:"+secret+"@cam.local/\x7f", "", "")
 	if err == nil {
-		t.Fatal("Parse of a control-character URL = nil error, want non-nil")
+		t.Fatal("ParseHTTP of a control-character URL = nil error, want non-nil")
 	}
 	if strings.Contains(err.Error(), secret) {
 		t.Fatalf("error text leaked the credential: %q", err.Error())

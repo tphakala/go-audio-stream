@@ -125,6 +125,29 @@ func TestParseTargetInvalid(t *testing.T) {
 	}
 }
 
+func TestParseTargetErrorDoesNotLeakCredentials(t *testing.T) {
+	t.Parallel()
+	// url.Parse returns a *url.Error whose Error() embeds the whole input URL,
+	// userinfo included. A malformed URL carrying credentials must not leak them
+	// through the returned error, or the wrapped error reaches caller logs and
+	// exposes the password. The DEL control byte makes url.Parse fail while the
+	// userinfo is present.
+	const secret = "s3cretp4ss"
+	_, err := parseTarget(&Config{URL: "rtsp://user:" + secret + "@cam.local/\x7f"})
+	if err == nil {
+		t.Fatal("parseTarget of a control-character URL = nil error, want non-nil")
+	}
+	if !errors.Is(err, ErrInvalidURL) {
+		t.Fatalf("error = %v, want ErrInvalidURL", err)
+	}
+	if strings.Contains(err.Error(), secret) {
+		t.Fatalf("error text leaked the credential: %q", err.Error())
+	}
+	if strings.Contains(err.Error(), "cam.local") {
+		t.Fatalf("error text leaked the URL host: %q", err.Error())
+	}
+}
+
 // An empty userinfo is what a URL template produces when its substitution
 // variables are unset. Treating it as an override would silently discard the
 // credentials the caller supplied in Config and surface as a 401.

@@ -7,7 +7,7 @@ import (
 	"time"
 
 	audiostream "github.com/tphakala/go-audio-stream"
-	"github.com/tphakala/go-audio-stream/internal/httptarget"
+	"github.com/tphakala/go-audio-stream/internal/urltarget"
 )
 
 // Client defaults. A zero Config field falls back to these.
@@ -127,10 +127,10 @@ type target struct {
 // overrides Config) and rejects CR, LF and NUL in them, and strips the userinfo
 // and fragment from the request URL so neither reaches the server. It returns
 // ErrInvalidURL (wrapped) on any malformed input. The parsing itself is shared
-// with the other HTTP-family sources via internal/httptarget so a fix to the
+// with the other network sources via internal/urltarget so a fix to the
 // credential handling cannot land in one copy only.
 func parseTarget(cfg *Config) (target, error) {
-	t, err := httptarget.Parse(cfg.URL, cfg.Username, cfg.Password)
+	t, err := urltarget.ParseHTTP(cfg.URL, cfg.Username, cfg.Password)
 	if err != nil {
 		return target{}, fmt.Errorf("%w: %w", ErrInvalidURL, err)
 	}
