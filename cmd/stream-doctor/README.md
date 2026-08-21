@@ -41,11 +41,13 @@ executable, and (optionally) rename it to `stream-doctor`.
 The 32-bit Linux build targets armv7 (hard-float) and newer; the original Pi
 Zero/1 (armv6) is not built.
 
-Verify the download against the published checksums:
+Verify the download against the published checksums. `checksums.txt` lists every
+artifact, so check just the one you downloaded (substitute your file name):
 
 ```sh
-sha256sum -c checksums.txt          # Linux
-shasum -a 256 -c checksums.txt      # macOS
+bin=stream-doctor-vX.Y.Z-linux-amd64
+grep " ${bin}$" checksums.txt | sha256sum -c -       # Linux
+grep " ${bin}$" checksums.txt | shasum -a 256 -c -   # macOS
 ```
 
 On Linux and macOS, mark the binary executable and confirm the version:
