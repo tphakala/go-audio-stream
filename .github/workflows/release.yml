@@ -10,8 +10,10 @@ permissions:
 
 jobs:
   release:
-    name: Build stream-doctor binaries and create draft release
-    runs-on: ubuntu-latest
+    name: Build, sign, and notarize stream-doctor binaries and create a draft release
+    # macOS runner so the darwin binaries can be codesigned and notarized with
+    # Apple's tools; Go cross-compiles the linux and windows targets from here.
+    runs-on: macos-latest
     steps:
       - name: Checkout code
         uses: actions/checkout@v7
@@ -51,8 +53,76 @@ jobs:
             GOOS="${goos}" GOARCH="${goarch}" GOARM="${goarm}" go build -trimpath \
               -ldflags "-s -w -X ${ldpath}=${version}" -o "${outdir}/${bin}" .
           done
-          ( cd "${outdir}" && sha256sum stream-doctor-* > checksums.txt )
           ls -l "${outdir}"
+
+      - name: Check for Apple signing secrets
+        id: signing
+        env:
+          APPLE_CERTIFICATE_BASE64: ${{ secrets.APPLE_CERTIFICATE_BASE64 }}
+        run: |
+          set -euo pipefail
+          if [ -n "${APPLE_CERTIFICATE_BASE64:-}" ]; then
+            echo "enabled=true" >> "${GITHUB_OUTPUT}"
+          else
+            echo "enabled=false" >> "${GITHUB_OUTPUT}"
+            echo "::warning::Apple signing secrets are not configured; the macOS binaries will be unsigned and unnotarized."
+          fi
+
+      - name: Import code signing certificate
+        if: steps.signing.outputs.enabled == 'true'
+        uses: apple-actions/import-codesign-certs@v7
+        with:
+          p12-file-base64: ${{ secrets.APPLE_CERTIFICATE_BASE64 }}
+          p12-password: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+
+      - name: Sign and notarize the macOS binaries
+        if: steps.signing.outputs.enabled == 'true'
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+        run: |
+          set -euo pipefail
+          outdir="${GITHUB_WORKSPACE}/dist"
+          # apple-actions/import-codesign-certs creates signing_temp.keychain. Do
+          # the matching in awk (which exits 0 even with no match) rather than
+          # grep, so an absent certificate does not abort under pipefail before
+          # the explicit check below prints a clear error.
+          identity=$(security find-identity -v -p codesigning signing_temp.keychain \
+            | awk -F'"' '/Developer ID Application/ {print $2; exit}')
+          if [ -z "${identity}" ]; then
+            echo "no Developer ID Application certificate found in the keychain" >&2
+            exit 1
+          fi
+          echo "signing identity: ${identity}"
+          # Codesign each darwin binary with the hardened runtime and a secure
+          # timestamp. A static Go binary needs no entitlements.
+          for bin in "${outdir}"/stream-doctor-*-darwin-*; do
+            echo "signing ${bin}"
+            codesign --sign "${identity}" --timestamp --options runtime --verbose "${bin}"
+            codesign --verify --strict --verbose=2 "${bin}"
+          done
+          # Notarize both darwin binaries in one submission. A bare executable
+          # cannot be stapled (stapler supports only bundles, dmg, and pkg), so the
+          # notarization ticket is served online: Gatekeeper verifies it on first
+          # run when the machine is online.
+          ( cd "${outdir}" && zip -X "${GITHUB_WORKSPACE}/notarize.zip" stream-doctor-*-darwin-* )
+          xcrun notarytool submit "${GITHUB_WORKSPACE}/notarize.zip" \
+            --apple-id "${APPLE_ID}" \
+            --password "${APPLE_APP_SPECIFIC_PASSWORD}" \
+            --team-id "${APPLE_TEAM_ID}" \
+            --wait \
+            --timeout 30m
+          rm -f "${GITHUB_WORKSPACE}/notarize.zip"
+
+      - name: Compute checksums
+        # After signing, since codesign rewrites the darwin binaries in place and
+        # changes their hashes. macOS ships shasum, not sha256sum; its output
+        # format is identical, so `sha256sum -c checksums.txt` verifies it.
+        run: |
+          set -euo pipefail
+          ( cd "${GITHUB_WORKSPACE}/dist" && shasum -a 256 stream-doctor-* > checksums.txt )
+          cat "${GITHUB_WORKSPACE}/dist/checksums.txt"
 
       - name: Compose release notes preamble
         working-directory: cmd/stream-doctor
@@ -70,7 +140,7 @@ jobs:
             echo
             echo "### stream-doctor binaries"
             echo
-            echo "Prebuilt static binaries are attached below for linux (amd64, arm64, armv7), windows (amd64), and macos (amd64, arm64). Verify with \`checksums.txt\`."
+            echo "Prebuilt static binaries are attached below for linux (amd64, arm64, armv7), windows (amd64), and macos (amd64, arm64). The macOS binaries are signed with an Apple Developer ID and notarized. Verify with \`checksums.txt\`."
             echo
             echo "Codec decoders bundled in stream-doctor: go-aac ${aac}, go-opus ${opus}, go-wav ${wav}."
             echo
