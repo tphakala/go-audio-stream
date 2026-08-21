@@ -150,9 +150,20 @@ func (p *playlistParser) handleTag(tag, attr string) error {
 		p.media.targetDuration = time.Duration(secs) * time.Second
 		p.haveTgt = true
 	case "#EXT-X-MEDIA-SEQUENCE":
-		p.media.mediaSequence, _ = strconv.ParseUint(strings.TrimSpace(attr), 10, 64)
+		// A discarded ParseUint error would leave mediaSequence at MaxUint64 for an
+		// out-of-range value, wrapping segment sequence numbers and corrupting the
+		// dedup and window arithmetic across reloads. Reject it.
+		seq, err := strconv.ParseUint(strings.TrimSpace(attr), 10, 64)
+		if err != nil {
+			return fmt.Errorf("%w: bad EXT-X-MEDIA-SEQUENCE %q", ErrMalformedPlaylist, attr)
+		}
+		p.media.mediaSequence = seq
 	case "#EXT-X-DISCONTINUITY-SEQUENCE":
-		p.media.discontinuitySequence, _ = strconv.ParseUint(strings.TrimSpace(attr), 10, 64)
+		dseq, err := strconv.ParseUint(strings.TrimSpace(attr), 10, 64)
+		if err != nil {
+			return fmt.Errorf("%w: bad EXT-X-DISCONTINUITY-SEQUENCE %q", ErrMalformedPlaylist, attr)
+		}
+		p.media.discontinuitySequence = dseq
 	case "#EXT-X-ENDLIST":
 		p.isMedia = true
 		p.media.endList = true

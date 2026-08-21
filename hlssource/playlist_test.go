@@ -229,6 +229,15 @@ func TestParseRejectsBadExtinf(t *testing.T) {
 	}
 }
 
+func TestParseRejectsOutOfRangeSequence(t *testing.T) {
+	for _, tag := range []string{"EXT-X-MEDIA-SEQUENCE", "EXT-X-DISCONTINUITY-SEQUENCE"} {
+		body := "#EXTM3U\n#EXT-X-TARGETDURATION:6\n#" + tag + ":99999999999999999999\n#EXTINF:6,\na.ts\n"
+		if _, _, err := parsePlaylist([]byte(body), mustURL(t, "https://h/x.m3u8")); !errors.Is(err, ErrMalformedPlaylist) {
+			t.Errorf("out-of-range %s = %v, want ErrMalformedPlaylist", tag, err)
+		}
+	}
+}
+
 func TestParseRejectsEncryption(t *testing.T) {
 	body := "#EXTM3U\n#EXT-X-TARGETDURATION:6\n" +
 		"#EXT-X-KEY:METHOD=AES-128,URI=\"k\"\n#EXTINF:6,\na.ts\n"

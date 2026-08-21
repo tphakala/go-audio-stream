@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net"
 	"net/http"
 	"net/url"
@@ -513,8 +514,14 @@ func (c *Client) processNewSegments() bool {
 		if !delivered && seg.seq > c.lastSeq+1 {
 			// The live window advanced past the next expected segment: the
 			// intervening segments were dropped. Signal the loss and mark a
-			// continuity break for the resumed stream.
-			missed := int(seg.seq - c.lastSeq - 1)
+			// continuity break for the resumed stream. Clamp before the int
+			// conversion so a huge (or hostile) media-sequence jump cannot report
+			// a negative SeqGap.
+			gap := seg.seq - c.lastSeq - 1
+			if gap > uint64(math.MaxInt) {
+				gap = math.MaxInt
+			}
+			missed := int(gap)
 			c.pendingSeqGap += missed
 			c.pendingDisc = true
 			if c.cfg.Logger != nil {
