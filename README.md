@@ -119,6 +119,8 @@ built and tested in CI), connects to an RTSP or HTTP progressive URL and prints
 the handshake, the negotiated track and codec, and packet statistics. A
 `-transport` flag selects the RTSP media transport (`tcp`, `udp`, or
 `udp-then-tcp`), and the walkthrough renders the negotiated UDP endpoints.
+Prebuilt binaries and usage are documented in
+[`cmd/stream-doctor/README.md`](cmd/stream-doctor/README.md).
 
 A few transport details are deliberately coarse and documented where they are
 implemented: Receiver Reports carry no jitter or fraction-lost estimate, only
