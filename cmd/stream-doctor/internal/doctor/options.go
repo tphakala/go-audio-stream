@@ -39,9 +39,14 @@ const (
 	transportUDPThenTCP = "udp-then-tcp"
 )
 
-// Version is the stream-doctor version string, printed by --version and in
-// the report.
-const Version = "0.1.0"
+// Version is the stream-doctor version string, printed by --version and in the
+// report. It defaults to "dev" for local and unversioned builds, and is
+// overridden at release time via the linker:
+//
+//	-ldflags "-X github.com/tphakala/go-audio-stream/cmd/stream-doctor/internal/doctor.Version=<version>"
+//
+// It must stay a var (not a const) for -X to patch it.
+var Version = "dev"
 
 // ErrUsage marks a command-line usage error; mapExit turns it into
 // ExitUsage.
@@ -72,7 +77,7 @@ Flags:
                         (default tcp; RTSP only, ignored for http)
   -user username        stream username (overridden by URL userinfo)
   -password password    stream password (overridden by URL userinfo)
-  -version               print the version and exit
+  -version              print the version and exit
 `
 
 // parseArgs parses argv (excluding the program name) into Options. It

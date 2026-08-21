@@ -32,16 +32,24 @@ jobs:
           CGO_ENABLED: '0'
         run: |
           set -euo pipefail
-          version="${GITHUB_REF_NAME}"
+          # GITHUB_REF_NAME is the tag, e.g. "v0.2.0". The artifact filename keeps
+          # the "v"; the injected Version drops it so --version and the UserAgent
+          # read "stream-doctor/0.2.0", matching the pre-release convention.
+          tag="${GITHUB_REF_NAME}"
+          version="${tag#v}"
+          ldpath="github.com/tphakala/go-audio-stream/cmd/stream-doctor/internal/doctor.Version"
           outdir="${GITHUB_WORKSPACE}/dist"
           mkdir -p "${outdir}"
-          for target in linux/amd64 linux/arm64 windows/amd64 darwin/arm64; do
+          # armv7 (GOARM=7) covers 32-bit Raspberry Pi (2/3/Zero 2); arm64 covers
+          # Pi 4/5/CM4. darwin has both Intel (amd64) and Apple Silicon (arm64).
+          for target in linux/amd64 linux/arm64 linux/arm windows/amd64 darwin/amd64 darwin/arm64; do
             goos="${target%/*}"; goarch="${target#*/}"
             ext=""; [ "${goos}" = "windows" ] && ext=".exe"
-            bin="stream-doctor-${version}-${goos}-${goarch}${ext}"
+            goarm=""; [ "${goarch}" = "arm" ] && goarm="7"
+            bin="stream-doctor-${tag}-${goos}-${goarch}${ext}"
             echo "building ${bin}"
-            GOOS="${goos}" GOARCH="${goarch}" go build -trimpath \
-              -ldflags "-s -w" -o "${outdir}/${bin}" .
+            GOOS="${goos}" GOARCH="${goarch}" GOARM="${goarm}" go build -trimpath \
+              -ldflags "-s -w -X ${ldpath}=${version}" -o "${outdir}/${bin}" .
           done
           ( cd "${outdir}" && sha256sum stream-doctor-* > checksums.txt )
           ls -l "${outdir}"
@@ -56,11 +64,13 @@ jobs:
           {
             echo "## go-audio-stream ${GITHUB_REF_NAME}"
             echo
-            echo "RTSP 1.0 client library (package \`rtsp\`, zero runtime dependencies) plus the \`stream-doctor\` diagnostic CLI."
+            echo "Pure-Go audio stream sources: an RTSP 1.0 client (\`rtsp\`), an HTTP progressive source (\`httpsource\`), an HLS source (\`hlssource\`), and a raw UDP/RTP source (\`udpsource\`), plus RTP/RTCP depacketizers (AAC, MP4A-LATM, Opus, G.711, L16). The library core has zero runtime dependencies."
+            echo
+            echo "Also ships \`stream-doctor\`, a diagnostic CLI that probes an \`rtsp(s)\` camera or an \`http(s)\` progressive source and reports connectivity, codec support, and packet statistics. See [cmd/stream-doctor/README.md](https://github.com/tphakala/go-audio-stream/blob/${GITHUB_REF_NAME}/cmd/stream-doctor/README.md)."
             echo
             echo "### stream-doctor binaries"
             echo
-            echo "Prebuilt static binaries are attached below for linux (amd64, arm64), windows (amd64), and macos (arm64). Verify with \`checksums.txt\`."
+            echo "Prebuilt static binaries are attached below for linux (amd64, arm64, armv7), windows (amd64), and macos (amd64, arm64). Verify with \`checksums.txt\`."
             echo
             echo "Codec decoders bundled in stream-doctor: go-aac ${aac}, go-opus ${opus}, go-wav ${wav}."
             echo
