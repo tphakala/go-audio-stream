@@ -36,6 +36,10 @@ type Stream struct {
 	// multi-block frame, or a truncated final frame). It is the framer's
 	// malformed-frame equivalent.
 	gaps uint64
+	// hdr is the parsed header of the most recently delivered frame, so a caller
+	// can synthesize the AudioSpecificConfig without reparsing. It is the zero
+	// header until the first frame is delivered.
+	hdr adts.Header
 }
 
 // NewStream returns a Stream whose buffer is pre-allocated to sizeHint bytes, so
@@ -97,9 +101,16 @@ func (s *Stream) NextFrame() (data []byte, dur time.Duration, ok bool) {
 			s.gaps++
 			continue
 		}
+		s.hdr = h
 		return frame[h.HeaderLen:], frameDuration(h), true
 	}
 }
+
+// Header returns the parsed ADTS header of the most recently delivered frame.
+// The returned header is the zero value until NextFrame has delivered a frame.
+// Its AudioSpecificConfig method synthesizes the ASC an AAC decoder needs, so a
+// demuxer can report the same descriptor an RTSP or httpsource AAC track carries.
+func (s *Stream) Header() adts.Header { return s.hdr }
 
 // Compact slides the unconsumed bytes to the front so the buffer tracks the
 // backlog rather than the whole stream. It runs after each drain, once every
