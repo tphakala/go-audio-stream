@@ -491,22 +491,11 @@ func (c *Client) handleRTCP(tr *track, payload []byte, now time.Time) bool {
 	// reduced the compound to that source's report (or returned on no match), so
 	// a mapping is only ever published for the confirmed media source.
 	if tr.baseSet.Load() {
-		if sr.NTPTimestamp == 0 {
-			// A sender declaring it has no wall clock (RFC 3550 section 6.4.1)
-			// maps nothing, so clear any prior correspondence rather than leave a
-			// stale pair that WallClock would keep extrapolating. The RR fields
-			// above still update: LSR and DLSR describe the report itself, not the
-			// sender clock.
-			tr.srClock.Store(nil)
-		} else {
-			tr.srClock.Store(&audiostream.SenderClock{
-				RTPTime:    sr.RTPTimestamp,
-				NTPTime:    rtp.NTPTime(sr.NTPTimestamp),
-				ReceivedAt: now,
-				ClockRate:  int(tr.clockRate),
-				Valid:      true,
-			})
-		}
+		// A nil result (all-zero NTP timestamp, RFC 3550 section 6.4.1) clears any
+		// prior correspondence rather than leave a stale pair that WallClock would
+		// keep extrapolating. The RR fields above still update: LSR and DLSR
+		// describe the report itself, not the sender clock.
+		tr.srClock.Store(rtp.SenderClockFrom(sr, now, int(tr.clockRate)))
 	}
 	return true
 }
