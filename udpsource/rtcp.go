@@ -3,7 +3,6 @@ package udpsource
 import (
 	"time"
 
-	audiostream "github.com/tphakala/go-audio-stream"
 	"github.com/tphakala/go-audio-stream/rtsp/rtp"
 )
 
@@ -101,18 +100,7 @@ func (c *Client) handleRTCP(datagram []byte, now time.Time) {
 		// mixer, say). Record nothing rather than adopt a foreign mapping.
 		return
 	}
-	if sr.NTPTimestamp == 0 {
-		// RFC 3550 section 6.4.1: a sender with no wall clock sends an all-zero NTP
-		// timestamp, which maps nothing. Clear any prior correspondence rather than
-		// keep extrapolating a stale pair.
-		c.srClock.Store(nil)
-		return
-	}
-	c.srClock.Store(&audiostream.SenderClock{
-		RTPTime:    sr.RTPTimestamp,
-		NTPTime:    rtp.NTPTime(sr.NTPTimestamp),
-		ReceivedAt: now,
-		ClockRate:  c.cfg.ClockRate,
-		Valid:      true,
-	})
+	// A nil result (all-zero NTP timestamp, RFC 3550 section 6.4.1) clears any
+	// prior correspondence rather than keep extrapolating a stale pair.
+	c.srClock.Store(rtp.SenderClockFrom(sr, now, c.cfg.ClockRate))
 }

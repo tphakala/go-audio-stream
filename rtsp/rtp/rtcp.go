@@ -3,6 +3,9 @@ package rtp
 import (
 	"encoding/binary"
 	"errors"
+	"time"
+
+	audiostream "github.com/tphakala/go-audio-stream"
 )
 
 const (
@@ -84,6 +87,32 @@ func ParseCompound(buf []byte) ([]SenderReport, error) {
 		off += pktLen // always at least 4, so the loop always advances
 	}
 	return reports, nil
+}
+
+// SenderClockFrom builds the RTP-to-wall-clock correspondence a track publishes
+// to TrackStats from a Sender Report, or returns nil when the report maps
+// nothing. It is the single shared construction point for both the TCP
+// (interleaved) and UDP RTCP paths, which build the value identically; the
+// surrounding orchestration (different receivers, and the interleaved path's
+// RR/re-lock bookkeeping) legitimately differs and stays at the call sites.
+//
+// A nil return encodes the RFC 3550 section 6.4.1 rule directly: a sender with
+// no wall clock sends an all-zero NTP timestamp, which maps nothing, so the
+// caller stores nil to clear any prior correspondence rather than keep
+// extrapolating a stale pair. On a usable pair it decodes the NTP timestamp and
+// returns a Valid SenderClock stamped with receivedAt (the local receive time)
+// and clockRate (the track's RTP clock rate in ticks per second).
+func SenderClockFrom(sr SenderReport, receivedAt time.Time, clockRate int) *audiostream.SenderClock {
+	if sr.NTPTimestamp == 0 {
+		return nil
+	}
+	return &audiostream.SenderClock{
+		RTPTime:    sr.RTPTimestamp,
+		NTPTime:    NTPTime(sr.NTPTimestamp),
+		ReceivedAt: receivedAt,
+		ClockRate:  clockRate,
+		Valid:      true,
+	}
 }
 
 // ReceiverReport is a reception report the client sends back to the
