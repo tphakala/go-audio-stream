@@ -25,8 +25,10 @@
 // media and master playlists, live and VOD. Out of scope: fMP4/CMAF segments
 // (EXT-X-MAP), encrypted or DRM content (EXT-X-KEY), byte-range segments
 // (EXT-X-BYTERANGE), video, non-AAC audio (MP3 or LATM in TS), adaptive bitrate
-// switching, and Digest authentication. A playlist that requires any of these
-// fails Open with ErrUnsupportedPlaylist or ErrUnsupportedCodec.
+// switching, and Digest authentication. An unsupported container or encrypted
+// content fails Open with ErrUnsupportedPlaylist; a segment whose audio elementary
+// stream is not AAC fails with ErrUnsupportedCodec; a segment carrying no audio at
+// all (video-only) fails with ErrMalformedSegment.
 //
 // The read-idle watchdog (Config.ReadIdle) answers "is new audio still
 // arriving": it is stamped on every successful playlist or segment body read.

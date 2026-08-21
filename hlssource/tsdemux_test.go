@@ -150,6 +150,69 @@ func TestTSDemuxScrambledIsUnsupported(t *testing.T) {
 	}
 }
 
+func TestTSDemuxPMTSpansPackets(t *testing.T) {
+	// A PMT padded past 184 bytes spans two TS packets; reassembly must still find
+	// the audio PID and demux the elementary stream.
+	stream, aus := adtsStream(2, 40)
+	seg := buildPAT(0x1000)
+	seg = append(seg, psiPackets(0x1000, buildPMTSection(0x0100, streamTypeAAC, 220))...)
+	seg = append(seg, tsPESPackets(0x0100, buildPES(stream))...)
+	d := newTSDemux()
+	got := collectAUs(t, d, seg, false)
+	d.end(func(au []byte, _ time.Duration) { got = append(got, append([]byte(nil), au...)) })
+	if len(got) != len(aus) {
+		t.Fatalf("delivered %d AUs with a multi-packet PMT, want %d", len(got), len(aus))
+	}
+	for i := range aus {
+		if !bytes.Equal(got[i], aus[i]) {
+			t.Errorf("AU %d mismatch with spanning PMT", i)
+		}
+	}
+}
+
+func TestTSDemuxPESHeaderSpansPackets(t *testing.T) {
+	// A PES optional-header longer than one TS packet pushes the elementary stream
+	// start into the continuation packet; the skip counter must consume the rest
+	// of the header before feeding audio.
+	stream, aus := adtsStream(3, 60)
+	pes := buildPESHdr(stream, 220) // 9 + 220 = 229-byte header, past the 184-byte first payload
+	seg := buildPAT(0x1000)
+	seg = append(seg, buildPMT(0x1000, 0x0100, streamTypeAAC)...)
+	seg = append(seg, tsPESPackets(0x0100, pes)...)
+	d := newTSDemux()
+	got := collectAUs(t, d, seg, false)
+	d.end(func(au []byte, _ time.Duration) { got = append(got, append([]byte(nil), au...)) })
+	if len(got) != len(aus) {
+		t.Fatalf("delivered %d AUs with a spanning PES header, want %d", len(got), len(aus))
+	}
+	for i := range aus {
+		if !bytes.Equal(got[i], aus[i]) {
+			t.Errorf("AU %d mismatch with spanning PES header", i)
+		}
+	}
+}
+
+func TestTSDemuxGapCountAccumulatesAcrossReset(t *testing.T) {
+	// Leading garbage before a real frame makes the framer count a discard. That
+	// count must survive a continuity-domain reset and appear in gapCount.
+	stream, _ := adtsStream(2, 40)
+	garbled := append(bytes.Repeat([]byte{0xFF, 0x00}, 20), stream...) // non-ADTS lead-in
+	seg1 := buildTSSegment(garbled, 0x1000, 0x0100)
+	s2, _ := adtsStream(2, 40)
+	seg2 := buildTSSegment(s2, 0x1000, 0x0100)
+	d := newTSDemux()
+	_ = collectAUs(t, d, seg1, false)
+	afterFirst := d.gapCount()
+	if afterFirst == 0 {
+		t.Fatal("gapCount = 0 after leading garbage, want > 0")
+	}
+	// A discontinuity replaces the framer; the prior count must not be lost.
+	_ = collectAUs(t, d, seg2, true)
+	if d.gapCount() < afterFirst {
+		t.Errorf("gapCount = %d after reset, want >= %d (accumulated)", d.gapCount(), afterFirst)
+	}
+}
+
 func TestTSDemuxDiscontinuityResetsAndFlushes(t *testing.T) {
 	// Two independent domains: after a discontinuity the demuxer re-acquires
 	// PAT/PMT and keeps delivering. Both domains' AUs arrive.

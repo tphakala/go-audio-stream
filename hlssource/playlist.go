@@ -143,7 +143,7 @@ func (p *playlistParser) handleTag(tag, attr string) error {
 	case "#EXT-X-TARGETDURATION":
 		p.isMedia = true
 		secs, err := strconv.Atoi(strings.TrimSpace(attr))
-		if err != nil || secs <= 0 {
+		if err != nil || secs <= 0 || secs > maxPlaylistSeconds {
 			return fmt.Errorf("%w: bad EXT-X-TARGETDURATION %q", ErrMalformedPlaylist, attr)
 		}
 		p.media.targetDuration = time.Duration(secs) * time.Second
@@ -269,11 +269,17 @@ func pickAudio(renditions []rendition, group string) (rendition, bool) {
 	return rendition{}, false
 }
 
+// maxPlaylistSeconds bounds a parsed EXTINF or target duration. A real segment
+// or target duration is seconds to tens of seconds; a value past a day is a
+// malformed or hostile playlist, and rejecting it keeps the remote number from
+// overflowing the int64 nanosecond range when scaled to a time.Duration.
+const maxPlaylistSeconds = 24 * 60 * 60
+
 // parseExtinf parses an EXTINF attribute ("9.9,title" or "10") into a duration.
 func parseExtinf(attr string) (time.Duration, error) {
 	field, _, _ := strings.Cut(attr, ",")
 	secs, err := strconv.ParseFloat(strings.TrimSpace(field), 64)
-	if err != nil || secs < 0 {
+	if err != nil || secs < 0 || secs > maxPlaylistSeconds {
 		return 0, fmt.Errorf("%w: bad EXTINF duration %q", ErrMalformedPlaylist, field)
 	}
 	return time.Duration(secs * float64(time.Second)), nil

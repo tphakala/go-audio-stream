@@ -52,6 +52,11 @@ type Client struct {
 	lastSeq       uint64
 	mediaPTS      time.Duration
 	pendingSeqGap int
+	// pendingDisc carries a continuity break (a live-window drop, an explicit
+	// EXT-X-DISCONTINUITY, or a skipped EXT-X-GAP) to the next real segment, so
+	// the reset is not lost when the break lands on a gap segment the reader does
+	// not demux. A real segment consumes and clears it.
+	pendingDisc bool
 
 	// baseCtx is the base context for every streaming request, divorced from the
 	// caller's Open context (context.WithoutCancel); cancel aborts it. Only Close
@@ -243,7 +248,23 @@ func newHTTPClient(cfg *Config, tgt *target) *http.Client {
 		TLSHandshakeTimeout: cfg.Timeout,
 		ForceAttemptHTTP2:   true,
 	}
-	return &http.Client{Transport: tr}
+	return &http.Client{
+		Transport: tr,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			if len(via) >= 10 {
+				return errors.New("hlssource: stopped after 10 redirects")
+			}
+			// net/http copies the Authorization header onto a same-domain or
+			// subdomain redirect, including an https to http downgrade. Re-apply
+			// the same-host, safe-scheme gate maybeSetBasicAuth uses, so a redirect
+			// can never carry Basic credentials to a different host or onto a
+			// plaintext connection without the opt-in.
+			if req.URL.Host != tgt.host || (req.URL.Scheme != schemeHTTPS && !cfg.AllowInsecureAuth) {
+				req.Header.Del("Authorization")
+			}
+			return nil
+		},
+	}
 }
 
 // tlsConfigFor returns the tls.Config for https requests. Unlike httpsource, it
@@ -448,6 +469,7 @@ func (c *Client) deliverPending() {
 		c.deliverAU(au.data, au.dur, now)
 	}
 	c.pending = nil
+	c.syncMalformed() // publish any discards from the Open-phase demux
 }
 
 // runSegments processes the media playlist's remaining segments in order,
@@ -461,6 +483,7 @@ func (c *Client) runSegments() {
 		}
 		if c.media.endList {
 			c.demux.end(func(au []byte, dur time.Duration) { c.deliverAU(au, dur, time.Now()) })
+			c.syncMalformed()
 			c.initiateShutdown(ErrStreamEnded)
 			return
 		}
@@ -483,29 +506,32 @@ func (c *Client) runSegments() {
 // error stops it early (the caller checks closed()).
 func (c *Client) processNewSegments() bool {
 	delivered := false
-	forceDisc := false
 	for _, seg := range c.media.segments {
 		if seg.seq <= c.lastSeq {
 			continue
 		}
 		if !delivered && seg.seq > c.lastSeq+1 {
 			// The live window advanced past the next expected segment: the
-			// intervening segments were dropped. Signal the loss and reset the
-			// demux domain for the resumed stream.
+			// intervening segments were dropped. Signal the loss and mark a
+			// continuity break for the resumed stream.
 			missed := int(seg.seq - c.lastSeq - 1)
 			c.pendingSeqGap += missed
-			forceDisc = true
+			c.pendingDisc = true
 			if c.cfg.Logger != nil {
 				c.cfg.Logger.Warn("hlssource: fell behind the live window", "missed_segments", missed)
 			}
 		}
-		if err := c.processSegment(seg, forceDisc); err != nil {
+		disc := c.pendingDisc || seg.discontinuity
+		if err := c.processSegment(seg, disc); err != nil {
 			c.initiateShutdown(err)
 			return delivered
 		}
+		// A gap segment is not demuxed, so it cannot consume the discontinuity;
+		// carry it (and force one, since a gap breaks audio continuity) to the
+		// next real segment. A real segment resets the demux domain and clears it.
+		c.pendingDisc = seg.gap
 		c.lastSeq = seg.seq
 		delivered = true
-		forceDisc = false
 		if c.closed() {
 			return delivered
 		}
@@ -514,9 +540,10 @@ func (c *Client) processNewSegments() bool {
 }
 
 // processSegment downloads and demuxes one segment, delivering its access units.
-// A gap segment (EXT-X-GAP) is not fetched: the media clock advances by its
-// declared duration and the loss is signalled on the next delivered frame.
-func (c *Client) processSegment(seg mediaSegment, forceDisc bool) error {
+// disc resets the demux continuity domain before this segment. A gap segment
+// (EXT-X-GAP) is not fetched: the media clock advances by its declared duration
+// and the loss is signalled on the next delivered frame.
+func (c *Client) processSegment(seg mediaSegment, disc bool) error {
 	if seg.gap {
 		c.mediaPTS += seg.duration
 		c.pendingSeqGap++
@@ -528,9 +555,11 @@ func (c *Client) processSegment(seg mediaSegment, forceDisc bool) error {
 	}
 	c.stampRead()
 	now := time.Now()
-	return c.demux.demux(body, seg.discontinuity || forceDisc, func(au []byte, dur time.Duration) {
+	derr := c.demux.demux(body, disc, func(au []byte, dur time.Duration) {
 		c.deliverAU(au, dur, now)
 	})
+	c.syncMalformed()
+	return derr
 }
 
 // deliverAU counts one access-unit delivery and hands it to OnFrame. PTS is the
@@ -595,6 +624,10 @@ func (c *Client) reqBaseCtx() context.Context { return c.baseCtx }
 
 // stampRead records a successful playlist or segment body read for the watchdog.
 func (c *Client) stampRead() { c.lastReadAt.Store(time.Now().UnixNano()) }
+
+// syncMalformed publishes the demuxer's running framer-discard count as the
+// source's malformed counter, mirroring how httpsource surfaces GapCount.
+func (c *Client) syncMalformed() { c.malformed.Store(c.demux.gapCount()) }
 
 // closed reports whether shutdown has begun.
 func (c *Client) closed() bool {

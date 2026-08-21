@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -148,6 +149,13 @@ func TestVODDeliversAllSegmentsThenEnds(t *testing.T) {
 	}
 	if col.count() != len(wantAUs) {
 		t.Fatalf("delivered %d AUs, want %d", col.count(), len(wantAUs))
+	}
+	// Byte identity end to end: the delivered AUs equal the fixture's, in order,
+	// across the pending-first-segment and streamed-remainder boundary.
+	for i := range wantAUs {
+		if !bytes.Equal(col.datas[i], wantAUs[i]) {
+			t.Errorf("AU %d bytes mismatch end to end", i)
+		}
 	}
 	// PTS strictly increasing from 0.
 	var prev time.Duration = -1
@@ -341,6 +349,124 @@ func TestWatchdogFiresOnStalledSegment(t *testing.T) {
 	}
 	if werr := c.Wait(context.Background()); !errors.Is(werr, audiostream.ErrReadTimeout) {
 		t.Errorf("Wait = %v, want ErrReadTimeout", werr)
+	}
+}
+
+func TestLiveWindowDropSignalsSeqGap(t *testing.T) {
+	fastReload(t)
+	s0, au0 := adtsStream(2, 40)
+	s1, au1 := adtsStream(2, 42)
+	s5, _ := adtsStream(2, 44)
+	s6, _ := adtsStream(2, 46)
+	segs := map[string][]byte{
+		"/s0.ts": buildTSSegment(s0, 0x1000, 0x0100),
+		"/s1.ts": buildTSSegment(s1, 0x1000, 0x0100),
+		"/s5.ts": buildTSSegment(s5, 0x1000, 0x0100),
+		"/s6.ts": buildTSSegment(s6, 0x1000, 0x0100),
+	}
+	v1 := buildMediaPlaylist(1, 0, false, []segSpec{
+		{uri: "s0.ts", duration: 1.0}, {uri: "s1.ts", duration: 1.0},
+	})
+	// The reload jumps MEDIA-SEQUENCE to 5: segments 2,3,4 fell out of the window.
+	v2 := buildMediaPlaylist(1, 5, true, []segSpec{
+		{uri: "s5.ts", duration: 1.0}, {uri: "s6.ts", duration: 1.0},
+	})
+	h := &hlsServer{
+		segments: segs,
+		playlist: func(n int) (string, int) {
+			if n == 1 {
+				return v1, http.StatusOK
+			}
+			return v2, http.StatusOK
+		},
+	}
+	srv := h.start(t)
+	col := &collector{}
+	c, err := Open(context.Background(), Config{URL: srv.URL + "/live.m3u8", OnFrame: col.onFrame})
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if err := c.Wait(context.Background()); !errors.Is(err, ErrStreamEnded) {
+		t.Fatalf("Wait = %v, want ErrStreamEnded", err)
+	}
+	// The first frame of s5 (index after s0+s1's AUs) reports the 3 dropped
+	// segments (seq 2,3,4) as SeqGap; every other frame reports 0.
+	firstAfterDrop := len(au0) + len(au1)
+	if col.count() <= firstAfterDrop {
+		t.Fatalf("delivered %d frames, expected the post-drop segment too", col.count())
+	}
+	if got := col.frames[firstAfterDrop].SeqGap; got != 3 {
+		t.Errorf("SeqGap at the resume frame = %d, want 3", got)
+	}
+	for i, f := range col.frames {
+		if i != firstAfterDrop && f.SeqGap != 0 {
+			t.Errorf("frame %d SeqGap = %d, want 0", i, f.SeqGap)
+		}
+	}
+}
+
+func TestReloadDelayCadence(t *testing.T) {
+	// A reload that delivered new segments waits a full target duration; one that
+	// did not waits half; a non-positive target falls back to DefaultTimeout.
+	if got := reloadDelayFor(10*time.Second, true); got != 10*time.Second {
+		t.Errorf("delivered cadence = %v, want 10s", got)
+	}
+	if got := reloadDelayFor(10*time.Second, false); got != 5*time.Second {
+		t.Errorf("unchanged cadence = %v, want 5s", got)
+	}
+	if got := reloadDelayFor(0, true); got != DefaultTimeout {
+		t.Errorf("zero-target delivered = %v, want DefaultTimeout", got)
+	}
+	if got := reloadDelayFor(0, false); got != DefaultTimeout/2 {
+		t.Errorf("zero-target unchanged = %v, want DefaultTimeout/2", got)
+	}
+}
+
+func TestCredentialsAttachedSameHostStrippedOnCrossHostRedirect(t *testing.T) {
+	stream, _ := adtsStream(2, 40)
+	seg := buildTSSegment(stream, 0x1000, 0x0100)
+	var originGotAuth, cdnGotAuth atomic.Bool
+	// The CDN (a different host:port) serves the real segment and records whether
+	// it received an Authorization header.
+	cdn := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "" {
+			cdnGotAuth.Store(true)
+		}
+		w.Header().Set("Content-Type", "video/mp2t")
+		_, _ = w.Write(seg)
+	}))
+	t.Cleanup(cdn.Close)
+	// The origin serves the playlist (recording auth) and redirects the segment
+	// request cross-host to the CDN.
+	origin := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "" {
+			originGotAuth.Store(true)
+		}
+		switch r.URL.Path {
+		case "/seg.ts":
+			http.Redirect(w, r, cdn.URL+"/real.ts", http.StatusFound)
+		default:
+			w.Header().Set("Content-Type", "application/vnd.apple.mpegurl")
+			_, _ = w.Write([]byte(buildMediaPlaylist(1, 0, true, []segSpec{{uri: "seg.ts", duration: 1.0}})))
+		}
+	}))
+	t.Cleanup(origin.Close)
+
+	c, err := Open(context.Background(), Config{
+		URL:         origin.URL + "/vod.m3u8",
+		Username:    "u",
+		Password:    "p",
+		InsecureTLS: true,
+	})
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer func() { _ = c.Close() }()
+	if !originGotAuth.Load() {
+		t.Error("origin (same host, https) did not receive Basic credentials")
+	}
+	if cdnGotAuth.Load() {
+		t.Error("credentials leaked to the CDN across a cross-host redirect")
 	}
 }
 

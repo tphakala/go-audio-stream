@@ -145,6 +145,65 @@ func buildPES(es []byte) []byte {
 	return append(pes, es...)
 }
 
+// buildPESHdr wraps an elementary stream in a PES packet whose optional-header
+// field is hdrDataLen bytes (filled with a value the demux ignores), so a caller
+// can push the elementary-stream start past the first TS packet and exercise the
+// cross-packet PES-header skip.
+func buildPESHdr(es []byte, hdrDataLen int) []byte {
+	pes := make([]byte, 0, 9+hdrDataLen+len(es))
+	pes = append(pes, 0x00, 0x00, 0x01, 0xC0, 0x00, 0x00, 0x80, 0x80, byte(hdrDataLen))
+	for range hdrDataLen {
+		pes = append(pes, 0x00)
+	}
+	return append(pes, es...)
+}
+
+// psiPackets slices a complete PSI section across as many audioPID-less TS
+// packets as it needs: the first carries the pointer_field and PUSI, the rest are
+// continuations, so a section longer than one packet exercises reassembly.
+func psiPackets(pid uint16, section []byte) []byte {
+	var out []byte
+	var cc uint8
+	payload := append([]byte{0x00}, section...) // pointer_field 0 + section
+	first := true
+	for len(payload) > 0 {
+		n := min(184, len(payload))
+		out = append(out, tsPacket(pid, first, &cc, payload[:n])...)
+		payload = payload[n:]
+		first = false
+	}
+	return out
+}
+
+// buildPMTSection builds a raw PMT section declaring one elementary stream of
+// streamType on audioPID, padded with progInfoPad descriptor bytes so the section
+// can be made to span multiple TS packets. The CRC is left zero.
+func buildPMTSection(audioPID uint16, streamType byte, progInfoPad int) []byte {
+	progInfo := make([]byte, progInfoPad)
+	for i := range progInfo {
+		progInfo[i] = 0xFF
+	}
+	body := make([]byte, 0, 9+len(progInfo)+5)
+	body = append(body,
+		0x00, 0x01, // program_number
+		0xC1,       // version + current_next
+		0x00, 0x00, // section_number, last_section_number
+		byte(0xE0|(audioPID>>8)&0x1F), byte(audioPID), // PCR_PID
+		byte(0xF0|(len(progInfo)>>8)&0x0F), byte(len(progInfo)), // program_info_length
+	)
+	body = append(body, progInfo...)
+	body = append(body,
+		streamType,
+		byte(0xE0|(audioPID>>8)&0x1F), byte(audioPID), // elementary_PID
+		0xF0, 0x00, // ES_info_length
+	)
+	sectionLen := len(body) + 4
+	sec := make([]byte, 0, 3+len(body)+4)
+	sec = append(sec, 0x02, byte(0xB0|(sectionLen>>8)&0x0F), byte(sectionLen))
+	sec = append(sec, body...)
+	return append(sec, 0x00, 0x00, 0x00, 0x00) // CRC (ignored)
+}
+
 // buildTSSegment builds a whole MPEG-TS segment: one PAT, one PMT declaring an
 // AAC (0x0F) elementary stream, then the ADTS stream carried as one PES sliced
 // into audioPID packets.
@@ -157,16 +216,21 @@ func buildTSSegment(adts []byte, pmtPID, audioPID uint16) []byte {
 func buildTSSegmentType(es []byte, pmtPID, audioPID uint16, streamType byte) []byte {
 	seg := buildPAT(pmtPID)
 	seg = append(seg, buildPMT(pmtPID, audioPID, streamType)...)
-	pes := buildPES(es)
+	return append(seg, tsPESPackets(audioPID, buildPES(es))...)
+}
+
+// tsPESPackets slices a PES into audioPID TS packets: the first carries PUSI.
+func tsPESPackets(audioPID uint16, pes []byte) []byte {
+	var out []byte
 	var cc uint8
 	first := true
 	for len(pes) > 0 {
 		n := min(184, len(pes))
-		seg = append(seg, tsPacket(audioPID, first, &cc, pes[:n])...)
+		out = append(out, tsPacket(audioPID, first, &cc, pes[:n])...)
 		pes = pes[n:]
 		first = false
 	}
-	return seg
+	return out
 }
 
 // segSpec describes one segment entry for buildMediaPlaylist.

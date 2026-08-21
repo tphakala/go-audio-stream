@@ -22,6 +22,12 @@ const (
 	streamTypeMP3a = 0x03
 	streamTypeMP3b = 0x04
 	streamTypeLATM = 0x11
+
+	// maxPSISection bounds PSI section reassembly. A section_length is 12 bits, so
+	// a whole section is at most 3+4095 bytes; a reassembly that exceeds this
+	// without completing is malformed (or a crafted continuation run), and the
+	// buffer is dropped rather than grown.
+	maxPSISection = 4098
 )
 
 // tsDemux demuxes AAC access units out of an MPEG-TS byte stream, one segment at
@@ -41,11 +47,18 @@ type tsDemux struct {
 	pmtSec []byte
 
 	// PES header bytes still to skip on continuation packets, when a PES header
-	// ran past the first TS packet of the PES.
-	pesHdrSkip int
+	// ran past the first TS packet of the PES. pesDropping is set when a PES
+	// start packet could not be parsed (its header did not fit or its start code
+	// was wrong), so the rest of that PES is dropped until the next PES start
+	// rather than fed to the framer as if it were the elementary stream.
+	pesHdrSkip  int
+	pesDropping bool
 
 	framer *adtsframe.Stream
 	asc    []byte
+	// accumGaps carries the framer discard count across continuity-domain resets,
+	// which replace the framer, so gapCount reports a running total for Stats.
+	accumGaps uint64
 }
 
 // newTSDemux returns a demuxer with a fresh ADTS framer.
@@ -126,10 +139,16 @@ func (d *tsDemux) handlePacket(pkt []byte, onAU func(au []byte, dur time.Duratio
 func (d *tsDemux) handlePES(payload []byte, pusi bool, onAU func(au []byte, dur time.Duration)) {
 	if pusi {
 		d.pesHdrSkip = 0
+		d.pesDropping = false
 		// packet_start_code_prefix (0x000001) then stream_id, PES_packet_length,
-		// two flag bytes, and PES_header_data_length at byte 8.
+		// two flag bytes, and PES_header_data_length at byte 8. A start packet
+		// whose payload cannot even hold the fixed 9-byte header (a large
+		// adaptation field), or whose start code is wrong, is not a PES header we
+		// can locate the elementary stream within: drop the PES until the next
+		// start rather than feed its header bytes to the framer as audio.
 		if len(payload) < 9 || payload[0] != 0x00 || payload[1] != 0x00 || payload[2] != 0x01 {
-			return // not a PES start we can parse
+			d.pesDropping = true
+			return
 		}
 		esStart := 9 + int(payload[8])
 		if esStart <= len(payload) {
@@ -137,6 +156,9 @@ func (d *tsDemux) handlePES(payload []byte, pusi bool, onAU func(au []byte, dur 
 		} else {
 			d.pesHdrSkip = esStart - len(payload)
 		}
+		return
+	}
+	if d.pesDropping {
 		return
 	}
 	if d.pesHdrSkip > 0 {
@@ -186,12 +208,16 @@ func (d *tsDemux) end(onAU func(au []byte, dur time.Duration)) {
 }
 
 // resetDomain flushes any complete trailing frame from the current continuity
-// domain, then starts a fresh framer and drops the acquired PSI state so a
-// discontinuity's independent timeline and mux are re-learned.
+// domain, then starts a fresh framer and drops the acquired PSI and PES state so
+// a discontinuity's independent timeline and mux are re-learned. The retiring
+// framer's discard count is folded into accumGaps so Stats keeps a running total
+// across the reset.
 func (d *tsDemux) resetDomain(onAU func(au []byte, dur time.Duration)) {
 	d.end(onAU)
+	d.accumGaps += d.framer.GapCount()
 	d.framer = adtsframe.NewStream(tsPacketLen * 8)
 	d.pesHdrSkip = 0
+	d.pesDropping = false
 	d.patSec = nil
 	d.pmtSec = nil
 	d.havePMT = false
@@ -201,6 +227,10 @@ func (d *tsDemux) resetDomain(onAU func(au []byte, dur time.Duration)) {
 // audioSpecificConfig returns the AAC AudioSpecificConfig resolved from the first
 // delivered frame, or nil when no frame has been delivered yet.
 func (d *tsDemux) audioSpecificConfig() []byte { return d.asc }
+
+// gapCount is the running framer discard count across every continuity domain,
+// surfaced by the client as the source's malformed counter.
+func (d *tsDemux) gapCount() uint64 { return d.accumGaps + d.framer.GapCount() }
 
 // parsePAT reads the first program's program_map_PID from a complete PAT section.
 func (d *tsDemux) parsePAT(sec []byte) {
@@ -321,8 +351,19 @@ func psiSection(buf *[]byte, payload []byte, pusi bool) ([]byte, bool) {
 	}
 	total := 3 + (int(sec[1]&0x0F)<<8 | int(sec[2]))
 	if len(sec) < total {
+		if len(sec) > maxPSISection {
+			// A section that never completes within the cap is malformed or a
+			// crafted continuation run: drop the buffer so it cannot grow further.
+			*buf = (*buf)[:0]
+		}
 		return nil, false
 	}
+	// Clear the buffer once the section is complete, so subsequent continuation
+	// packets for this PID (trailing stuffing, or a crafted replay) neither
+	// re-parse the same section nor grow the buffer without bound. sec still
+	// points at the (unzeroed) backing array and is consumed synchronously by the
+	// caller before the next packet reuses it.
+	*buf = (*buf)[:0]
 	return sec[:total], true
 }
 

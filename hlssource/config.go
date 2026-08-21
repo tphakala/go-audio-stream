@@ -65,9 +65,11 @@ type Config struct {
 	// when TLSConfig is non-nil.
 	InsecureTLS bool
 	// AllowInsecureAuth permits sending Basic credentials over a plaintext http
-	// connection. False by default (secure): over plaintext the request is sent
-	// bare, and a Basic challenge ends Open with ErrInsecureAuth rather than
-	// putting the password on the wire. Credentials over https are always allowed.
+	// connection. False by default (secure): over plaintext the credentials are
+	// withheld and the request is sent bare, so the password is never put on the
+	// wire; set it only for a trusted network. Credentials over https are always
+	// allowed. This source sends Basic preemptively only; it does not answer a
+	// Digest or Basic challenge, so Digest authentication is not supported.
 	AllowInsecureAuth bool
 	// UserAgent is sent on every request. Empty uses DefaultUserAgent.
 	UserAgent string
@@ -111,11 +113,11 @@ func (c *Config) applyDefaults() {
 	}
 }
 
-// target is the resolved request destination parsed from a Config: whether the
-// playlist is https, the request URL with userinfo and fragment stripped, the
-// host (for same-host credential gating), and the credentials Basic auth uses.
+// target is the resolved request destination parsed from a Config: the request
+// URL with userinfo and fragment stripped, the host (for same-host credential
+// gating), and the credentials Basic auth uses. Whether a request is https is
+// read per request from its URL scheme, so it is not carried here.
 type target struct {
-	tls        bool
 	requestURL string
 	host       string
 	username   string
@@ -137,12 +139,8 @@ func parseTarget(cfg *Config) (target, error) {
 		return target{}, fmt.Errorf("%w: %w", ErrInvalidURL, err)
 	}
 
-	var tlsOn bool
 	switch strings.ToLower(u.Scheme) {
-	case "http":
-		tlsOn = false
-	case schemeHTTPS:
-		tlsOn = true
+	case "http", schemeHTTPS:
 	default:
 		return target{}, fmt.Errorf("%w: unsupported scheme %q", ErrInvalidURL, u.Scheme)
 	}
@@ -177,7 +175,6 @@ func parseTarget(cfg *Config) (target, error) {
 	reqURL.Fragment = ""
 	reqURL.RawFragment = ""
 	return target{
-		tls:        tlsOn,
 		requestURL: reqURL.String(),
 		host:       u.Host, // host:port, for same-origin credential gating
 		username:   username,
