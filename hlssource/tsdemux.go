@@ -53,6 +53,14 @@ type tsDemux struct {
 	// accumGaps carries the framer discard count across continuity-domain resets,
 	// which replace the framer, so gapCount reports a running total for Stats.
 	accumGaps uint64
+
+	// audioCC is the continuity_counter of the last payload-bearing packet seen on
+	// the audio PID; haveCC guards its validity before the first such packet. A
+	// break in the expected sequence means a TS packet was dropped, which would
+	// splice non-contiguous audio into the framer, so the framer is reset and the
+	// loss is counted distinctly. See handlePacket.
+	audioCC uint8
+	haveCC  bool
 }
 
 // newTSDemux returns a demuxer with a fresh ADTS framer.
@@ -71,6 +79,12 @@ func (d *tsDemux) demux(seg []byte, discontinuity bool, onAU func(au []byte, dur
 	if discontinuity {
 		d.resetDomain(onAU)
 	}
+	// The continuity_counter is contiguous only within a single segment's packet
+	// stream: a real encoder may restart it at each segment boundary, and segments
+	// arrive as whole files over TCP with no packet loss between them. So the CC
+	// baseline is re-established per segment rather than carried across the
+	// boundary, which would otherwise read every boundary as a dropped packet.
+	d.haveCC = false
 	start, ok := tsResync(seg)
 	if !ok {
 		return fmt.Errorf("%w: no MPEG-TS sync byte in segment", ErrMalformedSegment)
@@ -105,6 +119,15 @@ func (d *tsDemux) handlePacket(pkt []byte, onAU func(au []byte, dur time.Duratio
 	if pid == nullPID {
 		return nil
 	}
+	// The audio-PID discontinuity_indicator announces a splice and may ride on a
+	// packet with no payload (adaptation-only, afc=0b10), so honor it before the
+	// no-payload early return below drops such a packet: reset the framer and drop
+	// the continuity_counter baseline so the following payload packet's counter
+	// break is expected, not counted as a dropped packet.
+	if d.haveAudio && pid == d.audioPID && tsDiscIndicator(pkt) {
+		d.resetContinuity(onAU)
+		d.haveCC = false
+	}
 	payload, ok := tsPayload(pkt)
 	if !ok {
 		return nil // adaptation-only or no payload
@@ -121,6 +144,31 @@ func (d *tsDemux) handlePacket(pkt []byte, onAU func(au []byte, dur time.Duratio
 			}
 		}
 	case d.haveAudio && pid == d.audioPID:
+		// An announced discontinuity was already handled above (framer reset,
+		// haveCC cleared), so such a packet falls through the !haveCC baseline here
+		// rather than being counted as a dropped packet.
+		cc := pkt[3] & 0x0F
+		switch {
+		case !d.haveCC:
+			// First audio packet of the segment, or the packet after an announced
+			// discontinuity; nothing to compare against.
+		case cc == d.audioCC:
+			// A permitted single duplicate (ISO/IEC 13818-1 allows one repeat):
+			// dropping it keeps a repeated partial frame from being spliced into the
+			// framer.
+			return nil
+		case cc == (d.audioCC+1)&0x0F:
+			// Contiguous, the expected case.
+		default:
+			// A gap in the counter means a TS packet was dropped: the audio bytes
+			// that follow are not contiguous with what the framer holds. Reset the
+			// framer and count the loss so it surfaces distinctly in Stats rather
+			// than only as downstream resync corruption.
+			d.resetContinuity(onAU)
+			d.accumGaps++
+		}
+		d.audioCC = cc
+		d.haveCC = true
 		d.handlePES(payload, pusi, onAU)
 	}
 	return nil
@@ -201,21 +249,31 @@ func (d *tsDemux) end(onAU func(au []byte, dur time.Duration)) {
 	d.framer.Finish()
 }
 
-// resetDomain flushes any complete trailing frame from the current continuity
-// domain, then starts a fresh framer and drops the acquired PSI and PES state so
-// a discontinuity's independent timeline and mux are re-learned. The retiring
-// framer's discard count is folded into accumGaps so Stats keeps a running total
-// across the reset.
-func (d *tsDemux) resetDomain(onAU func(au []byte, dur time.Duration)) {
+// resetContinuity flushes any complete trailing frame from the current framer,
+// then starts a fresh framer and PES-assembly state. It preserves the acquired
+// PAT/PMT/audio PID, so it is the reset for a mid-segment continuity break (a
+// dropped or spliced TS packet) where the mux is unchanged but the audio bytes
+// are no longer contiguous. The retiring framer's discard count is folded into
+// accumGaps so Stats keeps a running total across the reset.
+func (d *tsDemux) resetContinuity(onAU func(au []byte, dur time.Duration)) {
 	d.end(onAU)
 	d.accumGaps += d.framer.GapCount()
 	d.framer = adtsframe.NewStream(tsPacketLen * 8)
 	d.pesHdrSkip = 0
 	d.pesDropping = false
+}
+
+// resetDomain resets the continuity domain across an EXT-X-DISCONTINUITY: on top
+// of the framer reset it drops the acquired PSI and PES state, and the audio-PID
+// continuity_counter expectation, so a discontinuity's independent timeline and
+// mux are re-learned.
+func (d *tsDemux) resetDomain(onAU func(au []byte, dur time.Duration)) {
+	d.resetContinuity(onAU)
 	d.patSec = nil
 	d.pmtSec = nil
 	d.havePMT = false
 	d.haveAudio = false
+	d.haveCC = false
 }
 
 // audioSpecificConfig returns the AAC AudioSpecificConfig resolved from the first
@@ -317,6 +375,27 @@ func tsPayload(pkt []byte) ([]byte, bool) {
 	default: // 0x00 reserved, 0x02 adaptation only
 		return nil, false
 	}
+}
+
+// tsDiscIndicator reports the adaptation-field discontinuity_indicator, which an
+// encoder sets to announce an intentional splice (a new timeline) so the
+// continuity_counter break that follows is expected rather than a dropped
+// packet. It is false for a packet with no adaptation field or an empty one.
+func tsDiscIndicator(pkt []byte) bool {
+	afc := (pkt[3] >> 4) & 0x03
+	// Only afc 0b10 (adaptation only) and 0b11 (adaptation then payload) carry an
+	// adaptation field. Both reach here: handlePacket checks this on the audio PID
+	// before the no-payload early return, so a splice announced on an adaptation-
+	// only (0b10) packet is honored too.
+	if afc != 0x02 && afc != 0x03 {
+		return false
+	}
+	afLen := int(pkt[4])
+	if afLen == 0 {
+		return false // no adaptation flags byte present
+	}
+	// pkt is a full 188-byte packet, so pkt[5] is in range whenever afLen > 0.
+	return pkt[5]&0x80 != 0
 }
 
 // psiSection assembles a PSI section that may span TS packets. On a PUSI packet

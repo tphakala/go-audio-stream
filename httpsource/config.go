@@ -4,12 +4,10 @@ import (
 	"crypto/tls"
 	"fmt"
 	"log/slog"
-	"net/url"
-	"strconv"
-	"strings"
 	"time"
 
 	audiostream "github.com/tphakala/go-audio-stream"
+	"github.com/tphakala/go-audio-stream/internal/httptarget"
 )
 
 // Client defaults. A zero Config field falls back to these.
@@ -176,75 +174,19 @@ type target struct {
 // https) and the port range, extracts credentials (a non-empty URL userinfo
 // overrides Config) and rejects CR, LF and NUL in them, and strips the userinfo
 // and fragment from the request URL so neither reaches the server or Info. It
-// returns ErrInvalidURL (wrapped) on any malformed input.
+// returns ErrInvalidURL (wrapped) on any malformed input. The parsing itself is
+// shared with the other HTTP-family sources via internal/httptarget so a fix to
+// the credential handling cannot land in one copy only.
 func parseTarget(cfg *Config) (target, error) {
-	raw := strings.TrimSpace(cfg.URL)
-	if raw == "" {
-		return target{}, fmt.Errorf("%w: empty URL", ErrInvalidURL)
-	}
-	u, err := url.Parse(raw)
+	t, err := httptarget.Parse(cfg.URL, cfg.Username, cfg.Password)
 	if err != nil {
 		return target{}, fmt.Errorf("%w: %w", ErrInvalidURL, err)
 	}
-
-	var tlsOn bool
-	switch strings.ToLower(u.Scheme) {
-	case "http":
-		tlsOn = false
-	case "https":
-		tlsOn = true
-	default:
-		return target{}, fmt.Errorf("%w: unsupported scheme %q", ErrInvalidURL, u.Scheme)
-	}
-
-	host := u.Hostname()
-	if host == "" {
-		return target{}, fmt.Errorf("%w: missing host", ErrInvalidURL)
-	}
-	if port := u.Port(); port != "" {
-		// url.Parse only guarantees the port is digits, so an out-of-range value
-		// would otherwise reach the dialer and surface as a connection error
-		// rather than the documented ErrInvalidURL.
-		n, perr := strconv.Atoi(port)
-		if perr != nil || n < 1 || n > 65535 {
-			return target{}, fmt.Errorf("%w: port %q out of range", ErrInvalidURL, port)
-		}
-	}
-
-	username, password := cfg.Username, cfg.Password
-	// A wholly empty userinfo ("http://@host" or "http://:@host", what a URL
-	// template produces when its substitution variables are unset) is treated as
-	// absent rather than as an override, so it cannot silently discard the
-	// credentials the caller supplied in Config. url.User is non-nil for both of
-	// those, so neither a nil check nor an empty-string check on User.String()
-	// catches them. Gating on the username alone would be too broad:
-	// "http://:secret@host" carries a real password-only credential.
-	if u.User != nil {
-		urlUser := u.User.Username()
-		urlPass, _ := u.User.Password()
-		if urlUser != "" || urlPass != "" {
-			username, password = urlUser, urlPass
-		}
-	}
-	// Userinfo is percent-decoded, so url.Parse's rejection of raw control
-	// characters does not cover "%0D%0A". These values flow into an
-	// Authorization header via SetBasicAuth; rejecting them at the boundary that
-	// extracts them from an untrusted URL is where it belongs.
-	if strings.ContainsAny(username, "\r\n\x00") || strings.ContainsAny(password, "\r\n\x00") {
-		return target{}, fmt.Errorf("%w: CR, LF or NUL in credentials", ErrInvalidURL)
-	}
-
-	reqURL := *u
-	reqURL.User = nil
-	// A fragment is a client-side construct with no meaning on the wire; leaving
-	// it on would send it to the server verbatim and expose it through Info.
-	reqURL.Fragment = ""
-	reqURL.RawFragment = ""
 	return target{
-		tls:        tlsOn,
-		requestURL: reqURL.String(),
-		serverName: host,
-		username:   username,
-		password:   password,
+		tls:        t.TLS,
+		requestURL: t.RequestURL,
+		serverName: t.Hostname,
+		username:   t.Username,
+		password:   t.Password,
 	}, nil
 }

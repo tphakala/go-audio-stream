@@ -252,3 +252,213 @@ func TestTSDemuxDiscontinuityResetsAndFlushes(t *testing.T) {
 		}
 	}
 }
+
+// tsAudioPacketsCC slices a PES into audioPID TS packets, each carrying at most
+// 182 bytes so every packet has an adaptation field with a flags byte (which
+// lets the discontinuity_indicator be set). When ccSkipAt >= 0 the
+// continuity_counter skips one value before that packet index, simulating a
+// dropped TS packet mid-segment; when discAt >= 0 the adaptation-field
+// discontinuity_indicator is set on that packet index.
+func tsAudioPacketsCC(audioPID uint16, pes []byte, ccSkipAt, discAt int) []byte {
+	out := make([]byte, 0, (len(pes)/182+1)*tsPacketLen)
+	var cc uint8
+	first := true
+	for idx := 0; len(pes) > 0; idx++ {
+		if idx == ccSkipAt {
+			cc++ // leave a hole in the counter the demux must notice
+		}
+		n := min(182, len(pes))
+		pkt := tsPacket(audioPID, first, &cc, pes[:n])
+		if idx == discAt {
+			pkt[5] |= 0x80 // adaptation-field discontinuity_indicator
+		}
+		out = append(out, pkt...)
+		pes = pes[n:]
+		first = false
+	}
+	return out
+}
+
+// tsSegmentCC builds a whole AAC segment whose audio packets are sliced with
+// tsAudioPacketsCC, so a test can inject a continuity_counter gap and/or a
+// discontinuity_indicator.
+func tsSegmentCC(es []byte, pmtPID, audioPID uint16, ccSkipAt, discAt int) []byte {
+	seg := buildPAT(pmtPID)
+	seg = append(seg, buildPMT(pmtPID, audioPID, streamTypeAAC)...)
+	return append(seg, tsAudioPacketsCC(audioPID, buildPES(es), ccSkipAt, discAt)...)
+}
+
+func TestTSDemuxContinuityCounterGapCountsLoss(t *testing.T) {
+	// A clean multi-packet segment delivers every AU with no gap; the same bytes
+	// with a continuity_counter hole (a dropped TS packet) must reset the framer,
+	// keep delivering, and surface the loss distinctly in gapCount.
+	stream, aus := adtsStream(6, 120)
+
+	clean := tsSegmentCC(stream, 0x1000, 0x0100, -1, -1)
+	dc := newTSDemux()
+	gotClean := collectAUs(t, dc, clean, false)
+	dc.end(func(au []byte, _ time.Duration) { gotClean = append(gotClean, append([]byte(nil), au...)) })
+	if len(gotClean) != len(aus) {
+		t.Fatalf("clean segment delivered %d AUs, want %d", len(gotClean), len(aus))
+	}
+	if dc.gapCount() != 0 {
+		t.Fatalf("clean segment gapCount = %d, want 0", dc.gapCount())
+	}
+
+	gapped := tsSegmentCC(stream, 0x1000, 0x0100, 2, -1)
+	dg := newTSDemux()
+	gotGapped := collectAUs(t, dg, gapped, false)
+	dg.end(func(au []byte, _ time.Duration) { gotGapped = append(gotGapped, append([]byte(nil), au...)) })
+	if len(gotGapped) == 0 {
+		t.Fatal("gapped segment delivered no AUs; the framer should resync and keep delivering")
+	}
+	if dg.gapCount() == 0 {
+		t.Fatalf("gapped segment gapCount = 0, want > 0 (the dropped packet must be counted)")
+	}
+}
+
+func TestTSDemuxDuplicateContinuityCounterIsDropped(t *testing.T) {
+	// A TS packet may be legitimately transmitted twice (same continuity_counter,
+	// same bytes). The demuxer must DROP the repeat, not splice the repeated
+	// partial frame into the framer, and must not count it as a loss. A clean
+	// stream and the same stream with one audio packet duplicated byte-for-byte
+	// must deliver identical access units, and the duplicate must add no gap.
+	stream, _ := adtsStream(6, 120)
+	pes := buildPES(stream)
+
+	// Build the audio packets once (each at most 182 bytes so none is a boundary
+	// case), then optionally splice in a byte-identical duplicate of one packet.
+	var audioPackets [][]byte
+	{
+		var cc uint8
+		first := true
+		for rest := pes; len(rest) > 0; {
+			n := min(182, len(rest))
+			audioPackets = append(audioPackets, tsPacket(0x0100, first, &cc, rest[:n]))
+			rest = rest[n:]
+			first = false
+		}
+	}
+
+	assemble := func(dupIdx int) []byte {
+		seg := buildPAT(0x1000)
+		seg = append(seg, buildPMT(0x1000, 0x0100, streamTypeAAC)...)
+		for i, p := range audioPackets {
+			seg = append(seg, p...)
+			if i == dupIdx {
+				seg = append(seg, p...) // byte-identical duplicate (same cc and payload)
+			}
+		}
+		return seg
+	}
+
+	dc := newTSDemux()
+	cleanAUs := collectAUs(t, dc, assemble(-1), false)
+	dc.end(func(au []byte, _ time.Duration) { cleanAUs = append(cleanAUs, append([]byte(nil), au...)) })
+	if dc.gapCount() != 0 {
+		t.Fatalf("clean segment gapCount = %d, want 0", dc.gapCount())
+	}
+
+	dd := newTSDemux()
+	dupAUs := collectAUs(t, dd, assemble(2), false)
+	dd.end(func(au []byte, _ time.Duration) { dupAUs = append(dupAUs, append([]byte(nil), au...)) })
+	if dd.gapCount() != 0 {
+		t.Errorf("duplicate-packet segment gapCount = %d, want 0 (a duplicate is not a loss)", dd.gapCount())
+	}
+	if len(dupAUs) != len(cleanAUs) {
+		t.Fatalf("duplicate-packet segment delivered %d AUs, want %d (the duplicate must be dropped, not spliced)",
+			len(dupAUs), len(cleanAUs))
+	}
+	for i := range cleanAUs {
+		if !bytes.Equal(dupAUs[i], cleanAUs[i]) {
+			t.Errorf("AU %d differs after a dropped duplicate packet", i)
+		}
+	}
+}
+
+// tsAdaptOnlyDiscPacket builds a 188-byte adaptation-only (afc=0b10, no payload)
+// TS packet for pid with the adaptation-field discontinuity_indicator set. The
+// continuity_counter does not advance on a payloadless packet, so cc is the last
+// value seen.
+func tsAdaptOnlyDiscPacket(pid uint16, cc uint8) []byte {
+	pkt := make([]byte, tsPacketLen)
+	pkt[0] = tsSync
+	pkt[1] = byte(pid >> 8)
+	pkt[2] = byte(pid)
+	pkt[3] = 0x20 | (cc & 0x0F) // afc=0b10 adaptation only, no payload
+	pkt[4] = tsPacketLen - 5    // adaptation_field_length fills the packet
+	pkt[5] = 0x80               // discontinuity_indicator
+	for i := 6; i < tsPacketLen; i++ {
+		pkt[i] = 0xFF // stuffing
+	}
+	return pkt
+}
+
+func TestTSDemuxAdaptationOnlyDiscontinuityIndicatorSuppressesLossCount(t *testing.T) {
+	// The discontinuity_indicator can ride on an adaptation-only packet with no
+	// payload. That packet is dropped by the payload path, but the splice it
+	// announces must still be honored: the following payload packet's counter break
+	// is expected, not a dropped-packet loss. Compared against the same counter
+	// break with NO announcing packet (a real drop), the announced case reports
+	// exactly one fewer gap.
+	stream, _ := adtsStream(6, 120)
+	pes := buildPES(stream)
+
+	build := func(announce bool) []byte {
+		seg := buildPAT(0x1000)
+		seg = append(seg, buildPMT(0x1000, 0x0100, streamTypeAAC)...)
+		var cc uint8
+		first := true
+		rest := pes
+		for idx := 0; len(rest) > 0; idx++ {
+			if idx == 2 {
+				if announce {
+					seg = append(seg, tsAdaptOnlyDiscPacket(0x0100, cc)...)
+				}
+				cc++ // jump the counter: an announced splice, or a bare drop
+			}
+			n := min(182, len(rest))
+			seg = append(seg, tsPacket(0x0100, first, &cc, rest[:n])...)
+			rest = rest[n:]
+			first = false
+		}
+		return seg
+	}
+
+	dAnnounced := newTSDemux()
+	_ = collectAUs(t, dAnnounced, build(true), false)
+	dAnnounced.end(func([]byte, time.Duration) {})
+
+	dBare := newTSDemux()
+	_ = collectAUs(t, dBare, build(false), false)
+	dBare.end(func([]byte, time.Duration) {})
+
+	if got, want := dAnnounced.gapCount(), dBare.gapCount()-1; got != want {
+		t.Errorf("adaptation-only announced-discontinuity gapCount = %d, want %d (one fewer than the bare drop %d)",
+			got, want, dBare.gapCount())
+	}
+}
+
+func TestTSDemuxDiscontinuityIndicatorSuppressesLossCount(t *testing.T) {
+	// The same continuity_counter hole, but with the adaptation-field
+	// discontinuity_indicator set on the packet after it, is an announced splice,
+	// not a loss: the framer still resets, so the framer's own discard count is
+	// identical, but the extra loss increment must be suppressed. The indicator
+	// case therefore reports exactly one fewer gap than the bare-hole case.
+	stream, _ := adtsStream(6, 120)
+
+	gapOnly := tsSegmentCC(stream, 0x1000, 0x0100, 2, -1)
+	dGap := newTSDemux()
+	_ = collectAUs(t, dGap, gapOnly, false)
+	dGap.end(func([]byte, time.Duration) {})
+
+	gapWithDisc := tsSegmentCC(stream, 0x1000, 0x0100, 2, 2)
+	dDisc := newTSDemux()
+	_ = collectAUs(t, dDisc, gapWithDisc, false)
+	dDisc.end(func([]byte, time.Duration) {})
+
+	if got, want := dDisc.gapCount(), dGap.gapCount()-1; got != want {
+		t.Errorf("gapCount with discontinuity_indicator = %d, want %d (one fewer than the bare-hole %d)",
+			got, want, dGap.gapCount())
+	}
+}

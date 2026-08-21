@@ -549,3 +549,74 @@ func TestOpenExpiredContext(t *testing.T) {
 		t.Errorf("Open with cancelled ctx = %v, want context.Canceled", err)
 	}
 }
+
+func TestOpenUnsupportedCodecEndToEnd(t *testing.T) {
+	// A segment whose PMT declares a non-AAC audio stream_type must surface
+	// ErrUnsupportedCodec from Open, not a bare "no audio" verdict. This is the
+	// client-level counterpart to the demux unit test: the error must propagate
+	// through Open's first-segment handshake.
+	for _, tc := range []struct {
+		name       string
+		streamType byte
+	}{
+		{"mp3-a", streamTypeMP3a},
+		{"mp3-b", streamTypeMP3b},
+		{"latm", streamTypeLATM},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			stream, _ := adtsStream(2, 40)
+			seg := buildTSSegmentType(stream, 0x1000, 0x0100, tc.streamType)
+			srv := vodServer(t, []string{segURL0}, map[string][]byte{segURL0: seg})
+			if _, err := Open(context.Background(), Config{URL: srv.URL + "/vod.m3u8"}); !errors.Is(err, ErrUnsupportedCodec) {
+				t.Fatalf("Open with stream_type %#x = %v, want ErrUnsupportedCodec", tc.streamType, err)
+			}
+		})
+	}
+}
+
+func TestDiscontinuityDrivesDemuxResetEndToEnd(t *testing.T) {
+	// A media playlist carrying EXT-X-DISCONTINUITY before its second segment must
+	// drive a demux reset through the client: both segments' access units arrive,
+	// in order and byte-identical, with strictly increasing PTS. The internal
+	// framer swap is covered by the demux unit test; here we prove the tag threads
+	// parse -> processSegment discontinuity flag -> demux end to end.
+	s0, au0 := adtsStream(2, 40)
+	s1, au1 := adtsStream(2, 48)
+	segs := map[string][]byte{
+		segURL0: buildTSSegment(s0, 0x1000, 0x0100),
+		segURL1: buildTSSegment(s1, 0x1000, 0x0100),
+	}
+	body := buildMediaPlaylist(1, 0, true, []segSpec{
+		{uri: segRel0, duration: 1.0},
+		{uri: segRel1, duration: 1.0, discontinuity: true},
+	})
+	h := &hlsServer{
+		segments: segs,
+		playlist: func(int) (string, int) { return body, http.StatusOK },
+	}
+	srv := h.start(t)
+	col := &collector{}
+	c, err := Open(context.Background(), Config{URL: srv.URL + "/vod.m3u8", OnFrame: col.onFrame})
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if err := c.Wait(context.Background()); !errors.Is(err, ErrStreamEnded) {
+		t.Fatalf("Wait = %v, want ErrStreamEnded", err)
+	}
+	want := append(append([][]byte{}, au0...), au1...)
+	if col.count() != len(want) {
+		t.Fatalf("delivered %d AUs across the discontinuity, want %d", col.count(), len(want))
+	}
+	for i := range want {
+		if !bytes.Equal(col.datas[i], want[i]) {
+			t.Errorf("AU %d bytes mismatch across the discontinuity", i)
+		}
+	}
+	var prev time.Duration = -1
+	for i, f := range col.frames {
+		if i > 0 && f.PTS <= prev {
+			t.Errorf("frame %d PTS %v not strictly increasing (prev %v)", i, f.PTS, prev)
+		}
+		prev = f.PTS
+	}
+}
