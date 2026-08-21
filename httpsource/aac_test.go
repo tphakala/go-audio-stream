@@ -76,20 +76,6 @@ func adtsFrameCRC(marker byte, payloadLen int) (frame, au []byte) {
 	return frame, frame[adts.CRCHeaderLen:]
 }
 
-// drainAll pulls every access unit the framer can currently yield, copying each
-// out of the aliased buffer.
-func drainAll(s *adtsStream) [][]byte {
-	var out [][]byte
-	for {
-		data, _, ok := s.nextFrame()
-		if !ok {
-			break
-		}
-		out = append(out, append([]byte(nil), data...))
-	}
-	return out
-}
-
 // adtsFrames concatenates n single-block frames, each with a distinct payload
 // marker, and returns the concatenated stream plus the access units (stripped
 // payloads) the framer should deliver in order.
@@ -264,69 +250,6 @@ func TestAACNonADTSBodyFailsOpen(t *testing.T) {
 	}
 }
 
-func TestAACFramerDropsMultiBlockDirect(t *testing.T) {
-	// Drive the framer directly to pin the multi-block drop without the reader.
-	f1, au1 := adtsFrame(1, 20)
-	f2, _ := adtsFrameN(2, 20, 2) // 3 raw data blocks
-	f3, au3 := adtsFrame(3, 20)
-	s := &adtsStream{}
-	s.feed(append(append(append([]byte(nil), f1...), f2...), f3...))
-	s.setEOF()
-
-	var got [][]byte
-	for {
-		data, _, ok := s.nextFrame()
-		if !ok {
-			break
-		}
-		got = append(got, append([]byte(nil), data...))
-	}
-	if len(got) != 2 || !bytes.Equal(got[0], au1) || !bytes.Equal(got[1], au3) {
-		t.Fatalf("delivered %d AUs, want the two single-block AUs (multi-block dropped)", len(got))
-	}
-	if s.gapCount() != 1 {
-		t.Errorf("gapCount = %d, want 1 for the dropped multi-block frame", s.gapCount())
-	}
-}
-
-func TestAACFramerStripsCRCHeader(t *testing.T) {
-	// A CRC-protected (9-byte header) frame delivers the access unit after the
-	// full 9 bytes; stripping only 7 would leak the 2 CRC bytes into the AU.
-	f1, au1 := adtsFrameCRC(1, 30)
-	f2, au2 := adtsFrameCRC(2, 30)
-	s := &adtsStream{}
-	s.feed(append(append([]byte(nil), f1...), f2...))
-	s.setEOF()
-	got := drainAll(s)
-	if len(got) != 2 || !bytes.Equal(got[0], au1) || !bytes.Equal(got[1], au2) {
-		t.Fatalf("CRC frames: got %d AUs, want 2 with the 9-byte header stripped", len(got))
-	}
-	if len(got[0]) != 30 {
-		t.Errorf("CRC AU length = %d, want 30 (header and CRC stripped)", len(got[0]))
-	}
-}
-
-func TestAACFramerRejectsFalseSync(t *testing.T) {
-	// A valid-looking ADTS header claiming frameLen 14, but the bytes at +14 are
-	// not a consistent header, so the framer must reject it as a false sync
-	// rather than deliver its bytes as an access unit. A real frame follows and
-	// must still be delivered.
-	decoy := adtsHeaderFull(aacProfile, aacSRIdx, aacChanCfg, 14, 0, false)
-	decoy = append(decoy, make([]byte, 14-adts.MinHeaderLen)...) // pad to the claimed 14 bytes
-	f, au := adtsFrame(3, 40)
-	body := append(append(append([]byte(nil), decoy...), make([]byte, 4)...), f...)
-	s := &adtsStream{}
-	s.feed(body)
-	s.setEOF()
-	got := drainAll(s)
-	if len(got) != 1 || !bytes.Equal(got[0], au) {
-		t.Fatalf("got %d AUs, want 1 real AU (the false sync rejected)", len(got))
-	}
-	if s.gapCount() == 0 {
-		t.Error("gapCount = 0, want > 0 for the rejected false sync")
-	}
-}
-
 func TestAACProbeRejectsUnconfirmedLeadingSync(t *testing.T) {
 	// A false ADTS sync at a non-zero offset, with a frame too large to confirm
 	// within the probe prefix, must NOT seed the ASC. With no confirmable frame
@@ -337,59 +260,6 @@ func TestAACProbeRejectsUnconfirmedLeadingSync(t *testing.T) {
 	defer srv.Close()
 	if _, err := Open(context.Background(), Config{URL: srv.URL}); !errors.Is(err, ErrFormatUnknown) {
 		t.Errorf("Open with only an unconfirmable non-zero-offset sync = %v, want ErrFormatUnknown", err)
-	}
-}
-
-func TestAACFramerBuffersAcrossReads(t *testing.T) {
-	// Feed one byte at a time so every frame straddles a "read" boundary,
-	// deterministically exercising the partial-frame wait the localhost socket
-	// coalesces away in the end-to-end tests.
-	stream, aus := adtsFrames(3, 40)
-	s := &adtsStream{}
-	got := make([][]byte, 0, len(aus))
-	for _, b := range stream {
-		s.feed([]byte{b})
-		got = append(got, drainAll(s)...)
-	}
-	s.setEOF()
-	got = append(got, drainAll(s)...)
-	if len(got) != len(aus) {
-		t.Fatalf("byte-by-byte delivery: got %d AUs, want %d", len(got), len(aus))
-	}
-	for i := range aus {
-		if !bytes.Equal(got[i], aus[i]) {
-			t.Errorf("AU %d mismatch under cross-read buffering", i)
-		}
-	}
-}
-
-func TestAACFramerCountsTruncatedTail(t *testing.T) {
-	// A header whose frame never completes before EOF yields no access unit and
-	// is counted once as a truncated tail.
-	f, _ := adtsFrame(1, 40) // frameLen 47
-	s := &adtsStream{}
-	s.feed(f[:20]) // header plus a partial payload, short of frameLen
-	s.setEOF()
-	if got := drainAll(s); len(got) != 0 {
-		t.Fatalf("delivered %d AUs from a truncated frame, want 0", len(got))
-	}
-	s.finish()
-	if s.gapCount() != 1 {
-		t.Errorf("gapCount = %d, want 1 for the truncated tail", s.gapCount())
-	}
-}
-
-func TestAACFramerRejectsEmptyFrame(t *testing.T) {
-	// A frame whose length equals its header carries a zero-length access unit,
-	// which the parser rejects, so the framer never delivers an empty AU: such a
-	// "frame" is treated as a false sync during resync.
-	f1, _ := adtsFrame(1, 0) // frameLen == MinHeaderLen
-	f2, _ := adtsFrame(2, 0)
-	s := &adtsStream{}
-	s.feed(append(append([]byte(nil), f1...), f2...))
-	s.setEOF()
-	if got := drainAll(s); len(got) != 0 {
-		t.Fatalf("delivered %d AUs from zero-length frames, want 0 (empty frames rejected)", len(got))
 	}
 }
 

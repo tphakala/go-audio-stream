@@ -8,7 +8,7 @@ import (
 )
 
 // compressedFramer is the codec-neutral surface the reader drives for a
-// compressed source. Each codec's framer (mp3Stream, adtsStream) buffers the
+// compressed source. Each codec's framer (mp3Stream, adtsframe.Stream) buffers the
 // body across reads and yields one deliverable coded payload at a time; the
 // reader below owns the socket read, the watchdog stamp, and delivery, so the
 // two framers share one reader loop rather than each carrying a copy.
@@ -19,18 +19,18 @@ import (
 // valid only until the next feed or compact, matching the library's
 // reader-owns-Data contract.
 type compressedFramer interface {
-	feed(p []byte)
-	nextFrame() (data []byte, dur time.Duration, ok bool)
-	compact()
-	// setEOF marks the stream ended so the framer delivers a final frame that
+	Feed(p []byte)
+	NextFrame() (data []byte, dur time.Duration, ok bool)
+	Compact()
+	// SetEOF marks the stream ended so the framer delivers a final frame that
 	// has no following header to confirm it.
-	setEOF()
-	// finish counts a truncated final frame once, after the EOF drain.
-	finish()
-	// gapCount is the running discard count (leading garbage, a false sync, a
+	SetEOF()
+	// Finish counts a truncated final frame once, after the EOF drain.
+	Finish()
+	// GapCount is the running discard count (leading garbage, a false sync, a
 	// dropped frame, or a truncated tail), surfaced as the source's malformed
 	// counter.
-	gapCount() uint64
+	GapCount() uint64
 }
 
 // readCompressed is the reader loop for a compressed body. It accumulates body
@@ -49,7 +49,7 @@ func (c *Client) readCompressed() {
 		if n > 0 {
 			now := time.Now()
 			c.lastReadAt.Store(now.UnixNano())
-			c.framer.feed(c.rbuf[:n])
+			c.framer.Feed(c.rbuf[:n])
 			c.drainCompressed(now)
 		}
 		if err != nil {
@@ -57,10 +57,10 @@ func (c *Client) readCompressed() {
 			if errors.Is(cause, ErrStreamEnded) {
 				// Deliver a final frame that has no following header to confirm
 				// it, then count any truncated tail.
-				c.framer.setEOF()
+				c.framer.SetEOF()
 				c.drainCompressed(time.Now())
-				c.framer.finish()
-				c.malformed.Store(c.framer.gapCount())
+				c.framer.Finish()
+				c.malformed.Store(c.framer.GapCount())
 			}
 			c.initiateShutdown(cause)
 			return
@@ -72,14 +72,14 @@ func (c *Client) readCompressed() {
 // its buffer and publishes the running discard count.
 func (c *Client) drainCompressed(now time.Time) {
 	for {
-		data, dur, ok := c.framer.nextFrame()
+		data, dur, ok := c.framer.NextFrame()
 		if !ok {
 			break
 		}
 		c.deliverCompressed(data, dur, now)
 	}
-	c.framer.compact()
-	c.malformed.Store(c.framer.gapCount())
+	c.framer.Compact()
+	c.malformed.Store(c.framer.GapCount())
 }
 
 // deliverCompressed counts one coded-frame delivery and hands it to OnFrame. The

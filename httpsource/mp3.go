@@ -52,7 +52,7 @@ type mp3Stream struct {
 var _ compressedFramer = (*mp3Stream)(nil)
 
 // feed appends freshly read body bytes to the buffer.
-func (s *mp3Stream) feed(p []byte) {
+func (s *mp3Stream) Feed(p []byte) {
 	s.buf = append(s.buf, p...)
 }
 
@@ -152,7 +152,7 @@ func (s *mp3Stream) dropUnsynced(remLen int) {
 
 // finish counts a truncated final frame once, called after the EOF drain when
 // unconsumed bytes remain that could not form a whole frame.
-func (s *mp3Stream) finish() {
+func (s *mp3Stream) Finish() {
 	if len(s.buf)-s.off > 0 {
 		s.gaps++
 	}
@@ -161,7 +161,7 @@ func (s *mp3Stream) finish() {
 // compact slides the unconsumed bytes to the front so the buffer tracks the
 // backlog rather than the whole stream. It runs after each drain, once every
 // returned frame slice has been delivered.
-func (s *mp3Stream) compact() {
+func (s *mp3Stream) Compact() {
 	if s.off == 0 {
 		return
 	}
@@ -245,7 +245,7 @@ func (c *Client) setupMP3() error {
 // delivered whole, since its inline header is part of the coded frame a decoder
 // consumes, so the deliverable payload IS the frame; the duration comes from the
 // header the framer already parsed.
-func (s *mp3Stream) nextFrame() (data []byte, dur time.Duration, ok bool) {
+func (s *mp3Stream) NextFrame() (data []byte, dur time.Duration, ok bool) {
 	frame, hdr, ok := s.next()
 	if !ok {
 		return nil, 0, false
@@ -255,11 +255,11 @@ func (s *mp3Stream) nextFrame() (data []byte, dur time.Duration, ok bool) {
 
 // setEOF marks the stream ended so next delivers the final frame that has no
 // following header to confirm it.
-func (s *mp3Stream) setEOF() { s.ended = true }
+func (s *mp3Stream) SetEOF() { s.ended = true }
 
 // gapCount is the running discard count, surfaced as the source's malformed
 // counter.
-func (s *mp3Stream) gapCount() uint64 { return s.gaps }
+func (s *mp3Stream) GapCount() uint64 { return s.gaps }
 
 // mp3FrameDuration is one frame's presentation duration, SamplesPerFrame /
 // SampleRate seconds. Each term is bounded by a single frame, so accumulating it
