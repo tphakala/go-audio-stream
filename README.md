@@ -17,10 +17,12 @@ or ADTS AAC (Icecast/SHOUTcast) stream framed and delivered as coded frames. A
 third source, `udpsource`, receives raw `udp://` / `rtp://` audio that no RTSP
 session negotiated, framing either RTP packets or interleaved s16 PCM datagrams
 the caller describes. A fourth source, `hlssource`, follows an HLS (m3u8)
-playlist, live or VOD, and demuxes AAC access units out of the MPEG-TS segments,
-delivering them with the same AudioSpecificConfig an RTSP AAC track carries. All
-four satisfy one `Source` interface, so a consumer can drive any of them
-uniformly. No cgo, no runtime dependencies.
+playlist, live or VOD, and demuxes AAC access units out of MPEG-TS or fMP4/CMAF
+(EXT-X-MAP init segment plus `.m4s` fragments) segments, delivering them with the
+same AudioSpecificConfig an RTSP AAC track carries. All four satisfy one `Source`
+interface, so a consumer can drive any of them uniformly, and an optional
+`supervisor` wraps any single-session source into a transparently reconnecting
+one with capped exponential backoff. No cgo, no runtime dependencies.
 
 Where the rest of the family reads and writes files, this library brings audio
 in off the network, so it sits one step upstream of them: the frames it delivers
