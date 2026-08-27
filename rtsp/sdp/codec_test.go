@@ -194,6 +194,93 @@ func TestCodecsL16Dynamic(t *testing.T) {
 	}
 }
 
+// TestCodecsG726Dynamic covers the four G.726 rtpmap encoding names resolving
+// to CodecG726 with the matching bit rate, and the two forms that must NOT: an
+// AAL2-G726 name (a different, unsupported bit order) and an unknown rate both
+// fall back to CodecUnknown.
+func TestCodecsG726Dynamic(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name    string
+		rtpmap  string
+		want    audiostream.G726BitRate
+		unknown bool
+	}{
+		{"16k", "G726-16/8000", audiostream.G726Rate16, false},
+		{"24k", "G726-24/8000", audiostream.G726Rate24, false},
+		{"32k", "G726-32/8000", audiostream.G726Rate32, false},
+		{"40k", "G726-40/8000", audiostream.G726Rate40, false},
+		// Lower-case encoding names resolve too (the switch upper-cases).
+		{"lowercase", "g726-32/8000", audiostream.G726Rate32, false},
+		// AAL2-G726 packs its codewords in the opposite bit order, which this
+		// package does not decode, so it must not masquerade as a CodecG726.
+		{"aal2", "AAL2-G726-32/8000", 0, true},
+		// An out-of-range rate is not a G.726 this package knows.
+		{"bad rate", "G726-99/8000", 0, true},
+		// G.726 is single-channel; a multi-channel advertisement cannot be
+		// decoded by the one-state decoder, so it stays CodecUnknown.
+		{"stereo", "G726-32/8000/2", 0, true},
+		// G.726 runs at an 8 kHz clock; any other clock is non-conformant and
+		// would skew PTS, so it stays CodecUnknown.
+		{"wrong clock", "G726-32/16000", 0, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			body := []byte("v=0\r\n" +
+				"m=audio 0 RTP/AVP 97\r\n" +
+				"a=rtpmap:97 " + tc.rtpmap + "\r\n")
+			s, err := sdp.Parse(body)
+			if err != nil {
+				t.Fatalf("Parse: %v", err)
+			}
+			tracks := s.Codecs()
+			if len(tracks) != 1 {
+				t.Fatalf("track count = %d, want 1", len(tracks))
+			}
+			if tc.unknown {
+				if _, ok := tracks[0].Codec.(audiostream.CodecUnknown); !ok {
+					t.Fatalf("Codec = %T, want CodecUnknown", tracks[0].Codec)
+				}
+				return
+			}
+			g, ok := tracks[0].Codec.(audiostream.CodecG726)
+			if !ok {
+				t.Fatalf("Codec = %T, want CodecG726", tracks[0].Codec)
+			}
+			if g.BitRate != tc.want {
+				t.Errorf("BitRate = %v, want %v", g.BitRate, tc.want)
+			}
+			if g.ClockRate != 8000 || g.Channels != 1 {
+				t.Errorf("clock/channels = %d/%d, want 8000/1", g.ClockRate, g.Channels)
+			}
+		})
+	}
+}
+
+// TestCodecsG726Static covers RFC 3551 static payload type 2 (G.721, identical
+// to G.726 at 32 kbps) resolving with no a=rtpmap present.
+func TestCodecsG726Static(t *testing.T) {
+	t.Parallel()
+	body := []byte("v=0\r\n" +
+		"m=audio 0 RTP/AVP 2\r\n")
+	s, err := sdp.Parse(body)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	tracks := s.Codecs()
+	if len(tracks) != 1 {
+		t.Fatalf("track count = %d, want 1", len(tracks))
+	}
+	g, ok := tracks[0].Codec.(audiostream.CodecG726)
+	if !ok {
+		t.Fatalf("PT 2 Codec = %T, want CodecG726", tracks[0].Codec)
+	}
+	if g.BitRate != audiostream.G726Rate32 || g.ClockRate != 8000 || g.Channels != 1 {
+		t.Errorf("CodecG726 = %+v, want {32kbps 8000 1}", g)
+	}
+}
+
 // TestCodecsL16Static covers the RFC 3551 static payload types 10 (L16 stereo
 // 44100) and 11 (L16 mono 44100) resolved with no a=rtpmap present.
 func TestCodecsL16Static(t *testing.T) {

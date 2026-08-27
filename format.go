@@ -95,7 +95,7 @@ func (k PayloadKind) String() string {
 // typed-nil pointer carries no codec and returns KindUnknown.
 func PayloadKindFor(c Codec) PayloadKind {
 	switch v := c.(type) {
-	case CodecG711, CodecL16:
+	case CodecG711, CodecL16, CodecG726:
 		return KindPCMS16LE
 	case CodecAAC, CodecMP4ALATM, CodecOpus, CodecMP3:
 		return KindCompressed
@@ -104,6 +104,8 @@ func PayloadKindFor(c Codec) PayloadKind {
 	case *CodecG711:
 		return ptrKind(v, KindPCMS16LE)
 	case *CodecL16:
+		return ptrKind(v, KindPCMS16LE)
+	case *CodecG726:
 		return ptrKind(v, KindPCMS16LE)
 	case *CodecAAC:
 		return ptrKind(v, KindCompressed)

@@ -19,8 +19,8 @@ import (
 
 // unsupportedListenReason is the ListenResult.SkipReason for a track whose
 // codec the listen check does not handle: CodecUnknown, and any non-audio
-// track, since only CodecAAC, CodecMP4ALATM, CodecOpus, CodecG711, and CodecL16
-// have a decode or pass-through path to PCM.
+// track, since only CodecAAC, CodecMP4ALATM, CodecOpus, CodecG711, CodecG726,
+// and CodecL16 have a decode or pass-through path to PCM.
 const unsupportedListenReason = "codec not supported for the listen check"
 
 // latmInBandUnlearnedReason and latmOutOfBandMissingReason are the two
@@ -51,7 +51,7 @@ const opusMaxFrameSamples = 5760
 // w.
 func writeWAV(w io.Writer, track rtsp.Track, frames []CapturedFrame, senderStart time.Time) (ListenResult, error) {
 	switch track.Codec.(type) {
-	case audiostream.CodecG711, audiostream.CodecL16:
+	case audiostream.CodecG711, audiostream.CodecG726, audiostream.CodecL16:
 		return writeWAVPCM(w, track, frames, senderStart)
 	case audiostream.CodecOpus:
 		return writeWAVOpus(w, track, frames, senderStart)

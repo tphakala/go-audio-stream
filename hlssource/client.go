@@ -39,16 +39,22 @@ type Client struct {
 	codec audiostream.Codec
 
 	// Reader-owned playback state, set up in Open and owned by the reader
-	// goroutine afterward. demux is the long-lived TS demuxer; media is the
+	// goroutine afterward. demux is the long-lived segment demuxer (TS or fMP4);
+	// media is the
 	// current media playlist; mediaURL is its absolute URL for live reloads;
 	// pending holds the first segment's access units, demuxed during Open to
 	// resolve the codec and delivered first by the reader. lastSeq is the highest
 	// media sequence number delivered; mediaPTS is the running presentation time;
 	// pendingSeqGap accumulates segments lost to a gap or a window drop, attached
 	// to the next delivered frame.
-	demux         *tsDemux
-	media         *mediaPlaylist
-	mediaURL      *url.URL
+	demux    segmentDemuxer
+	media    *mediaPlaylist
+	mediaURL *url.URL
+	// initURI is the EXT-X-MAP initialization-segment URL the fMP4 demuxer was
+	// built from, or "" for an MPEG-TS stream. A later segment whose init URI
+	// differs is a mid-stream codec change the delivery contract does not model,
+	// so it ends the stream with ErrUnsupportedPlaylist.
+	initURI       string
 	pending       []pendingAU
 	lastSeq       uint64
 	mediaPTS      time.Duration
@@ -98,6 +104,29 @@ type pendingAU struct {
 
 // Client satisfies the root package's source-agnostic capture contract.
 var _ audiostream.Source = (*Client)(nil)
+
+// segmentDemuxer is the boundary the reader loop depends on, abstracting the
+// per-container demuxer so client.go never names a concrete type. Both the
+// MPEG-TS demuxer (tsDemux) and the fMP4/CMAF demuxer (fmp4Demux) satisfy it. A
+// call to demux processes one whole segment, delivering each AAC access unit to
+// onAU in order with its duration; discontinuity requests a continuity-domain
+// reset before the segment (a no-op for the self-contained fMP4 fragments). end
+// flushes any buffered trailing frame at true stream end. audioSpecificConfig
+// returns the resolved AAC configuration once known. gapCount is the running
+// count of lost or unparsable audio, surfaced as the source's malformed counter.
+type segmentDemuxer interface {
+	demux(seg []byte, discontinuity bool, onAU func(au []byte, dur time.Duration)) error
+	end(onAU func(au []byte, dur time.Duration))
+	audioSpecificConfig() []byte
+	gapCount() uint64
+}
+
+// Both demuxers satisfy the boundary verbatim; tsDemux keeps its exact prior
+// method set, so this extraction is behavior-preserving.
+var (
+	_ segmentDemuxer = (*tsDemux)(nil)
+	_ segmentDemuxer = (*fmp4Demux)(nil)
+)
 
 // Open performs the whole HLS handshake and returns an already-delivering
 // source: it fetches the playlist, resolves a master playlist to a media
@@ -166,11 +195,14 @@ func (c *Client) openHandshake(ctx context.Context) error {
 	if !ok {
 		return fmt.Errorf("%w: playlist has no playable segment", ErrMalformedPlaylist)
 	}
+	d, err := c.buildDemuxer(ctx, seg)
+	if err != nil {
+		return err
+	}
 	body, err := c.get(ctx, seg.uri, c.cfg.MaxSegmentBytes, ErrSegmentTooLarge)
 	if err != nil {
 		return err
 	}
-	d := newTSDemux()
 	if derr := d.demux(body, false, func(au []byte, dur time.Duration) {
 		c.pending = append(c.pending, pendingAU{data: append([]byte(nil), au...), dur: dur})
 	}); derr != nil {
@@ -182,10 +214,26 @@ func (c *Client) openHandshake(ctx context.Context) error {
 	}
 	c.codec = audiostream.CodecAAC{AudioSpecificConfig: asc}
 	c.demux = d
+	c.initURI = seg.initURI
 	c.media = media
 	c.mediaURL = mediaURL
 	c.lastSeq = seg.seq
 	return nil
+}
+
+// buildDemuxer selects and constructs the demuxer for the first playable segment:
+// an fMP4 demuxer when the segment carries an EXT-X-MAP init URI (the init segment
+// is fetched here, bounded by the segment size cap, so the AudioSpecificConfig is
+// resolved before any fragment is demuxed), or a plain MPEG-TS demuxer otherwise.
+func (c *Client) buildDemuxer(ctx context.Context, seg mediaSegment) (segmentDemuxer, error) {
+	if seg.initURI == "" {
+		return newTSDemux(), nil
+	}
+	initBody, err := c.get(ctx, seg.initURI, c.cfg.MaxSegmentBytes, ErrSegmentTooLarge)
+	if err != nil {
+		return nil, err
+	}
+	return newFMP4Demux(initBody)
 }
 
 // fetchMediaPlaylist fetches and parses the playlist at rawURL, following one
@@ -555,6 +603,13 @@ func (c *Client) processSegment(seg mediaSegment, disc bool) error {
 		c.mediaPTS += seg.duration
 		c.pendingSeqGap++
 		return nil
+	}
+	// The demuxer was built for one container with one initialization segment. A
+	// segment whose EXT-X-MAP init URI differs (an fMP4 stream whose init changed,
+	// or a stream that switched between TS and fMP4) is a codec change the delivery
+	// contract, which fixes Format().Codec at Open, does not model.
+	if seg.initURI != c.initURI {
+		return fmt.Errorf("%w: EXT-X-MAP initialization segment changed mid-stream", ErrUnsupportedPlaylist)
 	}
 	body, err := c.get(c.reqBaseCtx(), seg.uri, c.cfg.MaxSegmentBytes, ErrSegmentTooLarge)
 	if err != nil {

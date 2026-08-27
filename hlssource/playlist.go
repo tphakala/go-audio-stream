@@ -29,6 +29,12 @@ type mediaSegment struct {
 	// and must not be fetched. The media clock advances by duration and the loss
 	// is signalled to the consumer.
 	gap bool
+	// initURI is the absolute URL of the EXT-X-MAP initialization segment in
+	// effect for this segment, or "" for a plain MPEG-TS segment. A non-empty
+	// value marks the segment as fMP4 (CMAF): the client fetches this init
+	// segment once to build the fMP4 demuxer. The map is sticky, so every segment
+	// after an EXT-X-MAP carries it until another EXT-X-MAP changes it.
+	initURI string
 }
 
 // mediaPlaylist is a parsed media playlist (a list of segments).
@@ -110,6 +116,11 @@ type playlistParser struct {
 	pendDisc    bool
 	pendGap     bool
 	pendVariant *variant
+
+	// curInitURI is the EXT-X-MAP initialization segment URI currently in effect.
+	// It is sticky: set by an EXT-X-MAP tag and applied to every following segment
+	// until another EXT-X-MAP changes it.
+	curInitURI string
 }
 
 // handleURI resolves a URI line against the pending variant (master) or the
@@ -128,6 +139,7 @@ func (p *playlistParser) handleURI(line string) error {
 			duration:      p.pendDur,
 			discontinuity: p.pendDisc,
 			gap:           p.pendGap,
+			initURI:       p.curInitURI,
 		})
 		p.pendExtinf, p.pendDisc, p.pendGap = false, false, false
 	default:
@@ -184,7 +196,19 @@ func (p *playlistParser) handleTag(tag, attr string) error {
 			return fmt.Errorf("%w: encrypted content (EXT-X-KEY METHOD=%s)", ErrUnsupportedPlaylist, m)
 		}
 	case "#EXT-X-MAP":
-		return fmt.Errorf("%w: EXT-X-MAP (fMP4 initialization) is not supported", ErrUnsupportedPlaylist)
+		// An fMP4 (CMAF) initialization segment. It appears only in media
+		// playlists and applies to every following segment. A BYTERANGE-scoped init
+		// segment is out of scope (byte-range fetching is not implemented); a map
+		// with no URI is malformed.
+		p.isMedia = true
+		if attrValue(attr, "BYTERANGE") != "" {
+			return fmt.Errorf("%w: EXT-X-MAP BYTERANGE is not supported", ErrUnsupportedPlaylist)
+		}
+		uri := attrValue(attr, "URI")
+		if uri == "" {
+			return fmt.Errorf("%w: EXT-X-MAP has no URI", ErrMalformedPlaylist)
+		}
+		p.curInitURI = resolveURI(p.base, uri)
 	case "#EXT-X-BYTERANGE":
 		return fmt.Errorf("%w: EXT-X-BYTERANGE segments are not supported", ErrUnsupportedPlaylist)
 	case "#EXT-X-STREAM-INF":

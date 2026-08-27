@@ -12,6 +12,7 @@ import (
 	audiostream "github.com/tphakala/go-audio-stream"
 	"github.com/tphakala/go-audio-stream/depacket/aac"
 	"github.com/tphakala/go-audio-stream/depacket/g711"
+	"github.com/tphakala/go-audio-stream/depacket/g726"
 	"github.com/tphakala/go-audio-stream/depacket/latm"
 	"github.com/tphakala/go-audio-stream/depacket/opus"
 	"github.com/tphakala/go-audio-stream/rtsp/rtp"
@@ -52,6 +53,8 @@ const (
 	deliverL16
 	// deliverLATM runs the RFC 3016 MP4A-LATM depacketizer.
 	deliverLATM
+	// deliverG726 runs the ITU-T G.726 ADPCM decoder, expanding to s16le PCM.
+	deliverG726
 )
 
 // track is one set-up track's pipeline state. Setup fully initializes it and
@@ -85,6 +88,10 @@ type track struct {
 	stream rtp.Stream
 	aac    *aac.Depacketizer
 	latm   *latm.Depacketizer
+	// g726 is the ITU-T G.726 ADPCM decoder for a CodecG726 track, nil
+	// otherwise. It carries adaptive state across packets, so it is reset only
+	// on an SSRC change (a new source), never on a plain sequence gap.
+	g726 *g726.Decoder
 	// latmASC is the last AudioSpecificConfig deliverLATM reported through
 	// Config.OnCodecUpdate (or, for an out-of-band track, the ASC newTrack
 	// seeded from Describe to suppress a redundant first callback). It is
@@ -107,8 +114,8 @@ type track struct {
 	// lock. resetDepacketizer clears it only on an SSRC reset, not a plain gap,
 	// so a gap from the old sequence space cannot bleed onto the new source's
 	// first frame. Shared by every codec path: a track is exactly one codec, so
-	// they never contend. The single-frame codecs (Opus, G.711, L16, raw) drain
-	// it in the shared deliverOne; G.711 and L16 fold only past their
+	// they never contend. The single-frame codecs (Opus, G.711, G.726, L16, raw) drain
+	// it in the shared deliverOne; G.711, G.726 and L16 fold only past their
 	// onFrame==nil early return, so a nil-callback stream never accumulates.
 	pendingGap int
 	// wirePayloadType is the payload type this track has settled on and
@@ -227,6 +234,8 @@ func newTrack(id int, desc describedTrack, opts SetupOptions, rtcpCh int, logger
 	case audiostream.CodecL16:
 		tr.kind = deliverL16
 		tr.l16FrameSize = 2 * codec.Channels
+	case audiostream.CodecG726:
+		tr.configureG726(codec, logger)
 	default:
 		logWarn(logger, "unrecognized codec; delivering raw payloads", "track", id)
 	}
@@ -288,6 +297,21 @@ func modeOf(params *sdp.AACParams) string {
 		return ""
 	}
 	return params.Mode
+}
+
+// configureG726 selects the ITU-T G.726 ADPCM decoder for a CodecG726 track.
+// The SDP layer only resolves the four valid bit rates, so g726.New cannot
+// fail here in practice; the fallback to raw delivery is defensive, matching
+// the other configure* helpers.
+func (tr *track) configureG726(codec audiostream.CodecG726, logger *slog.Logger) {
+	dec, err := g726.New(codec.BitRate)
+	if err != nil {
+		tr.kind = deliverRaw
+		logWarn(logger, "g726 bit rate invalid; delivering raw payloads", "error", err)
+		return
+	}
+	tr.kind = deliverG726
+	tr.g726 = dec
 }
 
 // configureLATM selects the MP4A-LATM depacketizer for a CodecMP4ALATM track,
@@ -417,6 +441,8 @@ func (tr *track) deliver(pkt rtp.Packet, up rtp.Update, now time.Time, onFrame f
 		tr.deliverG711(pkt, up, now, onFrame)
 	case deliverL16:
 		tr.deliverL16(pkt, up, now, onFrame)
+	case deliverG726:
+		tr.deliverG726(pkt, up, now, onFrame)
 	case deliverLATM:
 		// nil onCodecUpdate: this generic dispatch has no Config to read one
 		// from, so it is test-only for LATM. Production delivery routes
@@ -633,6 +659,33 @@ func (tr *track) deliverL16(pkt rtp.Packet, up rtp.Update, now time.Time, onFram
 	tr.deliverOne(dst[:n], pkt, up, now, onFrame)
 }
 
+// deliverG726 runs the ITU-T G.726 ADPCM decoder and delivers one frame of
+// s16le PCM, structurally identical to deliverG711: the sequence gap is folded
+// only past the onFrame==nil return (so a nil-callback stream never
+// accumulates), and the reused tr.pcmBuf holds the output. The decoder carries
+// adaptive state across packets, so it is never reset here; only an SSRC change
+// resets it (see resetDepacketizer). A Decode error (a too-small buffer, which
+// the sizing below prevents) counts as malformed and yields no frame.
+func (tr *track) deliverG726(pkt rtp.Packet, up rtp.Update, now time.Time, onFrame func(audiostream.Frame)) {
+	if onFrame == nil {
+		return
+	}
+	tr.pendingGap += up.Gap
+	need := tr.g726.OutputLen(pkt.Payload)
+	if cap(tr.pcmBuf) < need {
+		tr.pcmBuf = make([]byte, need, need+need/4)
+	} else {
+		tr.pcmBuf = tr.pcmBuf[:need]
+	}
+	n, err := tr.g726.Decode(tr.pcmBuf, pkt.Payload)
+	if err != nil {
+		// The pending gap is retained for the next delivered frame.
+		tr.malformed.Add(1)
+		return
+	}
+	tr.deliverOne(tr.pcmBuf[:n], pkt, up, now, onFrame)
+}
+
 // deliverRaw delivers the undecoded RTP payload as one frame. It is the
 // fallback for every track newTrack could not build a decoder for: an
 // unrecognized codec, a non-audio media kind, an AAC mode other than AAC-hbr,
@@ -742,12 +795,19 @@ func (tr *track) resetDepacketizer(onSSRCChange bool) {
 		// only here (SSRC reset), never on a plain gap, where the pending gap must
 		// survive to drain onto the next delivered frame. This is a standalone
 		// block, not nested under the tr.latm guard below, so it runs for every
-		// track: AAC and the single-frame codecs (Opus, G.711, L16, raw) all use
+		// track: AAC and the single-frame codecs (Opus, G.711, G.726, L16, raw) all use
 		// the accumulator, and none of them owns a tr.latm.
 		tr.pendingGap = 0
 	}
 	if tr.aac != nil {
 		tr.aac.Reset()
+	}
+	if onSSRCChange && tr.g726 != nil {
+		// G.726 carries adaptive predictor and quantizer state across packets;
+		// a new source restarts the stream, so the decoder must too. On a plain
+		// gap it is deliberately not reset: there is no clean G.726 resync point
+		// mid stream and the state re-converges on its own.
+		tr.g726.Reset()
 	}
 	if onSSRCChange && tr.latm != nil {
 		tr.latm.Reset()
