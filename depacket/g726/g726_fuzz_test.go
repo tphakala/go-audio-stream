@@ -1,6 +1,7 @@
 package g726_test
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -36,8 +37,13 @@ func FuzzDecode(f *testing.F) {
 			t.Fatalf("New: %v", err)
 		}
 
-		// Exactly-sized destination: the return must fill it and write no more.
+		// A payload that is not a whole number of codeword groups is malformed
+		// (ErrIncompletePayload) and decodes to nothing; that is a valid outcome,
+		// not a crash, so there is nothing further to assert for it.
 		out, err := d.DecodeAlloc(payload)
+		if errors.Is(err, g726.ErrIncompletePayload) {
+			return
+		}
 		if err != nil {
 			t.Fatalf("DecodeAlloc: %v", err)
 		}

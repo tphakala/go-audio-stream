@@ -147,6 +147,43 @@ func TestNewUnknownBitRate(t *testing.T) {
 	}
 }
 
+// TestDecodeIncompletePayload pins RFC 3551 section 4.5.4 conformance: G726-24
+// and G726-40 require the payload length to be a multiple of 3 and 5 octets so
+// the final octet is completely packed, while G726-16 and G726-32 pack a whole
+// number of codewords into every octet.
+func TestDecodeIncompletePayload(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		rate          audiostream.G726BitRate
+		badLen, okLen int
+	}{
+		{"24kbps", audiostream.G726Rate24, 4, 3}, // 4 octets is not a whole number of 3-bit groups; 3 is
+		{"40kbps", audiostream.G726Rate40, 4, 5}, // 4 octets is not a whole number of 5-bit groups; 5 is
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			d, _ := g726.New(tc.rate)
+			if _, err := d.DecodeAlloc(make([]byte, tc.badLen)); !errors.Is(err, g726.ErrIncompletePayload) {
+				t.Fatalf("DecodeAlloc(%d bytes): got %v, want ErrIncompletePayload", tc.badLen, err)
+			}
+			// A rejected payload must not have advanced the adaptive state, so a
+			// following conformant payload still decodes cleanly.
+			if _, err := d.DecodeAlloc(make([]byte, tc.okLen)); err != nil {
+				t.Fatalf("DecodeAlloc(%d bytes): unexpected %v", tc.okLen, err)
+			}
+		})
+	}
+	// 16 and 32 kbps accept any octet length: every octet is a whole number of
+	// codewords (four 2-bit or two 4-bit).
+	for _, rate := range []audiostream.G726BitRate{audiostream.G726Rate16, audiostream.G726Rate32} {
+		d, _ := g726.New(rate)
+		for _, n := range []int{1, 2, 3, 7} {
+			if _, err := d.DecodeAlloc(make([]byte, n)); err != nil {
+				t.Fatalf("rate %v len %d: unexpected %v", rate, n, err)
+			}
+		}
+	}
+}
+
 func TestDecodeEmpty(t *testing.T) {
 	d, _ := g726.New(audiostream.G726Rate32)
 	n, err := d.Decode(nil, nil)

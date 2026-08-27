@@ -19,6 +19,16 @@ var ErrShortBuffer = errors.New("g726: destination buffer too small")
 // defaulted.
 var ErrUnknownBitRate = errors.New("g726: unknown bit rate")
 
+// ErrIncompletePayload is returned by Decode when the payload does not hold a
+// whole number of RFC 3551 codeword groups: its bit length is not a multiple of
+// the codeword width, so the final octet is not completely packed. RFC 3551
+// section 4.5.4 requires the codeword count to be a multiple of 8, 2, 8, and 4
+// for G726-40/32/24/16, which for an octet payload is exactly this divisibility
+// (always satisfied at 16 and 32 kbps; length a multiple of 3 or 5 octets at 24
+// or 40 kbps). Such a payload is malformed, so it is refused rather than decoded
+// with its trailing bits silently dropped.
+var ErrIncompletePayload = errors.New("g726: payload is not a whole number of codewords")
+
 // float11 is the ITU-T internal floating-point representation of a signal
 // history value: a sign, a 4-bit exponent, and a 6-bit mantissa. The predictor
 // multiply works in this form.
@@ -158,12 +168,14 @@ func (d *Decoder) Reset() {
 // Decode expands a G.726 RTP payload into signed 16-bit little-endian PCM,
 // writing into dst and returning the number of bytes written. The payload is
 // unpacked in RFC 3551 section 4.5.4 order (first codeword in the least
-// significant bits). One sample is produced per whole codeword; any trailing
-// bits that cannot form a codeword are ignored. dst must hold 2*n bytes where n
-// is the whole-codeword count, else Decode writes nothing and returns
-// (0, ErrShortBuffer). An empty payload writes nothing and returns (0, nil). No
-// allocation occurs; dst is caller-owned and reusable across packets. dst and
-// payload must not overlap.
+// significant bits). It must hold a whole number of codeword groups: if its bit
+// length is not a multiple of the codeword width (so the final octet is not
+// completely packed, a malformed packet under RFC 3551 section 4.5.4), Decode
+// writes nothing, leaves the adaptive state untouched, and returns
+// (0, ErrIncompletePayload). dst must hold 2*n bytes where n is the codeword
+// count, else Decode writes nothing and returns (0, ErrShortBuffer). An empty
+// payload writes nothing and returns (0, nil). No allocation occurs; dst is
+// caller-owned and reusable across packets. dst and payload must not overlap.
 //
 // Decode advances the decoder's adaptive state, so consecutive calls on the
 // same Decoder continue one logical stream: decoding a stream split across two
@@ -171,6 +183,9 @@ func (d *Decoder) Reset() {
 func (d *Decoder) Decode(dst, payload []byte) (int, error) {
 	if len(payload) == 0 {
 		return 0, nil
+	}
+	if (len(payload)*8)%d.rt.bits != 0 {
+		return 0, ErrIncompletePayload
 	}
 	nsamp := (len(payload) * 8) / d.rt.bits
 	need := 2 * nsamp
@@ -189,8 +204,9 @@ func (d *Decoder) Decode(dst, payload []byte) (int, error) {
 // DecodeAlloc expands a G.726 payload into a freshly allocated s16le PCM slice.
 // It is the allocating convenience wrapper over Decode for callers that do not
 // manage their own buffer, and it never constructs audiostream.Frame. The
-// buffer it allocates is always correctly sized, so it does not return
-// ErrShortBuffer.
+// buffer it allocates is always correctly sized, so it never returns
+// ErrShortBuffer; it returns ErrIncompletePayload (and a nil slice) for a
+// payload that is not a whole number of codeword groups.
 func (d *Decoder) DecodeAlloc(payload []byte) ([]byte, error) {
 	nsamp := (len(payload) * 8) / d.rt.bits
 	dst := make([]byte, 2*nsamp)
