@@ -255,11 +255,32 @@ func TestParseAllowsKeyMethodNone(t *testing.T) {
 	}
 }
 
-func TestParseRejectsFmp4Map(t *testing.T) {
+func TestParseAcceptsFmp4Map(t *testing.T) {
+	// EXT-X-MAP (fMP4/CMAF) is now supported: the init URI is resolved against the
+	// playlist base and threaded onto every following segment, marking it fMP4.
 	body := "#EXTM3U\n#EXT-X-TARGETDURATION:6\n" +
-		"#EXT-X-MAP:URI=\"init.mp4\"\n#EXTINF:6,\na.m4s\n"
+		"#EXT-X-MAP:URI=\"init.mp4\"\n#EXTINF:6,\na.m4s\n#EXTINF:6,\nb.m4s\n"
+	m := parseMedia(t, body, "https://h/p/x.m3u8")
+	if len(m.segments) != 2 {
+		t.Fatalf("parsed %d segments, want 2", len(m.segments))
+	}
+	for i, s := range m.segments {
+		if s.initURI != "https://h/p/init.mp4" {
+			t.Errorf("segment %d initURI = %q, want the resolved init.mp4", i, s.initURI)
+		}
+	}
+}
+
+func TestParseRejectsFmp4MapNoURI(t *testing.T) {
+	body := "#EXTM3U\n#EXT-X-TARGETDURATION:6\n" +
+		"#EXT-X-MAP:BYTERANGE=\"0@0\"\n#EXTINF:6,\na.m4s\n"
 	if _, _, err := parsePlaylist([]byte(body), mustURL(t, "https://h/x.m3u8")); !errors.Is(err, ErrUnsupportedPlaylist) {
-		t.Errorf("EXT-X-MAP = %v, want ErrUnsupportedPlaylist", err)
+		t.Errorf("EXT-X-MAP BYTERANGE = %v, want ErrUnsupportedPlaylist", err)
+	}
+	body = "#EXTM3U\n#EXT-X-TARGETDURATION:6\n" +
+		"#EXT-X-MAP:FOO=\"bar\"\n#EXTINF:6,\na.m4s\n"
+	if _, _, err := parsePlaylist([]byte(body), mustURL(t, "https://h/x.m3u8")); !errors.Is(err, ErrMalformedPlaylist) {
+		t.Errorf("EXT-X-MAP without URI = %v, want ErrMalformedPlaylist", err)
 	}
 }
 

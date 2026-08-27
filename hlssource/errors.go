@@ -37,17 +37,19 @@ var (
 	// is neither a media nor a master playlist.
 	ErrMalformedPlaylist = errors.New("hlssource: malformed playlist")
 	// ErrUnsupportedPlaylist reports a valid playlist this source will not play:
-	// encrypted content (EXT-X-KEY with a method other than NONE), an fMP4
-	// initialization segment (EXT-X-MAP), a byte-range segment (EXT-X-BYTERANGE),
-	// or a master playlist with no audio-bearing option.
+	// encrypted content (EXT-X-KEY with a method other than NONE), a byte-range
+	// segment or byte-range fMP4 initialization segment (EXT-X-BYTERANGE, or
+	// EXT-X-MAP with BYTERANGE), an EXT-X-MAP initialization segment that changes
+	// mid-stream, or a master playlist with no audio-bearing option.
 	ErrUnsupportedPlaylist = errors.New("hlssource: unsupported playlist")
-	// ErrMalformedSegment reports a segment whose MPEG-TS structure could not be
-	// parsed: no 0x47 sync, no PAT or PMT, no audio PID, or no ADTS access unit
-	// in the elementary stream.
+	// ErrMalformedSegment reports a segment whose container structure could not be
+	// parsed: for MPEG-TS, no 0x47 sync, no PAT or PMT, no audio PID, or no ADTS
+	// access unit in the elementary stream; for fMP4, no audio track, a missing
+	// AudioSpecificConfig, or a malformed ISO BMFF box.
 	ErrMalformedSegment = errors.New("hlssource: malformed segment")
-	// ErrUnsupportedCodec reports a segment whose audio elementary stream is not
-	// AAC in ADTS (the only audio this source demuxes today): an MP3, LATM, or
-	// other stream_type in the PMT.
+	// ErrUnsupportedCodec reports a segment whose audio is not AAC (the only audio
+	// this source demuxes today): an MP3, LATM, or other stream_type in an MPEG-TS
+	// PMT, or an encrypted or non-AAC sample entry in an fMP4 track.
 	ErrUnsupportedCodec = errors.New("hlssource: unsupported audio codec")
 	// ErrPlaylistTooLarge reports a playlist body exceeding Config.MaxPlaylistBytes.
 	ErrPlaylistTooLarge = errors.New("hlssource: playlist exceeds size limit")
