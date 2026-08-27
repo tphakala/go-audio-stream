@@ -220,6 +220,9 @@ func TestCodecsG726Dynamic(t *testing.T) {
 		// G.726 is single-channel; a multi-channel advertisement cannot be
 		// decoded by the one-state decoder, so it stays CodecUnknown.
 		{"stereo", "G726-32/8000/2", 0, true},
+		// G.726 runs at an 8 kHz clock; any other clock is non-conformant and
+		// would skew PTS, so it stays CodecUnknown.
+		{"wrong clock", "G726-32/16000", 0, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

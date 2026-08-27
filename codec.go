@@ -63,11 +63,12 @@ func (CodecG711) isCodec() {}
 // channel count, both from the rtpmap (or the RFC 3551 defaults of 8000/1),
 // enough to interpret the delivered PCM.
 //
-// G.726 is a single-channel format: the RTP registration (RFC 3555) defines no
-// channels parameter, and the decoder carries one adaptive predictor and
-// quantizer state, so it decodes one channel. Channels is therefore always 1
-// for a resolved CodecG726; a track advertising more than one G.726 channel is
-// left as CodecUnknown rather than mis-decoded.
+// G.726 is a single-channel format at an 8 kHz clock (RFC 3551/4856 define no
+// channels parameter and fix the rate at 8000 Hz), and the decoder carries one
+// adaptive predictor and quantizer state, so it decodes one 8 kHz channel.
+// ClockRate is therefore always 8000 and Channels always 1 for a resolved
+// CodecG726; a track advertising a different clock or channel count is left as
+// CodecUnknown rather than mis-decoded or mis-timed.
 type CodecG726 struct {
 	BitRate   G726BitRate
 	ClockRate int

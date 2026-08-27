@@ -22,6 +22,10 @@ const (
 	g726Name40 = "G726-40"
 )
 
+// g726ClockRate is the fixed RTP clock rate for G.726 (RFC 3551/4856): all four
+// bit rates run at 8 kHz.
+const g726ClockRate = 8000
+
 // DescribedTrack is one media section resolved to a codec identity with
 // its clock rate, channel count, and control URL. It is what the RTSP
 // client turns into a Track.
@@ -139,7 +143,7 @@ func describeTrack(m *Media) DescribedTrack {
 		case 2:
 			// RFC 3551 static payload type 2 is G.721, identical to
 			// G.726 at 32 kbps.
-			encoding, clock, channels = g726Name32, 8000, 1
+			encoding, clock, channels = g726Name32, g726ClockRate, 1
 		default:
 			encoding, clock, channels = "", 0, 0
 		}
@@ -179,11 +183,12 @@ func describeTrack(m *Media) DescribedTrack {
 	case "PCMA":
 		t.Codec = audiostream.CodecG711{Law: audiostream.ALaw}
 	case g726Name16, g726Name24, g726Name32, g726Name40:
-		// G.726 is single-channel (RFC 3555 defines no channels parameter) and
-		// the decoder holds one adaptive state, so a multi-channel advertisement
-		// cannot be decoded correctly. Resolve mono to CodecG726 and leave any
-		// other channel count as CodecUnknown rather than mis-decode it.
-		if br, ok := g726BitRate(strings.ToUpper(encoding)); ok && channels == 1 {
+		// G.726 is single-channel at an 8 kHz clock (RFC 3551/4856: no channels
+		// parameter, 8000 Hz), and the decoder holds one adaptive state, so a
+		// multi-channel or non-8 kHz advertisement cannot be decoded or timed
+		// correctly. Resolve only the conformant form to CodecG726 and leave any
+		// other channel count or clock as CodecUnknown rather than mis-decode it.
+		if br, ok := g726BitRate(strings.ToUpper(encoding)); ok && channels == 1 && clock == g726ClockRate {
 			t.Codec = audiostream.CodecG726{BitRate: br, ClockRate: clock, Channels: channels}
 		} else {
 			t.Codec = audiostream.CodecUnknown{RTPMap: rtpmapString(encoding, clock, rawChannels, hasRTPMap)}

@@ -331,11 +331,15 @@ func (c *Client) resolveFormat() error {
 				return fmt.Errorf("%w: a PCM codec (G.711/L16/G.726) over RTP requires a positive Channels", ErrInvalidConfig)
 			}
 		}
-		// G.726 is single-channel: the decoder holds one adaptive state, so it
-		// cannot correctly decode interleaved multi-channel codewords. Reject a
-		// non-mono configuration rather than emit wrong audio.
+		// G.726 is single-channel at an 8 kHz clock (RFC 3551/4856). The decoder
+		// holds one adaptive state, so it cannot decode interleaved multi-channel
+		// codewords, and a non-8 kHz clock would misreport the sample rate and
+		// skew PTS. Reject either rather than emit wrong audio or timing.
 		if c.kind == kindG726 && c.cfg.Channels != 1 {
 			return fmt.Errorf("%w: G.726 is single-channel, got Channels %d", ErrInvalidConfig, c.cfg.Channels)
+		}
+		if c.kind == kindG726 && c.cfg.ClockRate != 8000 {
+			return fmt.Errorf("%w: G.726 requires an 8000 Hz clock, got %d", ErrInvalidConfig, c.cfg.ClockRate)
 		}
 		if c.kind == kindL16 {
 			c.frameBytes = 2 * c.cfg.Channels
