@@ -127,6 +127,10 @@ func describeTrack(m *Media) DescribedTrack {
 			encoding, clock, channels = encodingL16, 44100, 2
 		case 11:
 			encoding, clock, channels = encodingL16, 44100, 1
+		case 2:
+			// RFC 3551 static payload type 2 is G.721, identical to
+			// G.726 at 32 kbps.
+			encoding, clock, channels = "G726-32", 8000, 1
 		default:
 			encoding, clock, channels = "", 0, 0
 		}
@@ -165,6 +169,14 @@ func describeTrack(m *Media) DescribedTrack {
 		t.Codec = audiostream.CodecG711{Law: audiostream.MuLaw}
 	case "PCMA":
 		t.Codec = audiostream.CodecG711{Law: audiostream.ALaw}
+	case "G726-16":
+		t.Codec = audiostream.CodecG726{BitRate: audiostream.G726Rate16, ClockRate: clock, Channels: channels}
+	case "G726-24":
+		t.Codec = audiostream.CodecG726{BitRate: audiostream.G726Rate24, ClockRate: clock, Channels: channels}
+	case "G726-32":
+		t.Codec = audiostream.CodecG726{BitRate: audiostream.G726Rate32, ClockRate: clock, Channels: channels}
+	case "G726-40":
+		t.Codec = audiostream.CodecG726{BitRate: audiostream.G726Rate40, ClockRate: clock, Channels: channels}
 	case encodingL16:
 		t.Codec = audiostream.CodecL16{ClockRate: clock, Channels: channels}
 	default:

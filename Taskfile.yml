@@ -72,6 +72,10 @@ tasks:
       - go test -run '^$' -fuzz '^FuzzParseWAVHeader$' -fuzztime=2m ./httpsource
       - go test -run '^$' -fuzz '^FuzzMP3Stream$' -fuzztime=2m ./httpsource
       - go test -run '^$' -fuzz '^FuzzParse$' -fuzztime=2m ./internal/mp3
+      - go test -run '^$' -fuzz '^FuzzDecode$' -fuzztime=2m ./depacket/g726
+      - go test -run '^$' -fuzz '^FuzzParseInit$' -fuzztime=2m ./internal/mp4
+      - go test -run '^$' -fuzz '^FuzzParseFragment$' -fuzztime=2m ./internal/mp4
+      - go test -run '^$' -fuzz '^FuzzFMP4Demux$' -fuzztime=2m ./hlssource
 
   tidy:
     desc: Tidy and verify go.mod

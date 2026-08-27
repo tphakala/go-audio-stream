@@ -55,6 +55,21 @@ type CodecG711 struct {
 
 func (CodecG711) isCodec() {}
 
+// CodecG726 is ITU-T G.726 ADPCM audio (RFC 3551, 16/24/32/40 kbps). Like
+// G.711 it is delivered expanded to little-endian s16le PCM: the library runs
+// the ADPCM decoder as part of depacketization, so a CodecG726 track is
+// KindPCMS16LE, not KindCompressed. BitRate selects the codeword width the
+// depacketizer unpacks. ClockRate is the RTP clock in Hz and Channels the
+// channel count, both from the rtpmap (or the RFC 3551 defaults of 8000/1),
+// enough to interpret the delivered PCM.
+type CodecG726 struct {
+	BitRate   G726BitRate
+	ClockRate int
+	Channels  int
+}
+
+func (CodecG726) isCodec() {}
+
 // CodecL16 is uncompressed 16-bit linear PCM (RFC 3551 "L16"). Frames are
 // delivered as little-endian s16le PCM: the library byte-swaps the big-endian
 // (network byte order) RTP payload before delivery, so an L16 track and a

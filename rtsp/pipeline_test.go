@@ -10,6 +10,7 @@ import (
 	audiostream "github.com/tphakala/go-audio-stream"
 	"github.com/tphakala/go-audio-stream/depacket/aac"
 	"github.com/tphakala/go-audio-stream/depacket/g711"
+	"github.com/tphakala/go-audio-stream/depacket/g726"
 	"github.com/tphakala/go-audio-stream/rtsp/rtp"
 	"github.com/tphakala/go-audio-stream/rtsp/sdp"
 )
@@ -93,6 +94,7 @@ func TestNewTrackCodecSelection(t *testing.T) {
 		{name: "opus", codec: audiostream.CodecOpus{}, wantKind: deliverOpus},
 		{name: "g711 mulaw", codec: audiostream.CodecG711{Law: audiostream.MuLaw}, wantKind: deliverG711},
 		{name: "l16", codec: audiostream.CodecL16{ClockRate: 48000, Channels: 1}, wantKind: deliverL16},
+		{name: "g726", codec: audiostream.CodecG726{BitRate: audiostream.G726Rate32, ClockRate: 8000, Channels: 1}, wantKind: deliverG726},
 		{name: "unknown", codec: audiostream.CodecUnknown{}, wantKind: deliverRaw},
 	}
 	for _, tc := range cases {
@@ -359,6 +361,67 @@ func TestDeliverG711BufferReuse(t *testing.T) {
 	tr.deliver(small, rtp.Update{}, time.Unix(1, 0), func(audiostream.Frame) {})
 	if cap(tr.pcmBuf) != grown {
 		t.Errorf("pcmBuf cap = %d after a smaller packet, want unchanged %d", cap(tr.pcmBuf), grown)
+	}
+}
+
+// TestDeliverG726 checks the G.726 delivery path produces the decoder's s16le
+// PCM as one frame, and that resetDepacketizer(true) restarts the adaptive
+// decoder state on an SSRC change while a plain gap leaves it running.
+func TestDeliverG726(t *testing.T) {
+	t.Parallel()
+	payload := []byte{0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, 0xde, 0xf0}
+
+	newG726Track := func() *track {
+		tr := &track{id: 3, kind: deliverG726, clockRate: 8000}
+		dec, err := g726.New(audiostream.G726Rate32)
+		if err != nil {
+			t.Fatalf("New: %v", err)
+		}
+		tr.g726 = dec
+		tr.baseSet.Store(true)
+		return tr
+	}
+
+	// One packet decodes to the reference decoder's output.
+	tr := newG726Track()
+	ref, _ := g726.New(audiostream.G726Rate32)
+	want, err := ref.DecodeAlloc(payload)
+	if err != nil {
+		t.Fatalf("DecodeAlloc: %v", err)
+	}
+	var got audiostream.Frame
+	pkt := rtp.Packet{Header: rtp.Header{Timestamp: 160}, Payload: payload}
+	tr.deliver(pkt, rtp.Update{Timestamp: 160}, time.Unix(1, 0), func(f audiostream.Frame) { got = f })
+	if !bytes.Equal(got.Data, want) {
+		t.Errorf("first frame Data = % x, want % x", got.Data, want)
+	}
+
+	// The reference for the SECOND packet, on a decoder that already consumed
+	// the first (state carries across packets).
+	wantSecond, err := ref.DecodeAlloc(payload)
+	if err != nil {
+		t.Fatalf("DecodeAlloc second: %v", err)
+	}
+
+	// A plain gap must NOT reset the decoder: the second packet continues the
+	// adapted state, matching wantSecond.
+	tr.resetDepacketizer(false)
+	tr.deliver(pkt, rtp.Update{Timestamp: 320, Gap: 1}, time.Unix(2, 0), func(f audiostream.Frame) { got = f })
+	if !bytes.Equal(got.Data, wantSecond) {
+		t.Errorf("after plain gap Data = % x, want continued-state % x", got.Data, wantSecond)
+	}
+	if got.SeqGap != 1 {
+		t.Errorf("SeqGap = %d, want 1 folded onto the frame", got.SeqGap)
+	}
+
+	// An SSRC change MUST reset the decoder: after it, decoding the payload
+	// matches a fresh decoder's first-packet output again.
+	tr2 := newG726Track()
+	tr2.deliver(pkt, rtp.Update{Timestamp: 160}, time.Unix(1, 0), func(audiostream.Frame) {})
+	tr2.resetDepacketizer(true)
+	tr2.deliver(pkt, rtp.Update{Timestamp: 160}, time.Unix(3, 0), func(f audiostream.Frame) { got = f })
+	if !bytes.Equal(got.Data, want) {
+		t.Errorf("after SSRC reset Data = % x, want fresh-state % x", got.Data, want)
 	}
 }
 

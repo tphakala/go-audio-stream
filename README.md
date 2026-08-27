@@ -10,7 +10,7 @@ A pure-Go library for pulling audio off the network and handing the consumer
 timestamped frames. Its primary source is an RTSP client for IP cameras and
 restreamers: it runs the DESCRIBE / SETUP / PLAY handshake and pulls RTP over
 interleaved TCP or, opt-in, unicast UDP, depacketizes AAC (including MP4A-LATM),
-Opus, G.711 and L16 PCM, and delivers codec frames. A second source, the
+Opus, G.711, G.726 ADPCM, and L16 PCM, and delivers codec frames. A second source, the
 `httpsource` package, pulls audio off an HTTP(S) progressive endpoint: a WAV
 response or raw L16/PCM delivered as the same s16le frames, or a compressed MP3
 or ADTS AAC (Icecast/SHOUTcast) stream framed and delivered as coded frames. A
@@ -70,16 +70,17 @@ long-running soak testing, not core functionality.
   RTP packet (sequence tracking, SSRC re-baseline, timestamp unwrap) and
   depacketizes it by the caller-supplied payload type; `ModePCM` reads each
   datagram as interleaved s16 PCM. Because there is no SDP, the caller supplies
-  the codec, clock rate, and channel count. G.711, L16, and Opus are framed
+  the codec, clock rate, and channel count. G.711, G.726, L16, and Opus are framed
   today; AAC over raw RTP, RTP reordering, and RTCP are deferred, so an
   out-of-order datagram is dropped and surfaces as a sequence gap. An optional
   source-IP filter and a read-idle watchdog bound what it accepts and how long a
   silent sender keeps the session open.
 - **Depacketizers**: AAC (RFC 3640 AAC-hbr) and MP4A-LATM (RFC 3016, out-of-band
-  and in-band StreamMuxConfig), Opus (RFC 7587), G.711 mu-law and A-law, and L16
-  linear PCM (RFC 3551, from an `L16` rtpmap or the static payload types 10 and
-  11). G.711 and L16 are delivered as little-endian s16le PCM, so a consumer gets
-  PCM in one byte order regardless of which of the two it received. An
+  and in-band StreamMuxConfig), Opus (RFC 7587), G.711 mu-law and A-law, G.726
+  ADPCM (RFC 3551, 16/24/32/40 kbps, from a `G726-NN` rtpmap or the static payload
+  type 2), and L16 linear PCM (RFC 3551, from an `L16` rtpmap or the static payload
+  types 10 and 11). G.711, G.726, and L16 are delivered as little-endian s16le PCM,
+  so a consumer gets PCM in one byte order regardless of which of them it received. An
   unrecognized codec, a non-audio track, or an AAC mode this milestone does not
   decode degrades to raw payload delivery rather than failing the session.
 - **Source interface**: `rtsp.Client`, `httpsource.Client` and

@@ -12,6 +12,7 @@ import (
 	audiostream "github.com/tphakala/go-audio-stream"
 	"github.com/tphakala/go-audio-stream/depacket/aac"
 	"github.com/tphakala/go-audio-stream/depacket/g711"
+	"github.com/tphakala/go-audio-stream/depacket/g726"
 	"github.com/tphakala/go-audio-stream/depacket/opus"
 	"github.com/tphakala/go-audio-stream/internal/mediatime"
 	"github.com/tphakala/go-audio-stream/rtsp/rtp"
@@ -27,6 +28,7 @@ const (
 	kindL16                     // byte-swap big-endian L16 to s16le
 	kindOpus                    // deliver the Opus packet (compressed) unchanged
 	kindAAC                     // run the RFC 3640 AAC-hbr depacketizer, one CodecAAC frame per access unit
+	kindG726                    // run the ITU-T G.726 ADPCM decoder, expanding to s16le
 )
 
 // Client is a single raw-UDP audio source. It binds one UDP socket (and, when
@@ -98,6 +100,10 @@ type Client struct {
 	// udpsource-side copy: an access unit is delivered synchronously to OnFrame
 	// before the next Depacketize call that could overwrite its aliased backing.
 	aac *aac.Depacketizer
+	// g726 is the ITU-T G.726 ADPCM decoder for a CodecG726 ModeRTP source,
+	// nil otherwise. It carries adaptive state across packets, so it is reset
+	// only on an SSRC change, never on a plain sequence gap.
+	g726 *g726.Decoder
 
 	// pendingGap carries an observed sequence gap forward to the next frame
 	// actually delivered. A gap can land on a packet that delivers no frame (an
@@ -243,6 +249,64 @@ func Open(ctx context.Context, cfg Config) (*Client, error) {
 
 // resolveFormat validates the config and resolves the immutable delivery
 // geometry (kind/law for RTP, frameBytes/swap for PCM).
+// resolveRTPCodec dispatches on Config.Codec for a ModeRTP source, selecting
+// the delivery kind and building any per-codec depacketizer or decoder. It is
+// split out of resolveFormat so that function stays under the cyclomatic
+// complexity limit; resolveFormat still owns the surrounding transport and
+// channel validation.
+func (c *Client) resolveRTPCodec() error {
+	switch codec := c.cfg.Codec.(type) {
+	case audiostream.CodecG711:
+		c.kind, c.law = kindG711, codec.Law
+	case audiostream.CodecL16:
+		c.kind = kindL16
+	case audiostream.CodecOpus:
+		c.kind = kindOpus
+	case audiostream.CodecAAC:
+		c.kind = kindAAC
+		// Build the depacketizer once (applyDefaults has already filled
+		// SamplesPerFrame). Surface a bad width as this package's own
+		// ErrInvalidConfig: aac.ErrConfigInvalid is an internal detail, and
+		// wrapping it keeps the udpsource error contract stable while still
+		// letting errors.Is reach the precise cause through the chain.
+		dp, derr := aac.New(aac.Config{
+			SizeLength:       c.cfg.AAC.SizeLength,
+			IndexLength:      c.cfg.AAC.IndexLength,
+			IndexDeltaLength: c.cfg.AAC.IndexDeltaLength,
+			SamplesPerFrame:  c.cfg.AAC.SamplesPerFrame,
+		})
+		if derr != nil {
+			return fmt.Errorf("%w: AAC params: %w", ErrInvalidConfig, derr)
+		}
+		c.aac = dp
+		// If the caller left the reported ASC empty but supplied one via
+		// AACParams, fold it onto the stored CodecAAC value once here so
+		// Format() reports it with no per-call allocation. An ASC set on the
+		// CodecAAC value itself wins; AACParams.AudioSpecificConfig is the
+		// fallback.
+		if len(codec.AudioSpecificConfig) == 0 && len(c.cfg.AAC.AudioSpecificConfig) > 0 {
+			c.cfg.Codec = audiostream.CodecAAC{AudioSpecificConfig: c.cfg.AAC.AudioSpecificConfig}
+		}
+	case audiostream.CodecG726:
+		// Build the decoder once. A bad bit rate surfaces as this package's own
+		// ErrInvalidConfig, wrapping g726.ErrUnknownBitRate so errors.Is still
+		// reaches the precise cause, matching the AAC arm.
+		dec, derr := g726.New(codec.BitRate)
+		if derr != nil {
+			return fmt.Errorf("%w: G.726 bit rate: %w", ErrInvalidConfig, derr)
+		}
+		c.g726 = dec
+		c.kind = kindG726
+	case audiostream.CodecUnknown:
+		c.kind = kindOpaque
+	case nil:
+		return fmt.Errorf("%w: ModeRTP requires a Codec (use CodecUnknown for an opaque passthrough)", ErrInvalidConfig)
+	default:
+		return fmt.Errorf("%w: %T over raw RTP", ErrUnsupportedCodec, c.cfg.Codec)
+	}
+	return nil
+}
+
 func (c *Client) resolveFormat() error {
 	switch c.cfg.Mode {
 	case ModeRTP:
@@ -256,51 +320,15 @@ func (c *Client) resolveFormat() error {
 		if c.cfg.PayloadType > 127 {
 			return fmt.Errorf("%w: PayloadType must be 0-127 (7-bit RTP field), got %d", ErrInvalidConfig, c.cfg.PayloadType)
 		}
-		switch codec := c.cfg.Codec.(type) {
-		case audiostream.CodecG711:
-			c.kind, c.law = kindG711, codec.Law
-		case audiostream.CodecL16:
-			c.kind = kindL16
-		case audiostream.CodecOpus:
-			c.kind = kindOpus
-		case audiostream.CodecAAC:
-			c.kind = kindAAC
-			// Build the depacketizer once (applyDefaults has already filled
-			// SamplesPerFrame). Surface a bad width as this package's own
-			// ErrInvalidConfig: aac.ErrConfigInvalid is an internal detail, and
-			// wrapping it keeps the udpsource error contract stable while still
-			// letting errors.Is reach the precise cause through the chain.
-			dp, derr := aac.New(aac.Config{
-				SizeLength:       c.cfg.AAC.SizeLength,
-				IndexLength:      c.cfg.AAC.IndexLength,
-				IndexDeltaLength: c.cfg.AAC.IndexDeltaLength,
-				SamplesPerFrame:  c.cfg.AAC.SamplesPerFrame,
-			})
-			if derr != nil {
-				return fmt.Errorf("%w: AAC params: %w", ErrInvalidConfig, derr)
-			}
-			c.aac = dp
-			// If the caller left the reported ASC empty but supplied one via
-			// AACParams, fold it onto the stored CodecAAC value once here so
-			// Format() reports it with no per-call allocation. An ASC set on the
-			// CodecAAC value itself wins; AACParams.AudioSpecificConfig is the
-			// fallback.
-			if len(codec.AudioSpecificConfig) == 0 && len(c.cfg.AAC.AudioSpecificConfig) > 0 {
-				c.cfg.Codec = audiostream.CodecAAC{AudioSpecificConfig: c.cfg.AAC.AudioSpecificConfig}
-			}
-		case audiostream.CodecUnknown:
-			c.kind = kindOpaque
-		case nil:
-			return fmt.Errorf("%w: ModeRTP requires a Codec (use CodecUnknown for an opaque passthrough)", ErrInvalidConfig)
-		default:
-			return fmt.Errorf("%w: %T over raw RTP", ErrUnsupportedCodec, c.cfg.Codec)
+		if err := c.resolveRTPCodec(); err != nil {
+			return err
 		}
-		// A PCM codec (G.711, L16) delivers interleaved s16le, so its channel
-		// count must be known: it is reported in the format descriptor and, for
-		// L16, sizes the whole-frame delivery boundary.
-		if c.kind == kindG711 || c.kind == kindL16 {
+		// A PCM codec (G.711, L16, G.726) delivers interleaved s16le, so its
+		// channel count must be known: it is reported in the format descriptor
+		// and, for L16, sizes the whole-frame delivery boundary.
+		if c.kind == kindG711 || c.kind == kindL16 || c.kind == kindG726 {
 			if c.cfg.Channels <= 0 {
-				return fmt.Errorf("%w: a PCM codec (G.711/L16) over RTP requires a positive Channels", ErrInvalidConfig)
+				return fmt.Errorf("%w: a PCM codec (G.711/L16/G.726) over RTP requires a positive Channels", ErrInvalidConfig)
 			}
 		}
 		if c.kind == kindL16 {
@@ -538,6 +566,12 @@ func (c *Client) processRTP(pkt rtp.Packet, now time.Time) {
 		// and any gap still pending from the old source's sequence space (AAC or a
 		// single-frame codec) must not carry onto the new source's first frame.
 		c.resetAAC()
+		if c.g726 != nil {
+			// A new source restarts the G.726 stream, so its adaptive predictor
+			// and quantizer state must restart too. Done only on an SSRC change,
+			// not on a plain gap, where the state re-converges on its own.
+			c.g726.Reset()
+		}
 		c.pendingGap = 0
 	}
 	// Re-seed the PTS origin on the first packet and on every SSRC change, so the
@@ -629,6 +663,16 @@ func (c *Client) deliverRTP(pkt rtp.Packet, up rtp.Update, now time.Time) {
 			c.malformed.Add(1)
 		}
 		out = byteSwapInto(c.ensurePCMBuf(usable), pkt.Payload[:usable])
+	case kindG726:
+		// G.726 carries adaptive state across packets; it is reset only on an
+		// SSRC change (in processRTP), never here on a plain gap.
+		dst := c.ensurePCMBuf(c.g726.OutputLen(pkt.Payload))
+		wn, derr := c.g726.Decode(dst, pkt.Payload)
+		if derr != nil {
+			c.malformed.Add(1)
+			return
+		}
+		out = dst[:wn]
 	case kindOpus:
 		b, derr := opus.Depacketize(pkt.Payload)
 		if derr != nil {

@@ -1,12 +1,59 @@
 package udpsource
 
 import (
+	"bytes"
 	"testing"
 	"time"
 
 	audiostream "github.com/tphakala/go-audio-stream"
+	"github.com/tphakala/go-audio-stream/depacket/g726"
 	"github.com/tphakala/go-audio-stream/rtsp/rtp"
 )
+
+// TestRTPG726DeliversPCMAndGap confirms a ModeRTP G.726 source runs the ADPCM
+// decoder, delivering the reference decoder's s16le PCM as one frame, and folds
+// a sequence gap onto the next frame like the other single-frame codecs.
+func TestRTPG726DeliversPCMAndGap(t *testing.T) {
+	var col collector
+	c := openOK(t, Config{
+		Mode: ModeRTP, PayloadType: 96, Codec: audiostream.CodecG726{BitRate: audiostream.G726Rate32},
+		ClockRate: 8000, Channels: 1, OnFrame: col.onFrame,
+	})
+	defer func() { _ = c.Close() }()
+
+	// A fresh reference decoder mirrors the source's decoder, which also starts
+	// fresh at Open, so the first packet's output must match packet-for-packet.
+	ref, err := g726.New(audiostream.G726Rate32)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	p0 := []byte{0x12, 0x34, 0x56, 0x78}
+	p1 := []byte{0x9a, 0xbc, 0xde, 0xf0}
+	want0, _ := ref.DecodeAlloc(p0)
+	want1, _ := ref.DecodeAlloc(p1)
+
+	conn := senderFor(t, c)
+	sendAndSettle(t, c, conn, rtpPacket(96, 10, 0, 1, p0))
+	sendAndSettle(t, c, conn, rtpPacket(96, 13, 160, 1, p1)) // seq 11,12 lost -> gap 2
+	waitCount(t, &col, 2, 2*time.Second)
+
+	frames := col.snapshot()
+	if len(frames) != 2 {
+		t.Fatalf("delivered %d frames, want 2", len(frames))
+	}
+	if !bytes.Equal(frames[0].Data, want0) {
+		t.Errorf("frame 0 Data = % x, want % x", frames[0].Data, want0)
+	}
+	if !bytes.Equal(frames[1].Data, want1) {
+		t.Errorf("frame 1 Data = % x, want % x", frames[1].Data, want1)
+	}
+	if frames[1].SeqGap != 2 {
+		t.Errorf("frame 1 SeqGap = %d, want 2", frames[1].SeqGap)
+	}
+	if f := c.Format(); f.Kind != audiostream.KindPCMS16LE || f.SampleRate != 8000 || f.Channels != 1 {
+		t.Errorf("Format = %+v, want PCMS16LE 8000/1", f)
+	}
+}
 
 // These tests cover the per-frame SeqGap carry across a packet that delivers no
 // frame on a single-frame codec (Opus/G.711/L16), the udpsource analogue of the

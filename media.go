@@ -58,3 +58,40 @@ func (l Law) String() string {
 		return unknownName
 	}
 }
+
+// G726BitRate selects one of the four ITU-T G.726 ADPCM bit rates. The rate
+// fixes the codeword width on the wire (2, 3, 4, or 5 bits per sample for 16,
+// 24, 32, and 40 kbps), which a depacketizer needs to unpack the RTP payload.
+// It lives in this package (like Law) so CodecG726 can carry it without the
+// root package importing depacket/g726.
+type G726BitRate uint8
+
+const (
+	// G726Rate16 is 16 kbps G.726 (2 bits per codeword).
+	G726Rate16 G726BitRate = iota
+	// G726Rate24 is 24 kbps G.726 (3 bits per codeword).
+	G726Rate24
+	// G726Rate32 is 32 kbps G.726 (4 bits per codeword). RFC 3551 static
+	// payload type 2 (G.721) is this rate.
+	G726Rate32
+	// G726Rate40 is 40 kbps G.726 (5 bits per codeword).
+	G726Rate40
+)
+
+// String returns a short label like "32 kbps". A value outside the defined
+// rates reports "unknown" rather than a plausible rate, so a malformed value is
+// never mislabeled.
+func (r G726BitRate) String() string {
+	switch r {
+	case G726Rate16:
+		return "16 kbps"
+	case G726Rate24:
+		return "24 kbps"
+	case G726Rate32:
+		return "32 kbps"
+	case G726Rate40:
+		return "40 kbps"
+	default:
+		return unknownName
+	}
+}
