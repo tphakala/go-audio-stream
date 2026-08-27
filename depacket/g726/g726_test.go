@@ -165,10 +165,22 @@ func TestDecodeIncompletePayload(t *testing.T) {
 			if _, err := d.DecodeAlloc(make([]byte, tc.badLen)); !errors.Is(err, g726.ErrIncompletePayload) {
 				t.Fatalf("DecodeAlloc(%d bytes): got %v, want ErrIncompletePayload", tc.badLen, err)
 			}
-			// A rejected payload must not have advanced the adaptive state, so a
-			// following conformant payload still decodes cleanly.
-			if _, err := d.DecodeAlloc(make([]byte, tc.okLen)); err != nil {
+			// A rejected payload must leave the adaptive state untouched: decoding
+			// a conformant payload after the rejection must produce byte-identical
+			// PCM to a fresh decoder decoding the same bytes. If the malformed
+			// payload had advanced the state, the two would differ.
+			good := make([]byte, tc.okLen)
+			gotAfter, err := d.DecodeAlloc(good)
+			if err != nil {
 				t.Fatalf("DecodeAlloc(%d bytes): unexpected %v", tc.okLen, err)
+			}
+			fresh, _ := g726.New(tc.rate)
+			wantFresh, err := fresh.DecodeAlloc(good)
+			if err != nil {
+				t.Fatalf("fresh DecodeAlloc: %v", err)
+			}
+			if !bytes.Equal(gotAfter, wantFresh) {
+				t.Fatal("a rejected payload advanced the adaptive state")
 			}
 		})
 	}
