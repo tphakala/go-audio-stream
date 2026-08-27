@@ -482,6 +482,7 @@ func TestOpenInvalidConfig(t *testing.T) {
 		{"rtp pcm codec missing channels", Config{ListenAddr: loopbackAddr, Mode: ModeRTP, Codec: audiostream.CodecG711{Law: audiostream.MuLaw}, ClockRate: 8000}, ErrInvalidConfig},
 		{"rtp g726 missing channels", Config{ListenAddr: loopbackAddr, Mode: ModeRTP, Codec: audiostream.CodecG726{BitRate: audiostream.G726Rate32}, ClockRate: 8000}, ErrInvalidConfig},
 		{"rtp g726 bad rate", Config{ListenAddr: loopbackAddr, Mode: ModeRTP, Codec: audiostream.CodecG726{BitRate: 99}, ClockRate: 8000, Channels: 1}, ErrInvalidConfig},
+		{"rtp g726 non-mono", Config{ListenAddr: loopbackAddr, Mode: ModeRTP, Codec: audiostream.CodecG726{BitRate: audiostream.G726Rate32}, ClockRate: 8000, Channels: 2}, ErrInvalidConfig},
 		{"pcm missing rate", Config{ListenAddr: loopbackAddr, Mode: ModePCM, Format: PCMFormat{Channels: 1}}, ErrInvalidConfig},
 		{"bad source ip", Config{ListenAddr: loopbackAddr, Mode: ModeRTP, Codec: audiostream.CodecOpus{}, ClockRate: 48000, SourceIP: "not-an-ip"}, ErrInvalidConfig},
 		{"payload type above 127", Config{ListenAddr: loopbackAddr, Mode: ModeRTP, PayloadType: 200, Codec: audiostream.CodecOpus{}, ClockRate: 48000}, ErrInvalidConfig},

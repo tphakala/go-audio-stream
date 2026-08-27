@@ -43,6 +43,47 @@ func tfhdExplicitBase(trackID uint32, base uint64) []byte {
 	return fullBox("tfhd", 0, tfhdBaseDataOffset, u32(trackID), u64(base))
 }
 
+// TestParseFragmentSampleBudget pins the per-fragment delivered-sample cap. A
+// traf can pack many defaults-only truns that each re-seat data_offset to the
+// same mdat bytes; without a whole-fragment budget that re-delivers those bytes
+// a quadratic number of times. Since every delivered sample consumes at least
+// one fragment byte, ParseFragment must stop with ErrMalformedBox once the
+// samples delivered exceed the fragment's byte count.
+func TestParseFragmentSampleBudget(t *testing.T) {
+	const (
+		nTruns         = 40
+		samplesPerTrun = 100
+		mdatLen        = 100
+	)
+	// default-base-is-moof (base is the moof start) plus default_sample_size 1,
+	// so each sample is one byte and no per-sample records are present.
+	tfhd := fullBox("tfhd", 0, tfhdDefaultBaseIsMoof|tfhdDefaultSize, u32(1), u32(1))
+	truns := func(off int32) []byte {
+		out := make([]byte, 0, nTruns*24)
+		for i := 0; i < nTruns; i++ {
+			out = append(out, trunBox(trunDataOffset, samplesPerTrun, off, nil)...)
+		}
+		return out
+	}
+	// Two-pass: the data_offset must point at the mdat payload, whose position
+	// depends on the moof length, which is independent of the offset value.
+	moof0 := box("moof", box("traf", tfhd, truns(0)))
+	dataOff := int32(len(moof0) + 8) // mdat payload follows the moof box and the mdat header
+	frag := append(box("moof", box("traf", tfhd, truns(dataOff))), box("mdat", make([]byte, mdatLen))...)
+
+	delivered := 0
+	err := ParseFragment(AudioInit{TrackID: 1}, frag, func(Sample) error {
+		delivered++
+		return nil
+	})
+	if !errors.Is(err, ErrMalformedBox) {
+		t.Fatalf("ParseFragment = %v, want ErrMalformedBox from the per-fragment sample budget", err)
+	}
+	if delivered > len(frag) {
+		t.Fatalf("delivered %d samples, exceeds the fragment's %d-byte budget", delivered, len(frag))
+	}
+}
+
 // assembleAudioFrag builds a fragment with a single audio traf from prebuilt tfhd
 // and trun boxes plus an mdat payload. The moof is placed first, so moofStart is 0.
 func assembleAudioFrag(tfhd, trun, mdat []byte) []byte {

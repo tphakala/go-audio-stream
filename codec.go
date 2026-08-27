@@ -62,6 +62,12 @@ func (CodecG711) isCodec() {}
 // depacketizer unpacks. ClockRate is the RTP clock in Hz and Channels the
 // channel count, both from the rtpmap (or the RFC 3551 defaults of 8000/1),
 // enough to interpret the delivered PCM.
+//
+// G.726 is a single-channel format: the RTP registration (RFC 3555) defines no
+// channels parameter, and the decoder carries one adaptive predictor and
+// quantizer state, so it decodes one channel. Channels is therefore always 1
+// for a resolved CodecG726; a track advertising more than one G.726 channel is
+// left as CodecUnknown rather than mis-decoded.
 type CodecG726 struct {
 	BitRate   G726BitRate
 	ClockRate int

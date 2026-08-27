@@ -33,9 +33,9 @@
 // byte-range EXT-X-MAP (EXT-X-BYTERANGE), an EXT-X-MAP that changes mid-stream,
 // video, non-AAC audio (MP3 or LATM in TS, a non-AAC fMP4 sample entry), adaptive
 // bitrate switching, and Digest authentication. An unsupported container or
-// encrypted content fails Open with ErrUnsupportedPlaylist; a segment whose audio
-// is not AAC fails with ErrUnsupportedCodec; a segment carrying no audio at all
-// (video-only) fails with ErrMalformedSegment.
+// EXT-X-KEY (playlist-level) encryption fails Open with ErrUnsupportedPlaylist;
+// an encrypted or non-AAC fMP4 sample entry fails with ErrUnsupportedCodec; a
+// segment carrying no audio at all (video-only) fails with ErrMalformedSegment.
 //
 // The read-idle watchdog (Config.ReadIdle) answers "is new audio still
 // arriving": it is stamped on every successful playlist or segment body read.

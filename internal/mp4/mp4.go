@@ -597,7 +597,21 @@ func ParseFragment(init AudioInit, frag []byte, onSample func(Sample) error) err
 	if !ok {
 		return fmt.Errorf("%w: no track fragment for track %d", ErrMalformedBox, init.TrackID)
 	}
-	return parseTraf(traf, moofStart, frag, init, onSample)
+	// Bound the total samples delivered across the whole fragment, not just per
+	// trun. Every delivered sample occupies at least one byte of the fragment,
+	// so a fragment can never legitimately deliver more samples than it has
+	// bytes. Without this, several defaults-only truns that each re-seat
+	// data_offset to the same bytes could re-deliver them and drive a quadratic
+	// number of onSample calls on a small hostile fragment.
+	budget := len(frag)
+	guarded := func(s Sample) error {
+		if budget <= 0 {
+			return fmt.Errorf("%w: fragment delivers more samples than its bytes allow", ErrMalformedBox)
+		}
+		budget--
+		return onSample(s)
+	}
+	return parseTraf(traf, moofStart, frag, init, guarded)
 }
 
 // findAudioTraf returns the traf payload whose tfhd track_ID matches trackID.

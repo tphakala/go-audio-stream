@@ -14,6 +14,14 @@ import (
 // whereas PCMU/PCMA occur twice each and stay inline.
 const encodingL16 = "L16"
 
+// The four plain G.726 rtpmap encoding names (RFC 3551), one per bit rate.
+const (
+	g726Name16 = "G726-16"
+	g726Name24 = "G726-24"
+	g726Name32 = "G726-32"
+	g726Name40 = "G726-40"
+)
+
 // DescribedTrack is one media section resolved to a codec identity with
 // its clock rate, channel count, and control URL. It is what the RTSP
 // client turns into a Track.
@@ -131,7 +139,7 @@ func describeTrack(m *Media) DescribedTrack {
 		case 2:
 			// RFC 3551 static payload type 2 is G.721, identical to
 			// G.726 at 32 kbps.
-			encoding, clock, channels = "G726-32", 8000, 1
+			encoding, clock, channels = g726Name32, 8000, 1
 		default:
 			encoding, clock, channels = "", 0, 0
 		}
@@ -170,14 +178,16 @@ func describeTrack(m *Media) DescribedTrack {
 		t.Codec = audiostream.CodecG711{Law: audiostream.MuLaw}
 	case "PCMA":
 		t.Codec = audiostream.CodecG711{Law: audiostream.ALaw}
-	case "G726-16":
-		t.Codec = audiostream.CodecG726{BitRate: audiostream.G726Rate16, ClockRate: clock, Channels: channels}
-	case "G726-24":
-		t.Codec = audiostream.CodecG726{BitRate: audiostream.G726Rate24, ClockRate: clock, Channels: channels}
-	case "G726-32":
-		t.Codec = audiostream.CodecG726{BitRate: audiostream.G726Rate32, ClockRate: clock, Channels: channels}
-	case "G726-40":
-		t.Codec = audiostream.CodecG726{BitRate: audiostream.G726Rate40, ClockRate: clock, Channels: channels}
+	case g726Name16, g726Name24, g726Name32, g726Name40:
+		// G.726 is single-channel (RFC 3555 defines no channels parameter) and
+		// the decoder holds one adaptive state, so a multi-channel advertisement
+		// cannot be decoded correctly. Resolve mono to CodecG726 and leave any
+		// other channel count as CodecUnknown rather than mis-decode it.
+		if br, ok := g726BitRate(strings.ToUpper(encoding)); ok && channels == 1 {
+			t.Codec = audiostream.CodecG726{BitRate: br, ClockRate: clock, Channels: channels}
+		} else {
+			t.Codec = audiostream.CodecUnknown{RTPMap: rtpmapString(encoding, clock, rawChannels, hasRTPMap)}
+		}
 	case encodingL16:
 		t.Codec = audiostream.CodecL16{ClockRate: clock, Channels: channels}
 	default:
@@ -185,6 +195,25 @@ func describeTrack(m *Media) DescribedTrack {
 	}
 
 	return t
+}
+
+// g726BitRate maps an upper-cased G.726 rtpmap encoding name to its bit rate.
+// ok is false for a name that is not one of the four plain G726-NN forms (the
+// AAL2-G726 variants, which use a different bit order, are deliberately not
+// matched and fall through to CodecUnknown).
+func g726BitRate(up string) (audiostream.G726BitRate, bool) {
+	switch up {
+	case g726Name16:
+		return audiostream.G726Rate16, true
+	case g726Name24:
+		return audiostream.G726Rate24, true
+	case g726Name32:
+		return audiostream.G726Rate32, true
+	case g726Name40:
+		return audiostream.G726Rate40, true
+	default:
+		return 0, false
+	}
 }
 
 // rtpmapString reconstructs the "<encoding>/<clock>[/<channels>]" form for

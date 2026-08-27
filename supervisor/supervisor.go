@@ -199,6 +199,12 @@ func newWithClock(cfg Config, clk clock) *Supervisor {
 // been emitted.
 func (s *Supervisor) run(ctx context.Context) {
 	defer close(s.done)
+	// Cancel the run context on every exit path, including a return through
+	// finish(StateFailed, ...) which does not call runCancel itself. A Factory
+	// that derived a child context, timer, or goroutine from the context it was
+	// handed would otherwise keep it alive until the caller also calls Close.
+	// runCancel is idempotent, so this is safe alongside initiateShutdown.
+	defer s.runCancel()
 	defer s.recoverRun()
 	s.loop(ctx)
 }
@@ -463,7 +469,9 @@ func (s *Supervisor) Stats() audiostream.Stats {
 	// Clone so a caller mutating the returned map cannot corrupt the retained
 	// last snapshot, honoring the Source.Stats freshly-allocated contract. A nil
 	// Tracks map (before any session) clones to nil, which is the right zero.
-	return audiostream.Stats{CapturedAt: last.CapturedAt, Tracks: maps.Clone(last.Tracks)}
+	out := last
+	out.Tracks = maps.Clone(last.Tracks)
+	return out
 }
 
 // Info returns the current session's identity while a source is live, the last

@@ -217,6 +217,9 @@ func TestCodecsG726Dynamic(t *testing.T) {
 		{"aal2", "AAL2-G726-32/8000", 0, true},
 		// An out-of-range rate is not a G.726 this package knows.
 		{"bad rate", "G726-99/8000", 0, true},
+		// G.726 is single-channel; a multi-channel advertisement cannot be
+		// decoded by the one-state decoder, so it stays CodecUnknown.
+		{"stereo", "G726-32/8000/2", 0, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
