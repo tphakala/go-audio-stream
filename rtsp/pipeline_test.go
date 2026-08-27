@@ -402,6 +402,12 @@ func TestDeliverG726(t *testing.T) {
 	if err != nil {
 		t.Fatalf("DecodeAlloc second: %v", err)
 	}
+	// Precondition the reset/no-reset checks below rely on: continued adaptive
+	// state produces different output than a fresh decode of the same payload.
+	// If these were equal, the reset assertions could pass trivially.
+	if bytes.Equal(want, wantSecond) {
+		t.Fatal("test payload does not distinguish fresh from continued decoder state")
+	}
 
 	// A plain gap must NOT reset the decoder: the second packet continues the
 	// adapted state, matching wantSecond.

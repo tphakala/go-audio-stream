@@ -114,8 +114,8 @@ type track struct {
 	// lock. resetDepacketizer clears it only on an SSRC reset, not a plain gap,
 	// so a gap from the old sequence space cannot bleed onto the new source's
 	// first frame. Shared by every codec path: a track is exactly one codec, so
-	// they never contend. The single-frame codecs (Opus, G.711, L16, raw) drain
-	// it in the shared deliverOne; G.711 and L16 fold only past their
+	// they never contend. The single-frame codecs (Opus, G.711, G.726, L16, raw) drain
+	// it in the shared deliverOne; G.711, G.726 and L16 fold only past their
 	// onFrame==nil early return, so a nil-callback stream never accumulates.
 	pendingGap int
 	// wirePayloadType is the payload type this track has settled on and
@@ -795,7 +795,7 @@ func (tr *track) resetDepacketizer(onSSRCChange bool) {
 		// only here (SSRC reset), never on a plain gap, where the pending gap must
 		// survive to drain onto the next delivered frame. This is a standalone
 		// block, not nested under the tr.latm guard below, so it runs for every
-		// track: AAC and the single-frame codecs (Opus, G.711, L16, raw) all use
+		// track: AAC and the single-frame codecs (Opus, G.711, G.726, L16, raw) all use
 		// the accumulator, and none of them owns a tr.latm.
 		tr.pendingGap = 0
 	}

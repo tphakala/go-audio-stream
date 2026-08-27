@@ -1,10 +1,13 @@
 package supervisor
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"log/slog"
 	"maps"
 	"runtime"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -29,16 +32,19 @@ const urlOne = "rtsp://one/stream"
 // fakeSource is an rtsp-free audiostream.Source for tests. Wait either returns
 // its programmed error immediately or blocks until block is closed (or ctx
 // cancels); entered is closed the first time Wait runs, so a test can rendezvous
-// on the source becoming live.
+// on the source becoming live. When panicOnWait is set, Wait panics after
+// signalling entered, simulating a source that blows up mid-session so the
+// recoverRun live-source-close branch can be exercised.
 type fakeSource struct {
-	id         int
-	waitErr    error
-	block      chan struct{}
-	entered    chan struct{}
-	enterOnce  sync.Once
-	closeCount atomic.Int32
-	stats      audiostream.Stats
-	info       audiostream.SourceInfo
+	id          int
+	waitErr     error
+	panicOnWait bool
+	block       chan struct{}
+	entered     chan struct{}
+	enterOnce   sync.Once
+	closeCount  atomic.Int32
+	stats       audiostream.Stats
+	info        audiostream.SourceInfo
 }
 
 var _ audiostream.Source = (*fakeSource)(nil)
@@ -49,6 +55,9 @@ func newFakeSource(id int) *fakeSource {
 
 func (f *fakeSource) Wait(ctx context.Context) error {
 	f.enterOnce.Do(func() { close(f.entered) })
+	if f.panicOnWait {
+		panic("fakeSource: Wait boom")
+	}
 	if f.block != nil {
 		select {
 		case <-ctx.Done():
@@ -697,6 +706,169 @@ func TestFactoryPanicBecomesFailed(t *testing.T) {
 	}
 	if s.State() != StateFailed {
 		t.Errorf("State = %v, want Failed", s.State())
+	}
+}
+
+// TestLiveSourcePanicClosesSource pins the recoverRun live-source-close branch
+// (supervisor.go recoverRun): when a panic escapes while a source is LIVE (here
+// the source's Wait panics) rather than during a Factory call, recoverRun must
+// Close that live source so it does not leak, cancel the run, and record a
+// terminal StateFailed. The existing Factory-panic test panics while current is
+// nil, so this distinct branch was untested.
+func TestLiveSourcePanicClosesSource(t *testing.T) {
+	t.Parallel()
+	clk := newFakeClock()
+
+	src := newFakeSource(1)
+	src.panicOnWait = true // becomes live, then Wait panics mid-session
+	ff := &fakeFactory{steps: []*factoryStep{{src: src}}}
+	s := newWithClock(Config{Factory: ff.make}, clk)
+
+	// The run goroutine must reach a terminal failure and Wait must unblock with
+	// a non-nil cause (mustWait fails on a hang, proving no goroutine leak).
+	done := make(chan error, 1)
+	go func() { done <- s.Wait(context.Background()) }()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("Wait after a live-source panic = nil, want a non-nil failure")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Wait did not return after a live-source panic")
+	}
+	if s.State() != StateFailed {
+		t.Errorf("State = %v, want Failed", s.State())
+	}
+	// recoverRun must have Closed the live source exactly once so it does not leak.
+	if got := src.closeCount.Load(); got != 1 {
+		t.Errorf("live source Close count = %d, want 1 (recoverRun must close it)", got)
+	}
+}
+
+// TestOnStatePanicRecovered pins the emit panic-recovery branch (supervisor.go
+// emit): a panicking Config.OnState callback must be recovered and must not
+// disturb the state machine, so the supervisor still reaches a terminal state
+// and Wait returns normally. A Logger is supplied so the recovered-panic warning
+// branch inside emit executes too.
+func TestOnStatePanicRecovered(t *testing.T) {
+	t.Parallel()
+	clk := newFakeClock()
+
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+	// OnState panics on every transition; each call must be recovered by emit.
+	onState := func(StateChange) { panic("onState boom") }
+
+	src := newFakeSource(1)
+	src.block = make(chan struct{}) // stays live until Close
+	ff := &fakeFactory{steps: []*factoryStep{{src: src}}}
+	s := newWithClock(Config{Factory: ff.make, OnState: onState, Logger: logger}, clk)
+
+	awaitClose(t, src.entered, "session live despite a panicking OnState")
+	_ = s.Close()
+	mustWait(t, s, audiostream.ErrClosed)
+
+	if s.State() != StateClosed {
+		t.Errorf("State = %v, want Closed", s.State())
+	}
+	if !strings.Contains(buf.String(), "recovered panic in OnState callback") {
+		t.Errorf("logger output = %q, want it to record the recovered OnState panic", buf.String())
+	}
+}
+
+// TestCloseDuringFactoryErrorBackoff pins the FIRST backoffSleep call site
+// (supervisor.go loop, the Factory-error branch). TestCloseDuringBackoff reaches
+// backoff only after a session (Wait) failure, the SECOND site. Here the Factory
+// itself fails with a retryable error and a Close arrives while the ensuing
+// backoff sleep is parked: the sleep must be interrupted, Wait must return
+// ErrClosed, the Factory must not be called again, and StateClosed must be the
+// terminal phase.
+func TestCloseDuringFactoryErrorBackoff(t *testing.T) {
+	t.Parallel()
+	clk := newFakeClock()
+	clk.auto = false // hold the sleep so we can Close mid-backoff
+
+	// The Factory fails outright, so the first backoffSleep site drives the wait.
+	ff := &fakeFactory{steps: []*factoryStep{{err: errFlaky}}}
+	s := newWithClock(Config{Factory: ff.make}, clk)
+
+	awaitSleep(t, clk) // the Factory-error backoff has begun; the sleep is parked
+	_ = s.Close()
+	mustWait(t, s, audiostream.ErrClosed)
+
+	if got := ff.callCount(); got != 1 {
+		t.Errorf("Factory calls = %d, want 1 (no reconnect after Close during the factory-error backoff)", got)
+	}
+	if got := len(clk.durations()); got != 1 {
+		t.Errorf("backoff sleeps = %d, want 1 (the interrupted factory-error backoff)", got)
+	}
+	if s.State() != StateClosed {
+		t.Errorf("State = %v, want Closed", s.State())
+	}
+}
+
+// TestStateString pins State.String for every named state and the out-of-range
+// default fallback used by logs and diagnostics.
+func TestStateString(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		state State
+		want  string
+	}{
+		{StateConnecting, "connecting"},
+		{StateConnected, "connected"},
+		{StateReconnecting, "reconnecting"},
+		{StateClosed, "closed"},
+		{StateFailed, "failed"},
+		{State(99), "State(99)"}, // out-of-range default fallback
+	}
+	for _, tc := range cases {
+		if got := tc.state.String(); got != tc.want {
+			t.Errorf("State(%d).String() = %q, want %q", int(tc.state), got, tc.want)
+		}
+	}
+}
+
+// TestLoggerBranchesExercised drives the s.logger != nil branches in
+// backoffSleep (the reconnect-scheduling Debug record) and recoverRun (the
+// recovered-panic Warning record) with a real *slog.Logger, asserting the run
+// stays healthy and both records are written. A retryable Factory error forces a
+// backoff, then a live source whose Wait panics forces a recovered panic.
+func TestLoggerBranchesExercised(t *testing.T) {
+	t.Parallel()
+	clk := newFakeClock() // auto sleep: the backoff returns immediately
+
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+	boom := newFakeSource(2)
+	boom.panicOnWait = true
+	ff := &fakeFactory{steps: []*factoryStep{{err: errFlaky}, {src: boom}}}
+	s := newWithClock(Config{Factory: ff.make, Logger: logger}, clk)
+
+	// The recovered live-source panic ends the run at StateFailed; Wait must
+	// unblock with a non-nil cause.
+	done := make(chan error, 1)
+	go func() { done <- s.Wait(context.Background()) }()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("Wait = nil, want a non-nil failure")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Wait did not return")
+	}
+	if s.State() != StateFailed {
+		t.Errorf("State = %v, want Failed", s.State())
+	}
+
+	out := buf.String()
+	if !strings.Contains(out, "scheduling reconnect") {
+		t.Errorf("logger output = %q, want the backoffSleep reconnect record", out)
+	}
+	if !strings.Contains(out, "recovered panic in run loop") {
+		t.Errorf("logger output = %q, want the recoverRun panic record", out)
 	}
 }
 

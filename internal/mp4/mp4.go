@@ -208,6 +208,13 @@ func ParseInit(data []byte) (AudioInit, error) {
 	if !found {
 		return AudioInit{}, ErrNoAudioTrack
 	}
+	// A zero or out-of-range timescale cannot yield real sample durations (every
+	// PTS would be 0, and on a 32-bit build a value above MaxInt32 would narrow
+	// negative in the ticks-to-duration conversion), so reject it here rather
+	// than deliver a stream whose media clock never advances.
+	if ai.Timescale == 0 || ai.Timescale > math.MaxInt32 {
+		return AudioInit{}, fmt.Errorf("%w: invalid media timescale %d", ErrMalformedBox, ai.Timescale)
+	}
 	if d, ok := trex[ai.TrackID]; ok {
 		ai.DefaultDur = d.dur
 		ai.DefaultSize = d.size
@@ -655,7 +662,7 @@ func parseTraf(traf []byte, moofStart int, frag []byte, init AudioInit, onSample
 	if !ok {
 		return fmt.Errorf("%w: track fragment has no tfhd", ErrMalformedBox)
 	}
-	base, defDur, defSize, err := parseTFHD(tfhd, moofStart)
+	base, defDur, defSize, baseExplicit, err := parseTFHD(tfhd, moofStart)
 	if err != nil {
 		return err
 	}
@@ -667,16 +674,25 @@ func parseTraf(traf []byte, moofStart int, frag []byte, init AudioInit, onSample
 	}
 
 	dataPtr := base
+	// located tracks whether the sample data position is reliably known. It is
+	// true once an explicit tfhd base_data_offset or a trun data_offset has fixed
+	// it; a trun that omits its data_offset before that point cannot be placed
+	// (the default base is the moof start, which is not the media data) and is
+	// rejected in parseTrun.
+	located := baseExplicit
 	short := false
 	var inner error
 	e := eachBox(traf, func(b boxSpan) error {
 		if b.typ != "trun" {
 			return nil
 		}
-		next, wasShort, terr := parseTrun(traf[b.bodyOff:b.bodyEnd], base, dataPtr, defDur, defSize, frag, onSample)
+		next, hadOffset, wasShort, terr := parseTrun(traf[b.bodyOff:b.bodyEnd], base, dataPtr, located, defDur, defSize, frag, onSample)
 		if terr != nil {
 			inner = terr
 			return errStopBox
+		}
+		if hadOffset {
+			located = true
 		}
 		dataPtr = next
 		if wasShort {
@@ -700,43 +716,47 @@ func parseTraf(traf []byte, moofStart int, frag []byte, init AudioInit, onSample
 // parseTFHD reads the base_data_offset and default sample duration/size from a
 // tfhd. base is the moof start when the default-base-is-moof flag is set (the CMAF
 // case) or when no base is signalled, and the explicit base_data_offset otherwise.
-func parseTFHD(tfhd []byte, moofStart int) (base int, defDur, defSize uint32, err error) {
+func parseTFHD(tfhd []byte, moofStart int) (base int, defDur, defSize uint32, baseExplicit bool, err error) {
 	if len(tfhd) < 8 {
-		return 0, 0, 0, fmt.Errorf("%w: short tfhd", ErrMalformedBox)
+		return 0, 0, 0, false, fmt.Errorf("%w: short tfhd", ErrMalformedBox)
 	}
 	flags := uint32(tfhd[1])<<16 | uint32(tfhd[2])<<8 | uint32(tfhd[3])
 	off := 8 // FullBox(4) + track_ID(4)
 	base = moofStart
 	if flags&tfhdBaseDataOffset != 0 {
 		if off+8 > len(tfhd) {
-			return 0, 0, 0, fmt.Errorf("%w: tfhd base_data_offset truncated", ErrMalformedBox)
+			return 0, 0, 0, false, fmt.Errorf("%w: tfhd base_data_offset truncated", ErrMalformedBox)
 		}
 		v := binary.BigEndian.Uint64(tfhd[off : off+8])
 		if v > math.MaxInt32 {
-			return 0, 0, 0, fmt.Errorf("%w: tfhd base_data_offset out of range", ErrMalformedBox)
+			return 0, 0, 0, false, fmt.Errorf("%w: tfhd base_data_offset out of range", ErrMalformedBox)
 		}
 		base = int(v)
+		baseExplicit = true
 		off += 8
 	}
 	if flags&tfhdSampleDescIndex != 0 {
+		if off+4 > len(tfhd) {
+			return 0, 0, 0, false, fmt.Errorf("%w: tfhd sample_description_index truncated", ErrMalformedBox)
+		}
 		off += 4
 	}
 	if flags&tfhdDefaultDuration != 0 {
 		if off+4 > len(tfhd) {
-			return 0, 0, 0, fmt.Errorf("%w: tfhd default_sample_duration truncated", ErrMalformedBox)
+			return 0, 0, 0, false, fmt.Errorf("%w: tfhd default_sample_duration truncated", ErrMalformedBox)
 		}
 		defDur = binary.BigEndian.Uint32(tfhd[off : off+4])
 		off += 4
 	}
 	if flags&tfhdDefaultSize != 0 {
 		if off+4 > len(tfhd) {
-			return 0, 0, 0, fmt.Errorf("%w: tfhd default_sample_size truncated", ErrMalformedBox)
+			return 0, 0, 0, false, fmt.Errorf("%w: tfhd default_sample_size truncated", ErrMalformedBox)
 		}
 		defSize = binary.BigEndian.Uint32(tfhd[off : off+4])
 	}
 	// default_sample_flags (tfhdDefaultFlags), if present, follows here but is not
 	// needed for audio slicing, so off is not advanced past default_sample_size.
-	return base, defDur, defSize, nil
+	return base, defDur, defSize, baseExplicit, nil
 }
 
 // trun flag bits (ISO/IEC 14496-12).
@@ -756,25 +776,34 @@ const (
 // next is the data pointer after the last delivered sample; wasShort is true when
 // a sample's data overran the fragment buffer, which stops delivery for a counted
 // gap rather than a panic.
-func parseTrun(trun []byte, base, running int, defDur, defSize uint32, frag []byte, onSample func(Sample) error) (next int, wasShort bool, err error) {
+func parseTrun(trun []byte, base, running int, located bool, defDur, defSize uint32, frag []byte, onSample func(Sample) error) (next int, hadOffset, wasShort bool, err error) {
 	if len(trun) < 8 {
-		return running, false, fmt.Errorf("%w: short trun", ErrMalformedBox)
+		return running, false, false, fmt.Errorf("%w: short trun", ErrMalformedBox)
 	}
 	flags := uint32(trun[1])<<16 | uint32(trun[2])<<8 | uint32(trun[3])
 	sampleCount := binary.BigEndian.Uint32(trun[4:8])
 	off := 8
 	dataPtr := running
-	if flags&trunDataOffset != 0 {
+	hadOffset = flags&trunDataOffset != 0
+	if hadOffset {
 		if off+4 > len(trun) {
-			return running, false, fmt.Errorf("%w: trun data_offset truncated", ErrMalformedBox)
+			return running, false, false, fmt.Errorf("%w: trun data_offset truncated", ErrMalformedBox)
 		}
 		dataOffset := int32(binary.BigEndian.Uint32(trun[off : off+4]))
 		off += 4
 		dataPtr = base + int(dataOffset)
+	} else if !located {
+		// This trun carries no explicit data_offset and no base has been
+		// established (no tfhd base_data_offset and no preceding trun offset in
+		// this traf), so the sample data cannot be located: base defaults to the
+		// moof start, which addresses the moof box, not the media in mdat. Fail
+		// closed rather than slice the moof header (or, in a multiplexed segment,
+		// another track's bytes) as AAC.
+		return running, false, false, fmt.Errorf("%w: trun has no data_offset and no base was established", ErrMalformedBox)
 	}
 	if flags&trunFirstSampleFlags != 0 {
 		if off+4 > len(trun) {
-			return running, false, fmt.Errorf("%w: trun first_sample_flags truncated", ErrMalformedBox)
+			return running, hadOffset, false, fmt.Errorf("%w: trun first_sample_flags truncated", ErrMalformedBox)
 		}
 		off += 4
 	}
@@ -797,13 +826,13 @@ func parseTrun(trun []byte, base, running int, defDur, defSize uint32, frag []by
 	switch {
 	case perSample > 0:
 		if uint64(sampleCount) > uint64(remaining/perSample) {
-			return running, false, fmt.Errorf("%w: trun sample_count exceeds the box", ErrMalformedBox)
+			return running, hadOffset, false, fmt.Errorf("%w: trun sample_count exceeds the box", ErrMalformedBox)
 		}
 	default:
 		// No per-sample records: every sample uses the defaults, so the count is
 		// bounded only by how much sample data the fragment can hold.
 		if uint64(sampleCount) > uint64(len(frag)) {
-			return running, false, fmt.Errorf("%w: trun sample_count exceeds the fragment", ErrMalformedBox)
+			return running, hadOffset, false, fmt.Errorf("%w: trun sample_count exceeds the fragment", ErrMalformedBox)
 		}
 	}
 	for s := uint32(0); s < sampleCount; s++ {
@@ -824,16 +853,16 @@ func parseTrun(trun []byte, base, running int, defDur, defSize uint32, frag []by
 			off += 4
 		}
 		if size == 0 || dataPtr < 0 {
-			return dataPtr, true, nil
+			return dataPtr, hadOffset, true, nil
 		}
 		end := dataPtr + int(size)
 		if end < dataPtr || end > len(frag) {
-			return dataPtr, true, nil
+			return dataPtr, hadOffset, true, nil
 		}
 		if err := onSample(Sample{Data: frag[dataPtr:end], Dur: dur}); err != nil {
-			return dataPtr, false, err
+			return dataPtr, hadOffset, false, err
 		}
 		dataPtr = end
 	}
-	return dataPtr, false, nil
+	return dataPtr, hadOffset, false, nil
 }

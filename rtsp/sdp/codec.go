@@ -25,7 +25,7 @@ type DescribedTrack struct {
 	// listed no formats.
 	PayloadType int
 	// Codec is the resolved codec: CodecAAC, CodecMP4ALATM, CodecOpus,
-	// CodecG711, CodecL16, or CodecUnknown. Never nil.
+	// CodecG711, CodecG726, CodecL16, or CodecUnknown. Never nil.
 	Codec audiostream.Codec
 	// ClockRate is the RTP clock rate in Hz, 0 if unknown.
 	ClockRate int
@@ -86,8 +86,9 @@ type LATMParams struct {
 // fails: an unrecognized encoding maps to CodecUnknown, and a media
 // section with no formats yields a CodecUnknown track with PayloadType
 // -1. RFC 3551 static payload types 0 (PCMU) and 8 (PCMA) resolve to
-// CodecG711, and 10 (L16 stereo 44100) and 11 (L16 mono 44100) resolve to
-// CodecL16, even when no a=rtpmap is present.
+// CodecG711, 2 (G.721, equivalent to G.726 at 32 kbps) to CodecG726, and 10
+// (L16 stereo 44100) and 11 (L16 mono 44100) to CodecL16, even when no a=rtpmap
+// is present.
 func (s *Session) Codecs() []DescribedTrack {
 	tracks := make([]DescribedTrack, 0, len(s.Media))
 	for i := range s.Media {
