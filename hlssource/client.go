@@ -246,18 +246,33 @@ func (c *Client) openHandshake(ctx context.Context) error {
 }
 
 // buildDemuxer selects and constructs the demuxer for the first playable segment:
-// an fMP4 demuxer when the segment carries an EXT-X-MAP init URI (the init segment
-// is fetched here, bounded by the segment size cap, so the AudioSpecificConfig is
-// resolved before any fragment is demuxed), or a plain MPEG-TS demuxer otherwise.
+// an fMP4 demuxer when the segment carries an EXT-X-MAP init URI (its
+// initialization segment is read through fetchInitSegment, which owns the size
+// bound, so the AudioSpecificConfig is resolved before any fragment is demuxed),
+// or a plain MPEG-TS demuxer otherwise.
 func (c *Client) buildDemuxer(ctx context.Context, seg mediaSegment) (segmentDemuxer, error) {
 	if seg.initURI == "" {
 		return newTSDemux(), nil
 	}
-	initBody, err := c.get(ctx, seg.initURI, c.cfg.MaxSegmentBytes, ErrSegmentTooLarge)
+	initBody, err := c.fetchInitSegment(ctx, seg.initURI)
 	if err != nil {
 		return nil, err
 	}
 	return newFMP4Demux(initBody)
+}
+
+// fetchInitSegment fetches an EXT-X-MAP initialization segment, bounded by the
+// segment size cap. It is the single place an init is read, shared by Open (via
+// buildDemuxer) and by the mid-stream replacement path (reinitFMP4), so a change
+// to how an init is fetched (a byte-range check, a conditional GET, an init size
+// cap distinct from the media one) lands once rather than in two places.
+//
+// It deliberately stops at the bytes and does not build the demuxer, because the
+// two callers differ in what happens between the two steps: reinitFMP4 stamps
+// the read-idle watchdog on a successful init read and Open does not, having no
+// watchdog running yet. That asymmetry stays at the call sites.
+func (c *Client) fetchInitSegment(ctx context.Context, initURI string) ([]byte, error) {
+	return c.get(ctx, initURI, c.cfg.MaxSegmentBytes, ErrSegmentTooLarge)
 }
 
 // fetchMediaPlaylist fetches and parses the playlist at rawURL, following one
@@ -704,13 +719,14 @@ func (c *Client) processSegment(seg mediaSegment, disc bool) error {
 // doubles the fetch count it already commanded; it cannot loop or allocate
 // without bound.
 func (c *Client) reinitFMP4(initURI string) error {
-	initBody, err := c.get(c.reqBaseCtx(), initURI, c.cfg.MaxSegmentBytes, ErrSegmentTooLarge)
+	initBody, err := c.fetchInitSegment(c.reqBaseCtx(), initURI)
 	if err != nil {
 		return err
 	}
-	// A successful init read is new bytes off the network: stamp it, so a slow
-	// init fetch cannot starve the read-idle watchdog before the segment that
-	// follows it stamps its own read.
+	// A successful init read is new bytes off the network: stamp the read-idle
+	// watchdog so a slow init fetch cannot starve it before the segment that
+	// follows stamps its own read. This is the caller-side half of the asymmetry
+	// fetchInitSegment's doc describes (Open has no watchdog to stamp yet).
 	c.stampRead()
 	d, err := newFMP4Demux(initBody)
 	if err != nil {
@@ -755,6 +771,16 @@ func (c *Client) reinitFMP4(initURI string) error {
 	// are redundant barriers against the same hazard, so no single current code
 	// path distinguishes dropping one from keeping both, and each is defensive at
 	// the segmentDemuxer boundary rather than against any implementation in tree.
+	//
+	// That redundancy is specific to THIS source and does not carry over to the
+	// structurally identical block in rtsp's deliverLATM, where the two copies are
+	// NOT interchangeable. The difference is that a replacement init builds a
+	// whole new demuxer here (newFMP4Demux resolves the config once at
+	// construction), so nothing recycles a buffer across the comparison, whereas
+	// the LATM depacketizer keeps one long-lived pair of ASC arrays and parses
+	// each new config into the one it is about to promote. Dropping rtsp's
+	// snapshot there silences real mid-stream config changes; see the comment on
+	// that block before applying this one by analogy.
 	c.asc = append([]byte(nil), asc...)
 	if c.cfg.Logger != nil {
 		c.cfg.Logger.Info("hlssource: initialization segment changed; audio configuration updated",

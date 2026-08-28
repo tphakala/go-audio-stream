@@ -235,7 +235,7 @@ func newTrack(id int, desc describedTrack, opts SetupOptions, rtcpCh int, logger
 		tr.kind = deliverL16
 		tr.l16FrameSize = 2 * codec.Channels
 	case audiostream.CodecG726:
-		tr.configureG726(codec, logger)
+		tr.configureG726(codec, opts.G726Packing, logger)
 	default:
 		logWarn(logger, "unrecognized codec; delivering raw payloads", "track", id)
 	}
@@ -301,12 +301,28 @@ func modeOf(params *sdp.AACParams) string {
 
 // configureG726 selects the ITU-T G.726 ADPCM decoder for a CodecG726 track,
 // with the codeword packing the SDP resolved (RFC 3551 for the plain G726-NN
-// names, AAL2 for the AAL2-G726-NN ones). The SDP layer only resolves the four
-// valid bit rates and the two defined packings, so g726.New cannot fail here in
-// practice; the fallback to raw delivery is defensive, matching the other
-// configure* helpers.
-func (tr *track) configureG726(codec audiostream.CodecG726, logger *slog.Logger) {
-	dec, err := g726.New(codec.BitRate, codec.Packing)
+// names, AAL2 for the AAL2-G726-NN ones) unless the caller overrode it through
+// SetupOptions.G726Packing, for a camera whose encoding name does not match how
+// it actually packs. The SDP layer only resolves the four valid bit rates and
+// the two defined packings, and the override maps onto those same two, so
+// g726.New cannot fail here in practice; the fallback to raw delivery is
+// defensive, matching the other configure* helpers.
+func (tr *track) configureG726(codec audiostream.CodecG726, override G726PackingOverride, logger *slog.Logger) {
+	if !override.valid() {
+		// An out-of-range override resolves to the SDP packing below (fail-open, so
+		// a bad config value never fails Setup), but that is exactly the
+		// silent-wrong-audio outcome the option exists to escape, so it must not
+		// pass without a diagnostic. Name the bad value and state that the SDP
+		// packing is being used instead.
+		logWarn(logger, "g726 packing override value out of range; using SDP packing",
+			"track", tr.id, "override", uint8(override), "sdp", codec.Packing.String())
+	}
+	packing := override.packing(codec.Packing)
+	if packing != codec.Packing {
+		logWarn(logger, "g726 codeword packing overridden by caller",
+			"track", tr.id, "sdp", codec.Packing.String(), "using", packing.String())
+	}
+	dec, err := g726.New(codec.BitRate, packing)
 	if err != nil {
 		tr.kind = deliverRaw
 		logWarn(logger, "g726 configuration invalid; delivering raw payloads", "error", err)
@@ -526,13 +542,30 @@ func (tr *track) deliverLATM(pkt rtp.Packet, up rtp.Update, now time.Time,
 	}
 
 	if asc := tr.latm.AudioSpecificConfig(); asc != nil && !bytes.Equal(asc, tr.latmASC) {
-		// Retain an independent snapshot for the change comparison above.
+		// Two copies of one slice, each defending a distinct hazard, not the same
+		// one twice. AudioSpecificConfig returns the depacketizer's own array by
+		// reference, and the depacketizer recycles two ASC arrays across parses:
+		// each new config is parsed into the scratch array (the one displaced two
+		// parses ago), which then becomes active while the array it displaces is
+		// kept as the next parse's scratch. So the snapshot below must not alias
+		// asc. If it did, a resend of
+		// the same config (which flips which physical array is the scratch)
+		// followed by a genuine mid-stream change would parse that change straight
+		// into the array tr.latmASC aliases, overwriting it in place; the
+		// bytes.Equal test above would then compare that array against itself,
+		// report no change, and OnCodecUpdate would never fire for the real change.
+		// Taking a private copy keeps the comparison anchored to the last value we
+		// actually reported.
+		//
+		// The callback's separate copy defends the opposite direction: a consumer
+		// that violates the read-only contract on CodecUpdate and mutates what it
+		// was handed must not be able to reach the depacketizer's live array
+		// through it. Handing the callback its own copy keeps any such mutation
+		// local. The two copies are not interchangeable: dropping the snapshot
+		// silences real config changes, dropping the callback copy exposes the
+		// depacketizer's buffer to a misbehaving consumer.
 		tr.latmASC = append([]byte(nil), asc...)
 		if onCodecUpdate != nil {
-			// Hand the callback a SEPARATE copy. The OnCodecUpdate contract
-			// documents the slice as read-only, but a consumer that mutates it
-			// in place must not be able to reach back into tr.latmASC and skew
-			// a later comparison.
 			onCodecUpdate(audiostream.CodecUpdate{
 				TrackID: tr.id,
 				Codec: audiostream.CodecMP4ALATM{

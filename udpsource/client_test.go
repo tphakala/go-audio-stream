@@ -14,6 +14,7 @@ import (
 	audiostream "github.com/tphakala/go-audio-stream"
 	"github.com/tphakala/go-audio-stream/depacket/aac"
 	"github.com/tphakala/go-audio-stream/depacket/g711"
+	"github.com/tphakala/go-audio-stream/depacket/g726"
 	"github.com/tphakala/go-audio-stream/internal/mediatime"
 	"github.com/tphakala/go-audio-stream/rtsp/rtp"
 )
@@ -1323,6 +1324,42 @@ func TestRTPAACConfigInvalidWrapsCause(t *testing.T) {
 	}
 	if !errors.Is(err, aac.ErrConfigInvalid) {
 		t.Errorf("Open error = %v, want it to wrap aac.ErrConfigInvalid", err)
+	}
+}
+
+// TestRTPG726ConfigInvalidWrapsCause is the G.726 counterpart of
+// TestRTPAACConfigInvalidWrapsCause. The G.726 arm of resolveRTPCodec documents
+// that a bad bit rate or packing surfaces as ErrInvalidConfig while still
+// wrapping the precise g726 cause, so errors.Is reaches it; nothing asserted
+// that, so the wrap could have been dropped silently.
+func TestRTPG726ConfigInvalidWrapsCause(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		codec     audiostream.CodecG726
+		wantCause error
+	}{
+		{
+			name:      "bad bit rate",
+			codec:     audiostream.CodecG726{BitRate: audiostream.G726BitRate(99), Packing: audiostream.G726PackingRFC3551, ClockRate: 8000, Channels: 1},
+			wantCause: g726.ErrUnknownBitRate,
+		},
+		{
+			name:      "bad packing",
+			codec:     audiostream.CodecG726{BitRate: audiostream.G726Rate32, Packing: audiostream.G726Packing(99), ClockRate: 8000, Channels: 1},
+			wantCause: g726.ErrUnknownPacking,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := Open(context.Background(), Config{
+				ListenAddr: loopbackAddr, Mode: ModeRTP, PayloadType: 96, Codec: tc.codec, ClockRate: 8000,
+			})
+			if !errors.Is(err, ErrInvalidConfig) {
+				t.Errorf("Open error = %v, want ErrInvalidConfig", err)
+			}
+			if !errors.Is(err, tc.wantCause) {
+				t.Errorf("Open error = %v, want it to wrap %v", err, tc.wantCause)
+			}
+		})
 	}
 }
 

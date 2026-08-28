@@ -2,7 +2,9 @@ package hlssource
 
 import (
 	"errors"
+	"fmt"
 	"net/url"
+	"strings"
 	"testing"
 	"time"
 )
@@ -299,5 +301,36 @@ func TestParseIgnoresUnknownTagsAndComments(t *testing.T) {
 	m := parseMedia(t, body, "https://h/x.m3u8")
 	if len(m.segments) != 1 {
 		t.Errorf("unknown tags should be ignored, got %d segments", len(m.segments))
+	}
+}
+
+// TestSegmentCountCap covers MaxSegmentsPerPlaylist: a playlist at the cap
+// parses, one segment past it is rejected as unsupported (well-formed HLS this
+// source refuses, not a parse failure). The over-cap body is the at-cap body
+// with one extra entry appended, so the larger cap does not pay to regenerate a
+// whole second playlist.
+func TestSegmentCountCap(t *testing.T) {
+	build := func(n int) []byte {
+		var b strings.Builder
+		b.WriteString("#EXTM3U\n#EXT-X-TARGETDURATION:4\n")
+		for i := 0; i < n; i++ {
+			b.WriteString("#EXTINF:4.0,\n")
+			fmt.Fprintf(&b, "s%d.ts\n", i)
+		}
+		return []byte(b.String())
+	}
+
+	atCap := build(MaxSegmentsPerPlaylist)
+	media, _, err := parsePlaylist(atCap, mustURL(t, "https://h/x.m3u8"))
+	if err != nil {
+		t.Fatalf("playlist at the cap: unexpected %v", err)
+	}
+	if got := len(media.segments); got != MaxSegmentsPerPlaylist {
+		t.Fatalf("playlist at the cap: parsed %d segments, want %d", got, MaxSegmentsPerPlaylist)
+	}
+
+	overCap := append(append([]byte(nil), atCap...), "#EXTINF:4.0,\nsX.ts\n"...)
+	if _, _, err := parsePlaylist(overCap, mustURL(t, "https://h/x.m3u8")); !errors.Is(err, ErrUnsupportedPlaylist) {
+		t.Fatalf("playlist one past the cap: got %v, want ErrUnsupportedPlaylist", err)
 	}
 }

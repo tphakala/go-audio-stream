@@ -382,106 +382,105 @@ func TestFMP4RepeatedInitChangesFireEachUpdate(t *testing.T) {
 	}
 }
 
-// TestFMP4InitChangeFetchFailureEndsStream covers a replacement init that cannot
-// be fetched at all: the EXT-X-MAP points at an origin that is closed, so the GET
-// fails at the transport. The stream must end with that cause rather than continue
-// demuxing the new fragments with a demuxer built for the old init.
+// TestFMP4InitChangeFailureEndsStream covers ways a replacement EXT-X-MAP
+// initialization segment can fail to yield a working demuxer. In each the stream
+// must end with the cause the same init would have produced at Open, rather than
+// carry on demuxing the new fragments with a demuxer built for the old init.
+// These are not the only such failures (a non-200 status and an over-cap body
+// are also failures on the same path); they are the ones pinned here.
 //
-// The unreachable origin is a real closed listener rather than an absent path on
-// the fixture server, because that server answers any unmapped path with a
-// playlist body and HTTP 200: a "missing" init would be fetched successfully and
-// fail later as a parse error, which is a different branch (the one
-// TestFMP4InitChangeMalformedEndsStream covers).
-func TestFMP4InitChangeFetchFailureEndsStream(t *testing.T) {
-	fastReload(t)
-	dead := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
-	deadURL := dead.URL
-	dead.Close() // nothing listens here now, so the init GET cannot connect
+// The cases share the same shape, so they are one table: the first segment is
+// delivered in full, then the replacement init fails, and OnCodecUpdate never
+// fires because the callback is reached only after the new init parses and
+// yields an AudioSpecificConfig.
+func TestFMP4InitChangeFailureEndsStream(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		// wantWhy explains, for this case, why the stream must end with wantErr, so
+		// a failing subtest names its own cause rather than a shared message that is
+		// only true for one of them.
+		wantWhy string
+		// fixture builds the served segments and the two playlist phases for
+		// this failure mode. It takes the sample sets so every case delivers the
+		// same first segment.
+		fixture func(s0, s1 [][]byte) (segs map[string][]byte, v1, v2 string)
+		wantErr error
+	}{
+		{
+			// The unreachable origin is a real closed listener rather than an
+			// absent path on the fixture server, because that server answers any
+			// unmapped path with a playlist body and HTTP 200: a "missing" init
+			// would be fetched successfully and fail later as a parse error,
+			// which is the "unparseable" case below.
+			name:    "unfetchable",
+			wantErr: ErrConnectionClosed,
+			wantWhy: "the replacement init could not be fetched",
+			fixture: func(s0, s1 [][]byte) (map[string][]byte, string, string) {
+				dead := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+				deadURL := dead.URL
+				dead.Close() // nothing listens here now, so the init GET cannot connect
+				segs := map[string][]byte{
+					initURL:  buildInitSegment(wantASC, 44100, trackInit1),
+					fragURL0: buildFragment(trackInit1, s0, 1024),
+					fragURL1: buildFragment(trackInit2, s1, 1024),
+				}
+				v1 := buildFMP4MediaPlaylist(1, 0, false, initRel, []segSpec{{uri: fragRel0, duration: 1.0}})
+				// An absolute EXT-X-MAP URI survives resolution against the
+				// playlist base.
+				v2 := buildFMP4MediaPlaylist(1, 0, true, deadURL+initURL2, []segSpec{
+					{uri: fragRel0, duration: 1.0}, {uri: fragRel1, duration: 1.0},
+				})
+				return segs, v1, v2
+			},
+		},
+		{
+			// An encrypted audio sample entry: well-formed, but not something
+			// this package will decode.
+			name:    "encrypted",
+			wantErr: ErrUnsupportedCodec,
+			wantWhy: "encrypted replacement init",
+			fixture: func(s0, s1 [][]byte) (map[string][]byte, string, string) {
+				return twoInitFixture(buildEncryptedInitSegment(wantASC, 44100, trackInit2), s0, s1)
+			},
+		},
+		{
+			// 64 zero bytes: no ftyp, no moov, not an initialization segment at
+			// all.
+			name:    "unparseable",
+			wantErr: ErrMalformedSegment,
+			wantWhy: "unparseable replacement init",
+			fixture: func(s0, s1 [][]byte) (map[string][]byte, string, string) {
+				return twoInitFixture(make([]byte, 64), s0, s1)
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fastReload(t)
+			s0, s1 := fmp4Samples(2, 40), fmp4Samples(2, 44)
+			segs, v1, v2 := tc.fixture(s0, s1)
+			srv := twoPhaseServer(segs, v1, v2).start(t)
 
-	s0, s1 := fmp4Samples(2, 40), fmp4Samples(2, 44)
-	segs := map[string][]byte{
-		initURL:  buildInitSegment(wantASC, 44100, trackInit1),
-		fragURL0: buildFragment(trackInit1, s0, 1024),
-		fragURL1: buildFragment(trackInit2, s1, 1024),
-	}
-	v1 := buildFMP4MediaPlaylist(1, 0, false, initRel, []segSpec{{uri: fragRel0, duration: 1.0}})
-	// An absolute EXT-X-MAP URI survives resolution against the playlist base.
-	v2 := buildFMP4MediaPlaylist(1, 0, true, deadURL+initURL2, []segSpec{
-		{uri: fragRel0, duration: 1.0}, {uri: fragRel1, duration: 1.0},
-	})
-	srv := twoPhaseServer(segs, v1, v2).start(t)
-
-	tl := &timeline{}
-	c, err := Open(context.Background(), Config{
-		URL:           srv.URL + "/live.m3u8",
-		OnFrame:       tl.onFrame,
-		OnCodecUpdate: tl.onCodecUpdate,
-	})
-	if err != nil {
-		t.Fatalf("Open: %v", err)
-	}
-	if werr := c.Wait(context.Background()); !errors.Is(werr, ErrConnectionClosed) {
-		t.Fatalf("Wait = %v, want ErrConnectionClosed (the replacement init could not be fetched)", werr)
-	}
-	// The failure came from the replacement-init path, not from anything earlier:
-	// the first segment was delivered in full first.
-	if tl.frameCount() != len(s0) {
-		t.Errorf("delivered %d AUs before the init fetch failed, want %d", tl.frameCount(), len(s0))
-	}
-	if ups := tl.codecUpdates(); len(ups) != 0 {
-		t.Errorf("OnCodecUpdate fired %d times for an init that never loaded, want 0", len(ups))
-	}
-}
-
-// TestFMP4InitChangeUnsupportedCodecEndsStream covers a replacement init whose
-// audio sample entry is encrypted: the stream ends with ErrUnsupportedCodec, the
-// same verdict Open would give for that init, rather than the demuxer being left
-// on the old configuration.
-func TestFMP4InitChangeUnsupportedCodecEndsStream(t *testing.T) {
-	fastReload(t)
-	s0, s1 := fmp4Samples(2, 40), fmp4Samples(2, 44)
-	segs, v1, v2 := twoInitFixture(buildEncryptedInitSegment(wantASC, 44100, trackInit2), s0, s1)
-	srv := twoPhaseServer(segs, v1, v2).start(t)
-
-	tl := &timeline{}
-	c, err := Open(context.Background(), Config{
-		URL:           srv.URL + "/live.m3u8",
-		OnFrame:       tl.onFrame,
-		OnCodecUpdate: tl.onCodecUpdate,
-	})
-	if err != nil {
-		t.Fatalf("Open: %v", err)
-	}
-	if werr := c.Wait(context.Background()); !errors.Is(werr, ErrUnsupportedCodec) {
-		t.Fatalf("Wait = %v, want ErrUnsupportedCodec (encrypted replacement init)", werr)
-	}
-	if tl.frameCount() != len(s0) {
-		t.Errorf("delivered %d AUs before the refusal, want %d", tl.frameCount(), len(s0))
-	}
-}
-
-// TestFMP4InitChangeMalformedEndsStream covers a replacement init that is not a
-// parseable initialization segment at all.
-func TestFMP4InitChangeMalformedEndsStream(t *testing.T) {
-	fastReload(t)
-	s0, s1 := fmp4Samples(2, 40), fmp4Samples(2, 44)
-	segs, v1, v2 := twoInitFixture(make([]byte, 64), s0, s1) // 64 zero bytes: no ftyp/moov
-	srv := twoPhaseServer(segs, v1, v2).start(t)
-
-	tl := &timeline{}
-	c, err := Open(context.Background(), Config{
-		URL:           srv.URL + "/live.m3u8",
-		OnFrame:       tl.onFrame,
-		OnCodecUpdate: tl.onCodecUpdate,
-	})
-	if err != nil {
-		t.Fatalf("Open: %v", err)
-	}
-	if werr := c.Wait(context.Background()); !errors.Is(werr, ErrMalformedSegment) {
-		t.Fatalf("Wait = %v, want ErrMalformedSegment (unparseable replacement init)", werr)
-	}
-	if tl.frameCount() != len(s0) {
-		t.Errorf("delivered %d AUs before the refusal, want %d", tl.frameCount(), len(s0))
+			tl := &timeline{}
+			c, err := Open(context.Background(), Config{
+				URL:           srv.URL + "/live.m3u8",
+				OnFrame:       tl.onFrame,
+				OnCodecUpdate: tl.onCodecUpdate,
+			})
+			if err != nil {
+				t.Fatalf("Open: %v", err)
+			}
+			if werr := c.Wait(context.Background()); !errors.Is(werr, tc.wantErr) {
+				t.Fatalf("Wait = %v, want %v (%s)", werr, tc.wantErr, tc.wantWhy)
+			}
+			// The failure came from the replacement-init path, not from anything
+			// earlier: the first segment was delivered in full first.
+			if tl.frameCount() != len(s0) {
+				t.Errorf("delivered %d AUs before the refusal, want %d", tl.frameCount(), len(s0))
+			}
+			if ups := tl.codecUpdates(); len(ups) != 0 {
+				t.Errorf("OnCodecUpdate fired %d times for an init that never took effect (%s), want 0", len(ups), tc.wantWhy)
+			}
+		})
 	}
 }
 
