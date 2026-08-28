@@ -117,8 +117,9 @@ type Config struct {
 	// Logger receives diagnostics for conditions this source handles rather than
 	// fails on (a Basic credential sent over plaintext when permitted, a live
 	// window the client fell behind, an initialization segment whose replacement
-	// changed the audio configuration). The credential-stripped URL is logged,
-	// never the credentials.
+	// changed the audio configuration, and the refusal when such a change has no
+	// OnCodecUpdate to report it). The credential-stripped URL is logged, never
+	// the credentials.
 	Logger *slog.Logger
 }
 

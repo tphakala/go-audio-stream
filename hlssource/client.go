@@ -441,6 +441,11 @@ func (c *Client) classifyRequestErr(base, reqCtx context.Context, err error) err
 // differs, and Format keeps reporting what Open resolved. A consumer that must
 // track the live configuration registers Config.OnCodecUpdate, without which such
 // a change ends the stream rather than going unreported.
+//
+// The returned CodecAAC.AudioSpecificConfig is read-only and is the same slice on
+// every call. It is the source's own copy, taken at Open, and not the running
+// demuxer's, so it cannot be used to reach into the demuxer's resolved
+// configuration; a caller that mutates it corrupts only what Format reports.
 func (c *Client) Format() audiostream.AudioFormat {
 	return audiostream.AudioFormat{
 		Codec: c.codec,
@@ -722,6 +727,11 @@ func (c *Client) reinitFMP4(initURI string) error {
 	}
 	changed := !bytes.Equal(asc, c.asc)
 	if changed && c.cfg.OnCodecUpdate == nil {
+		if c.cfg.Logger != nil {
+			c.cfg.Logger.Warn("hlssource: initialization segment changed the audio configuration "+
+				"and no OnCodecUpdate is registered; ending the stream rather than decoding on with a stale configuration",
+				"url", c.url)
+		}
 		return fmt.Errorf("%w: the initialization segment changed the audio configuration mid-stream "+
 			"and no Config.OnCodecUpdate is registered to receive it", ErrUnsupportedPlaylist)
 	}

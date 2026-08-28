@@ -178,13 +178,23 @@ func TestAAL2IncompletePayload(t *testing.T) {
 			if err != nil {
 				t.Fatalf("New: %v", err)
 			}
-			if _, derr := d.DecodeAlloc(make([]byte, tc.badLen)); !errors.Is(derr, g726.ErrIncompletePayload) {
+			bad := make([]byte, tc.badLen)
+			for i := range bad {
+				bad[i] = byte(i*53 + 7)
+			}
+			if _, derr := d.DecodeAlloc(bad); !errors.Is(derr, g726.ErrIncompletePayload) {
 				t.Fatalf("DecodeAlloc(%d bytes): got %v, want ErrIncompletePayload", tc.badLen, derr)
 			}
 			// A rejected payload must leave the adaptive state untouched, exactly
 			// as on the RFC 3551 path: a conformant payload decoded afterwards
-			// must match a fresh decoder's output on the same bytes.
+			// must match a fresh decoder's output on the same bytes. The payload
+			// is non-zero on purpose: all-zero codewords are a fixed point of the
+			// decoder at reset, so a zero-filled probe cannot observe state that
+			// a rejected payload had wrongly advanced.
 			good := make([]byte, tc.okLen)
+			for i := range good {
+				good[i] = byte(i*37 + 11)
+			}
 			gotAfter, derr := d.DecodeAlloc(good)
 			if derr != nil {
 				t.Fatalf("DecodeAlloc(%d bytes): unexpected %v", tc.okLen, derr)

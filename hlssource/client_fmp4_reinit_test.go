@@ -25,10 +25,14 @@ const (
 	initRel2 = "init2.mp4"
 	initURL3 = "/init3.mp4"
 	initRel3 = "init3.mp4"
+	initURL4 = "/init4.mp4"
+	initRel4 = "init4.mp4"
 	fragURL2 = "/f2.m4s"
 	fragRel2 = "f2.m4s"
 	fragURL3 = "/f3.m4s"
 	fragRel3 = "f3.m4s"
+	fragURL4 = "/f4.m4s"
+	fragRel4 = "f4.m4s"
 )
 
 // Each initialization segment in these fixtures declares a DIFFERENT audio
@@ -43,6 +47,7 @@ const (
 	trackInit1 = 1
 	trackInit2 = 2
 	trackInit3 = 3
+	trackInit4 = 4
 )
 
 // timeline records frames and codec updates in ONE ordered sequence, so a test
@@ -54,8 +59,12 @@ type timeline struct {
 	events []string // "frame", "codec", or "codec:non-aac"
 	ascs   [][]byte // the ASC of each codec event, in order
 	// mutateOnUpdate zeroes each AudioSpecificConfig handed to onCodecUpdate,
-	// after copying it, to prove the source handed out a copy rather than a slice
-	// its own state still points at.
+	// after copying it, standing in for a consumer that ignores the read-only
+	// contract. It is observable only in a run that COMPARES against the snapshot
+	// afterwards: see the re-published fourth init in
+	// TestFMP4RepeatedInitChangesFireEachUpdate, where an aliased snapshot would
+	// have been zeroed here and would then report an unchanged configuration as a
+	// change.
 	mutateOnUpdate bool
 }
 
@@ -290,23 +299,35 @@ func TestFMP4InitChangeWithoutCallbackEndsStream(t *testing.T) {
 func TestFMP4RepeatedInitChangesFireEachUpdate(t *testing.T) {
 	fastReload(t)
 	s0, s1 := fmp4Samples(1, 40), fmp4Samples(1, 44)
-	s2, s3 := fmp4Samples(1, 48), fmp4Samples(1, 52)
+	s2, s3, s4 := fmp4Samples(1, 48), fmp4Samples(1, 52), fmp4Samples(1, 56)
 	segs := map[string][]byte{
 		initURL:  buildInitSegment(wantASC, 44100, trackInit1),
 		initURL2: buildInitSegment(altASC, 44100, trackInit2),
 		initURL3: buildInitSegment(thirdASC, 44100, trackInit3),
+		// The fourth init RE-PUBLISHES the third's configuration under a new URI.
+		// It must produce no codec update, which is what makes the snapshot's
+		// independence observable: a client whose snapshot aliased the slice
+		// handed to the callback would see it zeroed by the consumer below and
+		// report this unchanged configuration as a third change.
+		initURL4: buildInitSegment(thirdASC, 44100, trackInit4),
 		fragURL0: buildFragment(trackInit1, s0, 1024),
 		fragURL1: buildFragment(trackInit2, s1, 1024),
 		fragURL2: buildFragment(trackInit3, s2, 1024),
 		fragURL3: buildFragment(trackInit3, s3, 1024),
+		fragURL4: buildFragment(trackInit4, s4, 1024),
 	}
 	v1 := buildFMP4MediaPlaylist(1, 0, false, initRel, []segSpec{{uri: fragRel0, duration: 1.0}})
 	v2 := buildFMP4MediaPlaylist(1, 0, false, initRel2, []segSpec{
 		{uri: fragRel0, duration: 1.0}, {uri: fragRel1, duration: 1.0},
 	})
-	v3 := buildFMP4MediaPlaylist(1, 0, true, initRel3, []segSpec{
+	v3 := buildFMP4MediaPlaylist(1, 0, false, initRel3, []segSpec{
 		{uri: fragRel0, duration: 1.0}, {uri: fragRel1, duration: 1.0},
 		{uri: fragRel2, duration: 1.0}, {uri: fragRel3, duration: 1.0},
+	})
+	v4 := buildFMP4MediaPlaylist(1, 0, true, initRel4, []segSpec{
+		{uri: fragRel0, duration: 1.0}, {uri: fragRel1, duration: 1.0},
+		{uri: fragRel2, duration: 1.0}, {uri: fragRel3, duration: 1.0},
+		{uri: fragRel4, duration: 1.0},
 	})
 	h := &hlsServer{
 		segments: segs,
@@ -316,8 +337,10 @@ func TestFMP4RepeatedInitChangesFireEachUpdate(t *testing.T) {
 				return v1, http.StatusOK
 			case 2:
 				return v2, http.StatusOK
-			default:
+			case 3:
 				return v3, http.StatusOK
+			default:
+				return v4, http.StatusOK
 			}
 		},
 	}
@@ -338,24 +361,21 @@ func TestFMP4RepeatedInitChangesFireEachUpdate(t *testing.T) {
 
 	ups := tl.codecUpdates()
 	if len(ups) != 2 {
-		t.Fatalf("OnCodecUpdate fired %d times across two changes, want 2", len(ups))
+		t.Fatalf("OnCodecUpdate fired %d times, want 2: two genuine changes, and nothing for the "+
+			"fourth init that re-publishes the third's configuration", len(ups))
 	}
 	if !bytes.Equal(ups[0], altASC) {
 		t.Errorf("first update ASC = %x, want %x", ups[0], altASC)
 	}
-	// The callback zeroed each slice it was handed (mutateOnUpdate). The second
-	// update still carrying the right bytes proves the source handed out a copy
-	// rather than a slice its own comparison snapshot still points at.
 	if !bytes.Equal(ups[1], thirdASC) {
-		t.Errorf("second update ASC = %x, want %x (a consumer mutating the slice it was given must not corrupt the source)",
-			ups[1], thirdASC)
+		t.Errorf("second update ASC = %x, want %x", ups[1], thirdASC)
 	}
-	if want := len(s0) + len(s1) + len(s2) + len(s3); tl.frameCount() != want {
-		t.Errorf("delivered %d AUs across two changes, want %d", tl.frameCount(), want)
+	if want := len(s0) + len(s1) + len(s2) + len(s3) + len(s4); tl.frameCount() != want {
+		t.Errorf("delivered %d AUs across two changes and a re-publish, want %d", tl.frameCount(), want)
 	}
 	// Each initialization segment is fetched exactly once. A client that failed to
 	// record the init now in effect would re-fetch it for every following segment.
-	for _, u := range []string{initURL, initURL2, initURL3} {
+	for _, u := range []string{initURL, initURL2, initURL3, initURL4} {
 		if n := h.requestCount(u); n != 1 {
 			t.Errorf("%s fetched %d times, want exactly 1", u, n)
 		}

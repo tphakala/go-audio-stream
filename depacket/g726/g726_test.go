@@ -170,14 +170,24 @@ func TestDecodeIncompletePayload(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			d, _ := g726.New(tc.rate, audiostream.G726PackingRFC3551)
-			if _, err := d.DecodeAlloc(make([]byte, tc.badLen)); !errors.Is(err, g726.ErrIncompletePayload) {
+			bad := make([]byte, tc.badLen)
+			for i := range bad {
+				bad[i] = byte(i*53 + 7)
+			}
+			if _, err := d.DecodeAlloc(bad); !errors.Is(err, g726.ErrIncompletePayload) {
 				t.Fatalf("DecodeAlloc(%d bytes): got %v, want ErrIncompletePayload", tc.badLen, err)
 			}
 			// A rejected payload must leave the adaptive state untouched: decoding
 			// a conformant payload after the rejection must produce byte-identical
 			// PCM to a fresh decoder decoding the same bytes. If the malformed
 			// payload had advanced the state, the two would differ.
+			// Non-zero on purpose: all-zero codewords are a fixed point of the
+			// decoder at reset, so a zero-filled probe could not observe state
+			// that the rejected payload had wrongly advanced.
 			good := make([]byte, tc.okLen)
+			for i := range good {
+				good[i] = byte(i*37 + 11)
+			}
 			gotAfter, err := d.DecodeAlloc(good)
 			if err != nil {
 				t.Fatalf("DecodeAlloc(%d bytes): unexpected %v", tc.okLen, err)

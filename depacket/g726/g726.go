@@ -228,10 +228,12 @@ func (d *Decoder) Decode(dst, payload []byte) (int, error) {
 	if len(dst) < need {
 		return 0, ErrShortBuffer
 	}
-	// The packing branch is hoisted out of the per-sample loop: the two orders
-	// share the whole ADPCM state machine and differ only in the codeword
-	// reader, so branching once per payload keeps the hot path free of a
-	// per-sample test or indirect call.
+	// The two orders share the whole ADPCM state machine and differ only in the
+	// codeword reader, so the packing is resolved once per payload rather than
+	// per sample. That is for clarity, not speed: decodeSample is far past the
+	// inlining budget, so the call to it dominates, and a per-sample branch on
+	// the packing measures at or below the noise floor against it. Do not read
+	// this shape as a claim that the dispatch was worth avoiding.
 	pos := 0
 	if d.msbFirst {
 		for k := 0; k < nsamp; k++ {
