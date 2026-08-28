@@ -1,9 +1,9 @@
 github.com/stretchr/testify v1.12.1 h1:EuwCh5fleGS7H32xRwO3wRGT7DxrDhLAT6FF8MpWDWE=
 github.com/stretchr/testify v1.12.1/go.mod h1:MDEgiDPPsNp5cuIrHPPCyornHKgEVbtFUmoNlxoYthg=
-github.com/tphakala/go-aac v0.4.0 h1:2p83Kkn75vdl5ZvmJ/CHt0ffl19TD55rIs1/XKbXuII=
-github.com/tphakala/go-aac v0.4.0/go.mod h1:7a85ZW9l+npCaAKnYUZ6W+sO5AiwTCAmB8RqCmRTnZY=
-github.com/tphakala/go-opus v1.0.0 h1:TEpg8ULmrnsFYV6JRH49wsYF4ivpiUfbweHkfxn/1GU=
-github.com/tphakala/go-opus v1.0.0/go.mod h1:57hQHipntY2+xK7sycF4CYVSXDLW3V+AiX77iOJlojQ=
+github.com/tphakala/go-aac v0.6.0 h1:xrfvcISfVAyBwH7+tN3LGouw1g7CrIEzWOSdaJkCiUo=
+github.com/tphakala/go-aac v0.6.0/go.mod h1:zbnhFT1TNtHgFjbtJnW32vCi9yyaSC9tdhqyjAiti1c=
+github.com/tphakala/go-opus v1.1.0 h1:SbXQjwI/ZYy6wPXd0fafLTurkUbAhBpaYnvXYtn8uIo=
+github.com/tphakala/go-opus v1.1.0/go.mod h1:57hQHipntY2+xK7sycF4CYVSXDLW3V+AiX77iOJlojQ=
 github.com/tphakala/go-wav v1.0.0 h1:uPJYJUotRdBGhnQT9dYMNCbad8C32bSGA/v9VdpNLhI=
 github.com/tphakala/go-wav v1.0.0/go.mod h1:uHyG52/VxaMf7e3AxS/lJ+DDZoADPuIlxsij1iWUi/U=
 github.com/tphakala/simd v1.9.0 h1:EURkGIeEMZ7V96i2TJZvLIiXj6RZebe3xdf4n4Bhynk=
