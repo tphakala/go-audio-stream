@@ -180,10 +180,13 @@ func TestBuildTransportRoundTrip(t *testing.T) {
 func TestParseSession(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
-		name      string
-		value     string
-		wantID    string
-		wantTOSec int
+		name   string
+		value  string
+		wantID string
+		// int64, not int: the largest-representable row holds 9223372036,
+		// which overflows a 32-bit int and would not compile on GOARCH=arm
+		// or 386, both of which this module ships binaries for.
+		wantTOSec int64
 	}{
 		{"bare ID default timeout", "12345678", "12345678", 60},
 		{"explicit timeout", "12345678;timeout=60", "12345678", 60},
