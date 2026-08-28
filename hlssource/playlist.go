@@ -9,6 +9,59 @@ import (
 	"time"
 )
 
+// MaxSegmentsPerPlaylist is the largest number of media segments this package
+// will parse from one playlist. A playlist declaring more yields
+// ErrUnsupportedPlaylist: it is well-formed HLS this source refuses, not a body
+// that failed to parse.
+//
+// Config.MaxPlaylistBytes bounds the playlist body and Config.MaxSegmentBytes
+// bounds each segment fetch, but neither bounds how many segments one body may
+// declare, and each declared segment costs the client up to two bounded GETs
+// (its own body, plus a per-segment EXT-X-MAP initialization segment whenever
+// the playlist names a new one). A body packed with pathologically small entries
+// therefore commands work proportional to a count nothing bounds. This cap
+// bounds that count.
+//
+// The bound is per playlist PARSE, not per session: a live stream reloads
+// indefinitely, so a hostile origin can serve a fresh capped playlist on every
+// reload. Bounding the per-reload amplification is the achievable property here,
+// and the read-idle watchdog plus the caller's own supervisor policy are what
+// bound the session.
+//
+// The value is a power of two set comfortably above every legitimate shape and
+// below what the byte cap admits for adversarially small entries, rather than a
+// figure derived from any single entry size. At the default 4 MiB body cap the
+// byte cap is what actually binds for real content, so this one never fires: a
+// typical CDN entry of about 38 bytes allows about 110376 entries in 4 MiB, and
+// a long-URI entry of about 110 bytes allows about 38130. The adversarial
+// minimal entry is "#EXTINF:0,\n" plus "a\n", 13 bytes, which allows about
+// 322638 entries in 4 MiB, and that is the shape this cap exists to stop. Note
+// the "byte cap binds first" property holds at the default; a caller that raises
+// MaxPlaylistBytes for a large archive can reach this cap instead, and it is a
+// constant they cannot raise with it.
+//
+// Every legitimate shape clears it, including the ones that are not sliding
+// windows and so grow without ever dropping entries: an EXT-X-PLAYLIST-TYPE:EVENT
+// playlist grows monotonically, and a full VOD or DVR archive lists the whole
+// stream. A 24 hour archive is 86400 segments at a 1 second target duration and
+// 43200 at 2 seconds, and 7 days at 6 seconds is 100800, all below the cap. An
+// earlier, smaller value refused exactly these EVENT and full-archive shapes,
+// which is why the bound sits here and not lower.
+//
+// Only segments are capped, not the variants or audio renditions of a master
+// playlist (which also grow unbounded as they are parsed). The reason is the
+// fetch asymmetry alone: selectMediaURL fetches exactly one variant however many
+// are declared, so an oversized master drives no amplification, while each
+// segment can cost up to two bounded GETs. Their memory is bounded only in the
+// same weak per-record way this comment calls insufficient for segments, so that
+// is deliberately not offered as the justification.
+//
+// It is a structural sanity bound on untrusted input rather than a tuning knob,
+// so it is a constant rather than a Config field, matching MaxAUsPerPacket in
+// depacket/aac. It is exported (unlike the file's sibling structural bound
+// maxPlaylistSeconds) so a caller can name the limit it is bounded by.
+const MaxSegmentsPerPlaylist = 131072
+
 // mediaSegment is one entry in a media playlist: a resolved absolute URI, its
 // declared duration, its absolute media sequence number, and the boundary flags
 // the reload state machine and the demuxer key off.
@@ -73,7 +126,10 @@ type masterPlaylist struct {
 // all URIs resolved to absolute form against base. Exactly one of the returned
 // pointers is non-nil on success. It returns ErrMalformedPlaylist for a body that
 // is not a valid playlist and ErrUnsupportedPlaylist for a valid playlist this
-// source will not play (encryption, fMP4 init, byte range).
+// source will not play (encryption, a byte-range segment or byte-range fMP4 init
+// segment, a mid-stream container switch, or more than MaxSegmentsPerPlaylist
+// segments). A plain EXT-X-MAP fMP4 initialization segment is supported, not
+// refused.
 func parsePlaylist(body []byte, base *url.URL) (*mediaPlaylist, *masterPlaylist, error) {
 	lines := splitLines(string(body))
 	if len(lines) == 0 || strings.TrimSpace(lines[0]) != "#EXTM3U" {
@@ -133,6 +189,13 @@ func (p *playlistParser) handleURI(line string) error {
 		p.pendVariant = nil
 		p.isMaster = true
 	case p.pendExtinf:
+		// Checked before the append, so the slice never grows past the cap. A
+		// playlist this large is well-formed HLS this source refuses, not a parse
+		// failure, so it is ErrUnsupportedPlaylist rather than ErrMalformedPlaylist.
+		if len(p.media.segments) >= MaxSegmentsPerPlaylist {
+			return fmt.Errorf("%w: playlist declares more than %d segments",
+				ErrUnsupportedPlaylist, MaxSegmentsPerPlaylist)
+		}
 		p.media.segments = append(p.media.segments, mediaSegment{
 			seq:           p.media.mediaSequence + uint64(len(p.media.segments)),
 			uri:           resolveURI(p.base, line),

@@ -87,6 +87,14 @@ long-running soak testing, not core functionality.
   gets PCM in one byte order regardless of which of them it received. An
   unrecognized codec, a non-audio track, or an AAC mode this milestone does not
   decode degrades to raw payload delivery rather than failing the session.
+  Nothing in the stream distinguishes the two G.726 codeword orders (they carry
+  the same codewords in reversed bit numbering), so the rtpmap encoding name is
+  the only out-of-band signal and the static payload type 2 carries no signal at
+  all (the plain RFC 3551 order is assumed there). A camera that advertises one
+  order and sends the other, or a payload-type-2 device that packs AAL2, decodes
+  without error into plausible but wrong audio; `stream-doctor` names the
+  resolved packing in its report, and `rtsp.SetupOptions.G726Packing` overrides
+  it per track when a device gets it wrong.
 - **Source interface**: `rtsp.Client`, `httpsource.Client` and
   `udpsource.Client` all implement the root package's `audiostream.Source`
   (`Wait`, `Close`, `Stats`, `Info`), so a supervisor can hold an

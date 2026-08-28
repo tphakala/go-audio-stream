@@ -26,9 +26,11 @@ var ErrUnknownBitRate = errors.New("g726: unknown bit rate")
 // matching ErrUnknownBitRate and g711's ErrUnknownLaw.
 var ErrUnknownPacking = errors.New("g726: unknown codeword packing")
 
-// ErrIncompletePayload is returned by Decode when the payload does not hold a
-// whole number of RFC 3551 codeword groups: its bit length is not a multiple of
-// the codeword width, so the final octet is not completely packed. RFC 3551
+// ErrIncompletePayload is returned by Decode, and by DecodeAlloc which
+// pre-validates on the same rule before allocating, when the payload does not
+// hold a whole number of RFC 3551 codeword groups: its bit length is not a
+// multiple of the codeword width, so the final octet is not completely
+// packed. RFC 3551
 // section 4.5.4 requires the codeword count to be a multiple of 8, 2, 8, and 4
 // for G726-40/32/24/16, which for an octet payload is exactly this divisibility
 // (always satisfied at 16 and 32 kbps; length a multiple of 3 or 5 octets at 24
@@ -220,7 +222,7 @@ func (d *Decoder) Decode(dst, payload []byte) (int, error) {
 	if len(payload) == 0 {
 		return 0, nil
 	}
-	if (len(payload)*8)%d.rt.bits != 0 {
+	if !d.wholeCodewords(payload) {
 		return 0, ErrIncompletePayload
 	}
 	nsamp := (len(payload) * 8) / d.rt.bits
@@ -256,19 +258,38 @@ func (d *Decoder) Decode(dst, payload []byte) (int, error) {
 // manage their own buffer, and it never constructs audiostream.Frame. The
 // buffer it allocates is always correctly sized, so it never returns
 // ErrShortBuffer; it returns ErrIncompletePayload (and a nil slice) for a
-// payload that is not a whole number of codeword groups.
+// payload that is not a whole number of codeword groups. It validates before it
+// allocates, so a rejected payload buys no buffer: on ErrIncompletePayload it
+// has allocated nothing.
 func (d *Decoder) DecodeAlloc(payload []byte) ([]byte, error) {
-	nsamp := (len(payload) * 8) / d.rt.bits
-	dst := make([]byte, 2*nsamp)
+	// Validate before allocating, so a malformed payload does not buy a buffer
+	// only to discard it, and size the buffer through OutputLen rather than
+	// restating its arithmetic here.
+	if !d.wholeCodewords(payload) {
+		return nil, ErrIncompletePayload
+	}
+	dst := make([]byte, d.OutputLen(payload))
 	if _, err := d.Decode(dst, payload); err != nil {
 		return nil, err
 	}
 	return dst, nil
 }
 
-// OutputLen returns the number of bytes Decode writes for a payload of this
-// length: 2 bytes per whole codeword. A caller can size its destination buffer
-// with it to keep the delivery path allocation-free.
+// wholeCodewords reports whether payload is a whole number of codeword groups
+// at this decoder's bit rate, the precondition Decode and DecodeAlloc share.
+// A payload that is not yields ErrIncompletePayload; see that sentinel's doc for
+// the codeword-geometry rule this enforces and why a trailing partial codeword
+// means the payload was truncated.
+func (d *Decoder) wholeCodewords(payload []byte) bool {
+	return (len(payload)*8)%d.rt.bits == 0
+}
+
+// OutputLen returns, for a payload Decode accepts, the number of bytes Decode
+// writes: 2 bytes per whole codeword. For a payload Decode rejects (not a whole
+// number of codeword groups) it still returns a positive count while Decode
+// writes nothing, so it sizes a buffer but is not a promise that Decode filled
+// it. A caller can size its destination buffer with it to keep the delivery path
+// allocation-free.
 func (d *Decoder) OutputLen(payload []byte) int {
 	return 2 * ((len(payload) * 8) / d.rt.bits)
 }

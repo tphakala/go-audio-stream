@@ -212,7 +212,7 @@ func describeTrack(m *Media) DescribedTrack {
 		// They have no registration of their own, so the same conformance rule is
 		// applied to them by analogy: same codec, same 8 kHz clock, same single
 		// adaptive state.
-		if br, pk, ok := g726BitRate(strings.ToUpper(encoding)); ok && channels == 1 && clock == g726ClockRate {
+		if br, pk, ok := resolveG726(strings.ToUpper(encoding)); ok && channels == 1 && clock == g726ClockRate {
 			t.Codec = audiostream.CodecG726{BitRate: br, Packing: pk, ClockRate: clock, Channels: channels}
 		} else {
 			t.Codec = audiostream.CodecUnknown{RTPMap: rtpmapString(encoding, clock, rawChannels, hasRTPMap)}
@@ -226,11 +226,11 @@ func describeTrack(m *Media) DescribedTrack {
 	return t
 }
 
-// g726BitRate maps an upper-cased G.726 rtpmap encoding name to its bit rate and
+// resolveG726 maps an upper-cased G.726 rtpmap encoding name to its bit rate and
 // codeword packing. The plain G726-NN names resolve to the RFC 3551 section
 // 4.5.4 packing and the AAL2-G726-NN names to the ITU-T I.366.2 Annex E packing
 // at the same four bit rates. ok is false for any other name.
-func g726BitRate(up string) (audiostream.G726BitRate, audiostream.G726Packing, bool) {
+func resolveG726(up string) (audiostream.G726BitRate, audiostream.G726Packing, bool) {
 	switch up {
 	case g726Name16:
 		return audiostream.G726Rate16, audiostream.G726PackingRFC3551, true

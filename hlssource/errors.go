@@ -40,8 +40,10 @@ var (
 	// encrypted content (EXT-X-KEY with a method other than NONE), a byte-range
 	// segment or byte-range fMP4 initialization segment (EXT-X-BYTERANGE, or
 	// EXT-X-MAP with BYTERANGE), a stream that switches container mid-stream by
-	// adding or dropping EXT-X-MAP (MPEG-TS to fMP4 or back), or a master playlist
-	// with no audio-bearing option. An EXT-X-MAP that is REPLACED mid-stream by
+	// adding or dropping EXT-X-MAP (MPEG-TS to fMP4 or back), a master playlist
+	// with no audio-bearing option, or a media playlist declaring more than
+	// MaxSegmentsPerPlaylist segments (well-formed but refused as a structural
+	// bound on untrusted input). An EXT-X-MAP that is REPLACED mid-stream by
 	// another fMP4 initialization segment is played, not refused: the demuxer is
 	// rebuilt from the new init and a changed AudioSpecificConfig is reported
 	// through Config.OnCodecUpdate. The one exception is a replacement whose

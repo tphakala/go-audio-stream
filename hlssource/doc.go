@@ -58,5 +58,9 @@
 // For a live stream it must exceed the playlist target duration, since the
 // client is intentionally idle between reloads. Playlist and segment bodies are
 // bounded by Config.MaxPlaylistBytes and Config.MaxSegmentBytes so an untrusted
-// endpoint cannot force an unbounded read.
+// endpoint cannot force an unbounded read, and MaxSegmentsPerPlaylist caps how
+// many segments one playlist may declare, bounding the fetches one parsed
+// playlist can command rather than only each individual read. A live stream
+// reloads indefinitely, so that is a per-reload bound, not a bound on the whole
+// session.
 package hlssource

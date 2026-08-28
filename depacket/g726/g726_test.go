@@ -177,6 +177,22 @@ func TestDecodeIncompletePayload(t *testing.T) {
 			if _, err := d.DecodeAlloc(bad); !errors.Is(err, g726.ErrIncompletePayload) {
 				t.Fatalf("DecodeAlloc(%d bytes): got %v, want ErrIncompletePayload", tc.badLen, err)
 			}
+			// Decode is what the RTP paths call on attacker-controlled network
+			// payloads, so its own ErrIncompletePayload guard must reject the same
+			// truncated packet. DecodeAlloc pre-validates and returns before it ever
+			// reaches Decode, so this call exercises Decode's guard directly rather
+			// than through the wrapper. dst is sized at 8 bytes per input octet so
+			// ErrShortBuffer cannot mask an accepted-but-truncated result: the
+			// densest rate packs four 2-bit codewords into an octet and each decodes
+			// to 2 bytes, so 8 bytes per octet is exactly the most any payload could
+			// decode to at any rate. A separate decoder
+			// keeps this off the state-preservation assertions below, which track
+			// d's adaptive state.
+			direct, _ := g726.New(tc.rate, audiostream.G726PackingRFC3551)
+			dst := make([]byte, 8*len(bad))
+			if n, err := direct.Decode(dst, bad); !errors.Is(err, g726.ErrIncompletePayload) || n != 0 {
+				t.Fatalf("Decode(%d bytes): got (%d, %v), want (0, ErrIncompletePayload)", tc.badLen, n, err)
+			}
 			// A rejected payload must leave the adaptive state untouched: decoding
 			// a conformant payload after the rejection must produce byte-identical
 			// PCM to a fresh decoder decoding the same bytes. If the malformed
@@ -211,6 +227,35 @@ func TestDecodeIncompletePayload(t *testing.T) {
 				t.Fatalf("rate %v len %d: unexpected %v", rate, n, err)
 			}
 		}
+	}
+}
+
+// TestDecodeAllocRejectsWithoutAllocating pins that DecodeAlloc validates the
+// payload before it buys a buffer. It used to size and allocate the output
+// first and only then let Decode reject the payload, so every malformed packet
+// allocated and immediately discarded. Only the rates that can reject a payload
+// at all are exercised: 16 and 32 kbps accept any octet length.
+func TestDecodeAllocRejectsWithoutAllocating(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		rate   audiostream.G726BitRate
+		badLen int
+	}{
+		{name24kbps, audiostream.G726Rate24, 4},
+		{name40kbps, audiostream.G726Rate40, 4},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			d, _ := g726.New(tc.rate, audiostream.G726PackingRFC3551)
+			bad := make([]byte, tc.badLen)
+			got := testing.AllocsPerRun(100, func() {
+				if _, err := d.DecodeAlloc(bad); !errors.Is(err, g726.ErrIncompletePayload) {
+					t.Fatalf("DecodeAlloc(%d bytes): got %v, want ErrIncompletePayload", tc.badLen, err)
+				}
+			})
+			if got != 0 {
+				t.Errorf("DecodeAlloc on a malformed payload allocated %v times, want 0", got)
+			}
+		})
 	}
 }
 

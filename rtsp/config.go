@@ -118,8 +118,9 @@ type Config struct {
 	// first frame reaches it. Like OnFrame, it runs on the delivery
 	// goroutine, must not block, and must not call Describe, Setup, Play, or
 	// Wait (Close and Stats are callback-safe). The CodecUpdate's Codec and
-	// any slices it carries are owned by the callee only for the duration of
-	// the call; copy AudioSpecificConfig to retain it.
+	// any slices it carries are read-only and are owned by the callee only for
+	// the duration of the call; copy AudioSpecificConfig to retain it, and do
+	// not modify it in place.
 	OnCodecUpdate func(audiostream.CodecUpdate)
 }
 
@@ -181,11 +182,111 @@ type Track struct {
 // SetupOptions controls one Setup. Discard sets up a track whose frames are
 // dropped inside the reader without per-packet allocation or delivery, which is
 // how a caller keeps a video track's channels bound (so the server streams the
-// session it negotiated) without paying to parse it.
+// session it negotiated) without paying to parse it. G726Packing overrides the
+// codeword bit order a CodecG726 track decodes with, for a device whose rtpmap
+// encoding name does not match how it actually packs; see G726PackingOverride.
 type SetupOptions struct {
 	// Discard drops this track's frames in the reader, counting them in Stats
 	// but never depacketizing or delivering them.
 	Discard bool
+	// G726Packing overrides the codeword packing this track's rtpmap encoding
+	// name resolved to. The zero value trusts the SDP. See G726PackingOverride.
+	G726Packing G726PackingOverride
+}
+
+// G726PackingOverride selects the codeword bit order used to unpack a
+// CodecG726 track, overriding what the SDP rtpmap encoding name resolved to.
+// The zero value G726PackingFromSDP trusts the SDP, so existing callers are
+// unaffected.
+//
+// It exists because nothing in the stream distinguishes the two orders: they
+// carry the same codewords in reversed bit numbering, so decoding with the
+// wrong one does not fail, it just yields plausible but wrong audio. The rtpmap
+// encoding name is the only out-of-band signal (G726-NN for the RFC 3551 order,
+// AAL2-G726-NN for the AAL2 order), and a track resolved from the static RTP
+// payload type 2 carries no signal at all, so the plain RFC 3551 order is merely
+// assumed there. This override is the only fix for two failure modes: a device
+// advertising AAL2-G726-NN while actually packing the RFC 3551 order (a real
+// vendor bug class), and a payload-type-2 device that in fact packs AAL2. The
+// two differ in mechanism: RFC 3551 section 6 deprecates payload type 2 for
+// exactly this absence of a signal, whereas the vendor-bug case is a signal that
+// is present and wrong. Either way only the caller can correct it.
+//
+// Diagnosing it is the first step, and the bundled stream-doctor names the
+// resolved packing in its report. A track that sounds like distorted noise but
+// decodes without error is the signature; setting the other packing here is the
+// fix.
+//
+// The override applies only to a track the SDP already resolved to CodecG726.
+// It does not rescue a CodecUnknown track, because the bit rate comes from the
+// same encoding name, and a G.726 track advertising a non-8 kHz clock or more
+// than one channel is left unresolved deliberately (the decoder carries a
+// single adaptive state at a fixed 8 kHz clock, so it could not be decoded or
+// timed correctly whatever the packing).
+//
+// Track.Format reports the codec Describe resolved, so it keeps reporting the
+// packing the SDP advertised even when this overrides it. That asymmetry is
+// harmless in practice: the library decodes G.726 itself and delivers s16le
+// PCM, so a consumer reads SampleRate and Channels from the format and has no
+// reason to inspect the packing, which is a decoder detail once the audio is
+// already PCM.
+type G726PackingOverride uint8
+
+const (
+	// G726PackingFromSDP uses the packing the rtpmap encoding name resolved to:
+	// RFC 3551 order for the plain G726-NN names, AAL2 order for the
+	// AAL2-G726-NN ones. It is the zero value and the default.
+	G726PackingFromSDP G726PackingOverride = iota
+	// G726PackingForceRFC3551 forces least-significant-bit-first codewords
+	// (RFC 3551 section 4.5.4), whatever the encoding name said.
+	G726PackingForceRFC3551
+	// G726PackingForceAAL2 forces most-significant-bit-first codewords (the
+	// AAL2-G726 form of ITU-T I.366.2 Annex E), whatever the encoding name said.
+	G726PackingForceAAL2
+)
+
+// A constant added here must be added to BOTH packing and valid below. They
+// enumerate this list separately, and the two omissions are not equally
+// forgiving: adding a constant to valid alone suppresses the out-of-range
+// warning while packing still ignores the value, so the caller's override is
+// silently inert and the wrong-audio failure this option exists to escape comes
+// back with no diagnostic. Adding it to packing alone only logs a spurious
+// warning while behaving correctly.
+
+// packing resolves the override against the packing the SDP reported, returning
+// the packing the decoder should actually use.
+func (o G726PackingOverride) packing(fromSDP audiostream.G726Packing) audiostream.G726Packing {
+	switch o {
+	case G726PackingForceRFC3551:
+		return audiostream.G726PackingRFC3551
+	case G726PackingForceAAL2:
+		return audiostream.G726PackingAAL2
+	default:
+		// G726PackingFromSDP (the zero value) and any out-of-range value both
+		// defer to the SDP, folded into one arm the way resolveTransport folds its
+		// own zero and out-of-range cases. An out-of-range value is treated as "no
+		// override" rather than rejected, so a caller that builds SetupOptions from
+		// its own config cannot turn a bad value into a failed Setup; the SDP still
+		// decides. The two are not indistinguishable to the caller, though:
+		// configureG726 separates them with valid() so an out-of-range value is
+		// warned about rather than resolving silently to the SDP packing.
+		return fromSDP
+	}
+}
+
+// valid reports whether o is one of the three defined override constants.
+// packing resolves an out-of-range value to the SDP packing (fail-open, so a bad
+// config value never fails Setup), which means such a value produces no audible
+// correction and, on its own, no diagnostic. configureG726 uses this to warn
+// when the caller's override value is out of range, so a garbage config value is
+// not silently inert.
+func (o G726PackingOverride) valid() bool {
+	switch o {
+	case G726PackingFromSDP, G726PackingForceRFC3551, G726PackingForceAAL2:
+		return true
+	default:
+		return false
+	}
 }
 
 // ErrUDPSetupRejected is returned by Setup under PreferUDP when the server

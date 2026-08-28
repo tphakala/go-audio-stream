@@ -3,7 +3,9 @@ package rtsp
 import (
 	"bytes"
 	"encoding/binary"
+	"log/slog"
 	"math"
+	"strings"
 	"testing"
 	"time"
 
@@ -1497,5 +1499,162 @@ func TestNewTrackG726AAL2Packing(t *testing.T) {
 	tr.deliver(pkt, rtp.Update{Timestamp: 160}, time.Unix(1, 0), func(f audiostream.Frame) { got = f })
 	if !bytes.Equal(got.Data, wantAAL2) {
 		t.Errorf("Data = % x, want AAL2-decoded % x", got.Data, wantAAL2)
+	}
+}
+
+// TestNewTrackG726PackingOverride covers SetupOptions.G726Packing: the caller's
+// override must decide the codeword bit order the track's decoder uses,
+// overruling whatever the rtpmap encoding name resolved to, and the zero value
+// must leave the SDP in charge.
+//
+// This is the escape hatch for a camera that advertises one packing and sends
+// the other. Decoding with the wrong order cannot fail (the two carry the same
+// codewords in reversed bit numbering), so the assertion is that the delivered
+// PCM matches the reference decoder for the EXPECTED packing and differs from
+// the other one.
+func TestNewTrackG726PackingOverride(t *testing.T) {
+	t.Parallel()
+	payload := []byte{0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, 0xde, 0xf0}
+
+	decodeWith := func(t *testing.T, p audiostream.G726Packing) []byte {
+		t.Helper()
+		ref, err := g726.New(audiostream.G726Rate32, p)
+		if err != nil {
+			t.Fatalf("New(%v): %v", p, err)
+		}
+		out, err := ref.DecodeAlloc(payload)
+		if err != nil {
+			t.Fatalf("DecodeAlloc(%v): %v", p, err)
+		}
+		return out
+	}
+	wantPlain := decodeWith(t, audiostream.G726PackingRFC3551)
+	wantAAL2 := decodeWith(t, audiostream.G726PackingAAL2)
+	// Precondition: the payload must distinguish the two packings, else every
+	// assertion below would pass regardless of which decoder was built.
+	if bytes.Equal(wantPlain, wantAAL2) {
+		t.Fatal("test payload does not distinguish the two codeword packings")
+	}
+
+	for _, tc := range []struct {
+		name     string
+		sdp      audiostream.G726Packing
+		override G726PackingOverride
+		want     []byte
+	}{
+		{"fromSDP/plain", audiostream.G726PackingRFC3551, G726PackingFromSDP, wantPlain},
+		{"fromSDP/aal2", audiostream.G726PackingAAL2, G726PackingFromSDP, wantAAL2},
+		// The two that matter: the override contradicts the SDP.
+		{"override/aal2SDPForcedPlain", audiostream.G726PackingAAL2, G726PackingForceRFC3551, wantPlain},
+		{"override/plainSDPForcedAAL2", audiostream.G726PackingRFC3551, G726PackingForceAAL2, wantAAL2},
+		// Redundant overrides agreeing with the SDP must be inert.
+		{"override/plainSDPForcedPlain", audiostream.G726PackingRFC3551, G726PackingForceRFC3551, wantPlain},
+		{"override/aal2SDPForcedAAL2", audiostream.G726PackingAAL2, G726PackingForceAAL2, wantAAL2},
+		// An out-of-range value must fall back to the SDP, never fail Setup.
+		{"override/outOfRange", audiostream.G726PackingAAL2, G726PackingOverride(99), wantAAL2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			desc := describedTrack{
+				codec: audiostream.CodecG726{
+					BitRate:   audiostream.G726Rate32,
+					Packing:   tc.sdp,
+					ClockRate: 8000,
+					Channels:  1,
+				},
+				clockRate: 8000,
+				media:     audiostream.MediaAudio,
+			}
+			tr := newTrack(0, desc, SetupOptions{G726Packing: tc.override}, 1, nil)
+			if tr.kind != deliverG726 {
+				t.Fatalf("kind = %d, want deliverG726", tr.kind)
+			}
+			tr.baseSet.Store(true)
+
+			var got audiostream.Frame
+			pkt := rtp.Packet{Header: rtp.Header{Timestamp: 160}, Payload: payload}
+			tr.deliver(pkt, rtp.Update{Timestamp: 160}, time.Unix(1, 0), func(f audiostream.Frame) { got = f })
+			if !bytes.Equal(got.Data, tc.want) {
+				t.Errorf("Data = % x, want % x", got.Data, tc.want)
+			}
+		})
+	}
+}
+
+// TestG726PackingOverrideResolution covers the override resolver directly,
+// including that it never invents a packing for a value it does not know.
+func TestG726PackingOverrideResolution(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name     string
+		override G726PackingOverride
+		fromSDP  audiostream.G726Packing
+		want     audiostream.G726Packing
+	}{
+		{"fromSDP keeps plain", G726PackingFromSDP, audiostream.G726PackingRFC3551, audiostream.G726PackingRFC3551},
+		{"fromSDP keeps aal2", G726PackingFromSDP, audiostream.G726PackingAAL2, audiostream.G726PackingAAL2},
+		{"force plain over aal2", G726PackingForceRFC3551, audiostream.G726PackingAAL2, audiostream.G726PackingRFC3551},
+		{"force aal2 over plain", G726PackingForceAAL2, audiostream.G726PackingRFC3551, audiostream.G726PackingAAL2},
+		{"unknown falls back", G726PackingOverride(200), audiostream.G726PackingAAL2, audiostream.G726PackingAAL2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := tc.override.packing(tc.fromSDP); got != tc.want {
+				t.Errorf("packing(%v) = %v, want %v", tc.fromSDP, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestConfigureG726OutOfRangeWarns pins the diagnostic for an out-of-range
+// SetupOptions.G726Packing value. Such a value resolves to the SDP packing
+// (fail-open, so it never fails Setup), which on its own reproduces exactly the
+// silent-wrong-audio failure the option exists to escape. configureG726 must
+// warn that the value is out of range, and the decoder must still use the SDP
+// packing.
+func TestConfigureG726OutOfRangeWarns(t *testing.T) {
+	t.Parallel()
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn}))
+
+	payload := []byte{0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, 0xde, 0xf0}
+	desc := describedTrack{
+		codec: audiostream.CodecG726{
+			BitRate:   audiostream.G726Rate32,
+			Packing:   audiostream.G726PackingAAL2,
+			ClockRate: 8000,
+			Channels:  1,
+		},
+		clockRate: 8000,
+		media:     audiostream.MediaAudio,
+	}
+	tr := newTrack(0, desc, SetupOptions{G726Packing: G726PackingOverride(99)}, 1, logger)
+	if tr.kind != deliverG726 {
+		t.Fatalf("kind = %d, want deliverG726 (an out-of-range override must not fail Setup)", tr.kind)
+	}
+
+	// The out-of-range value must produce a diagnostic rather than resolve
+	// silently to the SDP packing.
+	if logged := buf.String(); !strings.Contains(logged, "out of range") {
+		t.Errorf("no out-of-range warning logged; got %q", logged)
+	}
+
+	// And the SDP packing (AAL2 here) must still be what the decoder uses: an
+	// out-of-range override is fail-open, not a switch to some other order.
+	tr.baseSet.Store(true)
+	var got audiostream.Frame
+	pkt := rtp.Packet{Header: rtp.Header{Timestamp: 160}, Payload: payload}
+	tr.deliver(pkt, rtp.Update{Timestamp: 160}, time.Unix(1, 0), func(f audiostream.Frame) { got = f })
+
+	ref, err := g726.New(audiostream.G726Rate32, audiostream.G726PackingAAL2)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	wantAAL2, err := ref.DecodeAlloc(payload)
+	if err != nil {
+		t.Fatalf("DecodeAlloc: %v", err)
+	}
+	if !bytes.Equal(got.Data, wantAAL2) {
+		t.Errorf("Data = % x, want SDP (AAL2) packing % x", got.Data, wantAAL2)
 	}
 }
