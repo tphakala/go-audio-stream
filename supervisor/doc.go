@@ -41,7 +41,12 @@
 //   - OnCodecUpdate may fire again on a new session. An in-band configuration
 //     (for example an MP4A-LATM AudioSpecificConfig learned from the first
 //     packet) is relearned per session, so a consumer that caches codec
-//     configuration should refresh it when a new session begins.
+//     configuration should refresh it when a new session begins. A source may
+//     also fire it WITHIN a session: hlssource does so when a live playlist
+//     scrolls in an EXT-X-MAP initialization segment that changes the audio
+//     configuration. Since Format is not part of audiostream.Source, a
+//     supervised consumer that must track codec configuration reads it from
+//     this callback rather than re-reading it at each session boundary.
 //   - RTP timestamps and sequence numbers restart. Each session has its own
 //     SSRC, timestamp base, and sequence origin, so Frame.RTPTime and the
 //     per-track sequence are discontinuous across a reconnect. Frame.PTS from a

@@ -17,28 +17,40 @@ func benchPayload(n int) []byte {
 	return p
 }
 
+// BenchmarkDecodeDst covers both codeword packings. Decode runs a separate
+// per-sample loop for each, so benchmarking only one would leave half the hot
+// path unmeasured and any future change to the AAL2 reader invisible here.
 func BenchmarkDecodeDst(b *testing.B) {
+	packings := []struct {
+		name string
+		p    audiostream.G726Packing
+	}{
+		{"rfc3551", audiostream.G726PackingRFC3551},
+		{"aal2", audiostream.G726PackingAAL2},
+	}
 	for _, rc := range rateCases {
-		b.Run(rc.name, func(b *testing.B) {
-			d, err := g726.New(rc.rate)
-			if err != nil {
-				b.Fatalf("New: %v", err)
-			}
-			payload := benchPayload(rc.bits * 40)
-			dst := make([]byte, 2*(len(payload)*8/rc.bits))
-			b.ReportAllocs()
-			b.ResetTimer()
-			for i := 0; i < b.N; i++ {
-				if _, err := d.Decode(dst, payload); err != nil {
-					b.Fatalf("Decode: %v", err)
+		for _, pk := range packings {
+			b.Run(rc.name+"/"+pk.name, func(b *testing.B) {
+				d, err := g726.New(rc.rate, pk.p)
+				if err != nil {
+					b.Fatalf("New: %v", err)
 				}
-			}
-		})
+				payload := benchPayload(rc.bits * 40)
+				dst := make([]byte, 2*(len(payload)*8/rc.bits))
+				b.ReportAllocs()
+				b.ResetTimer()
+				for i := 0; i < b.N; i++ {
+					if _, err := d.Decode(dst, payload); err != nil {
+						b.Fatalf("Decode: %v", err)
+					}
+				}
+			})
+		}
 	}
 }
 
 func BenchmarkDecodeAlloc(b *testing.B) {
-	d, err := g726.New(audiostream.G726Rate32)
+	d, err := g726.New(audiostream.G726Rate32, audiostream.G726PackingRFC3551)
 	if err != nil {
 		b.Fatalf("New: %v", err)
 	}

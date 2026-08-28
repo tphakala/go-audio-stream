@@ -1,6 +1,7 @@
 package hlssource
 
 import (
+	"bytes"
 	"encoding/binary"
 	"fmt"
 	"strings"
@@ -220,4 +221,25 @@ func buildFMP4MediaPlaylist(targetDur int, mediaSeq uint64, endList bool, initUR
 		b.WriteString("#EXT-X-ENDLIST\n")
 	}
 	return b.String()
+}
+
+// buildEncryptedInitSegment is buildInitSegment with the audio sample entry
+// carrying the 'enca' four-character code instead of 'mp4a', the encrypted form
+// internal/mp4 refuses with ErrUnsupportedSampleEntry. It exists to drive the
+// unsupported-codec path of a REPLACEMENT initialization segment.
+func buildEncryptedInitSegment(asc []byte, timescale, trackID uint32) []byte {
+	plain := buildInitSegment(asc, timescale, trackID)
+	// The sample entry type is the only difference, and 'mp4a' appears exactly
+	// once in this fixture (inside stsd), so rewriting that four-character code
+	// in place yields a structurally valid init with an encrypted entry.
+	// Enforce the premise rather than assume it: bytes.Index takes the FIRST
+	// match, so a second occurrence (from an ASC or a future brand) would send
+	// the patch to the wrong four bytes silently.
+	if n := bytes.Count(plain, []byte("mp4a")); n != 1 {
+		panic(fmt.Sprintf("fixture: want exactly one mp4a sample entry to encrypt, found %d", n))
+	}
+	i := bytes.Index(plain, []byte("mp4a"))
+	out := append([]byte(nil), plain...)
+	copy(out[i:i+4], "enca")
+	return out
 }

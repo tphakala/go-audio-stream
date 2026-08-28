@@ -11,6 +11,14 @@ import (
 	"github.com/tphakala/go-audio-stream/depacket/g726"
 )
 
+// Subtest names shared by the rate tables in this package's test files.
+const (
+	name16kbps = "16kbps"
+	name24kbps = "24kbps"
+	name32kbps = "32kbps"
+	name40kbps = "40kbps"
+)
+
 // rateCase pairs a bit rate with its codeword width and the testdata basename.
 type rateCase struct {
 	name string
@@ -20,10 +28,10 @@ type rateCase struct {
 }
 
 var rateCases = []rateCase{
-	{"16kbps", audiostream.G726Rate16, 2, "rate2bit"},
-	{"24kbps", audiostream.G726Rate24, 3, "rate3bit"},
-	{"32kbps", audiostream.G726Rate32, 4, "rate4bit"},
-	{"40kbps", audiostream.G726Rate40, 5, "rate5bit"},
+	{name16kbps, audiostream.G726Rate16, 2, "rate2bit"},
+	{name24kbps, audiostream.G726Rate24, 3, "rate3bit"},
+	{name32kbps, audiostream.G726Rate32, 4, "rate4bit"},
+	{name40kbps, audiostream.G726Rate40, 5, "rate5bit"},
 }
 
 func loadVector(t *testing.T, base string) (payload, pcm []byte) {
@@ -45,7 +53,7 @@ func TestDecodeMatchesReference(t *testing.T) {
 	for _, rc := range rateCases {
 		t.Run(rc.name, func(t *testing.T) {
 			payload, want := loadVector(t, rc.base)
-			d, err := g726.New(rc.rate)
+			d, err := g726.New(rc.rate, audiostream.G726PackingRFC3551)
 			if err != nil {
 				t.Fatalf("New: %v", err)
 			}
@@ -84,7 +92,7 @@ func TestDecodeSplitEqualsWhole(t *testing.T) {
 				t.Skipf("payload too short to split at a codeword boundary")
 			}
 
-			whole, err := g726.New(rc.rate)
+			whole, err := g726.New(rc.rate, audiostream.G726PackingRFC3551)
 			if err != nil {
 				t.Fatalf("New: %v", err)
 			}
@@ -93,7 +101,7 @@ func TestDecodeSplitEqualsWhole(t *testing.T) {
 				t.Fatalf("DecodeAlloc whole: %v", err)
 			}
 
-			split1, err := g726.New(rc.rate)
+			split1, err := g726.New(rc.rate, audiostream.G726PackingRFC3551)
 			if err != nil {
 				t.Fatalf("New: %v", err)
 			}
@@ -121,13 +129,13 @@ func TestResetRestoresBaseline(t *testing.T) {
 	rc := rateCases[2] // 32 kbps
 	payload, _ := loadVector(t, rc.base)
 
-	fresh, _ := g726.New(rc.rate)
+	fresh, _ := g726.New(rc.rate, audiostream.G726PackingRFC3551)
 	want, err := fresh.DecodeAlloc(payload)
 	if err != nil {
 		t.Fatalf("DecodeAlloc: %v", err)
 	}
 
-	used, _ := g726.New(rc.rate)
+	used, _ := g726.New(rc.rate, audiostream.G726PackingRFC3551)
 	if _, err := used.DecodeAlloc(payload); err != nil {
 		t.Fatalf("prime decode: %v", err)
 	}
@@ -142,7 +150,7 @@ func TestResetRestoresBaseline(t *testing.T) {
 }
 
 func TestNewUnknownBitRate(t *testing.T) {
-	if _, err := g726.New(audiostream.G726BitRate(99)); !errors.Is(err, g726.ErrUnknownBitRate) {
+	if _, err := g726.New(audiostream.G726BitRate(99), audiostream.G726PackingRFC3551); !errors.Is(err, g726.ErrUnknownBitRate) {
 		t.Fatalf("New(99): got %v, want ErrUnknownBitRate", err)
 	}
 }
@@ -157,24 +165,34 @@ func TestDecodeIncompletePayload(t *testing.T) {
 		rate          audiostream.G726BitRate
 		badLen, okLen int
 	}{
-		{"24kbps", audiostream.G726Rate24, 4, 3}, // 4 octets is not a whole number of 3-bit groups; 3 is
-		{"40kbps", audiostream.G726Rate40, 4, 5}, // 4 octets is not a whole number of 5-bit groups; 5 is
+		{name24kbps, audiostream.G726Rate24, 4, 3}, // 4 octets is not a whole number of 3-bit groups; 3 is
+		{name40kbps, audiostream.G726Rate40, 4, 5}, // 4 octets is not a whole number of 5-bit groups; 5 is
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			d, _ := g726.New(tc.rate)
-			if _, err := d.DecodeAlloc(make([]byte, tc.badLen)); !errors.Is(err, g726.ErrIncompletePayload) {
+			d, _ := g726.New(tc.rate, audiostream.G726PackingRFC3551)
+			bad := make([]byte, tc.badLen)
+			for i := range bad {
+				bad[i] = byte(i*53 + 7)
+			}
+			if _, err := d.DecodeAlloc(bad); !errors.Is(err, g726.ErrIncompletePayload) {
 				t.Fatalf("DecodeAlloc(%d bytes): got %v, want ErrIncompletePayload", tc.badLen, err)
 			}
 			// A rejected payload must leave the adaptive state untouched: decoding
 			// a conformant payload after the rejection must produce byte-identical
 			// PCM to a fresh decoder decoding the same bytes. If the malformed
 			// payload had advanced the state, the two would differ.
+			// Non-zero on purpose: all-zero codewords are a fixed point of the
+			// decoder at reset, so a zero-filled probe could not observe state
+			// that the rejected payload had wrongly advanced.
 			good := make([]byte, tc.okLen)
+			for i := range good {
+				good[i] = byte(i*37 + 11)
+			}
 			gotAfter, err := d.DecodeAlloc(good)
 			if err != nil {
 				t.Fatalf("DecodeAlloc(%d bytes): unexpected %v", tc.okLen, err)
 			}
-			fresh, _ := g726.New(tc.rate)
+			fresh, _ := g726.New(tc.rate, audiostream.G726PackingRFC3551)
 			wantFresh, err := fresh.DecodeAlloc(good)
 			if err != nil {
 				t.Fatalf("fresh DecodeAlloc: %v", err)
@@ -187,7 +205,7 @@ func TestDecodeIncompletePayload(t *testing.T) {
 	// 16 and 32 kbps accept any octet length: every octet is a whole number of
 	// codewords (four 2-bit or two 4-bit).
 	for _, rate := range []audiostream.G726BitRate{audiostream.G726Rate16, audiostream.G726Rate32} {
-		d, _ := g726.New(rate)
+		d, _ := g726.New(rate, audiostream.G726PackingRFC3551)
 		for _, n := range []int{1, 2, 3, 7} {
 			if _, err := d.DecodeAlloc(make([]byte, n)); err != nil {
 				t.Fatalf("rate %v len %d: unexpected %v", rate, n, err)
@@ -197,7 +215,7 @@ func TestDecodeIncompletePayload(t *testing.T) {
 }
 
 func TestDecodeEmpty(t *testing.T) {
-	d, _ := g726.New(audiostream.G726Rate32)
+	d, _ := g726.New(audiostream.G726Rate32, audiostream.G726PackingRFC3551)
 	n, err := d.Decode(nil, nil)
 	if n != 0 || err != nil {
 		t.Fatalf("Decode(nil,nil): got (%d,%v), want (0,nil)", n, err)
@@ -205,7 +223,7 @@ func TestDecodeEmpty(t *testing.T) {
 }
 
 func TestDecodeShortBufferUntouched(t *testing.T) {
-	d, _ := g726.New(audiostream.G726Rate32)
+	d, _ := g726.New(audiostream.G726Rate32, audiostream.G726PackingRFC3551)
 	payload := []byte{0x00, 0x11, 0x22, 0x33} // 4 bytes -> 8 samples -> 16 bytes needed
 	dst := make([]byte, 4)
 	sentinel := []byte{0xAA, 0xBB, 0xCC, 0xDD}
@@ -222,7 +240,7 @@ func TestDecodeShortBufferUntouched(t *testing.T) {
 func TestDecodeOutputLength(t *testing.T) {
 	for _, rc := range rateCases {
 		t.Run(rc.name, func(t *testing.T) {
-			d, _ := g726.New(rc.rate)
+			d, _ := g726.New(rc.rate, audiostream.G726PackingRFC3551)
 			// bits bytes of payload hold exactly 8 codewords.
 			payload := make([]byte, rc.bits*3)
 			out, err := d.DecodeAlloc(payload)

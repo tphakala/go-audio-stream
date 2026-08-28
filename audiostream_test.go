@@ -51,6 +51,24 @@ func TestLawString(t *testing.T) {
 	}
 }
 
+// TestG726PackingString pins the safety property G726Packing.String's own doc
+// comment promises: a value outside the two defined orders reports "unknown"
+// rather than a plausible bit order a caller could act on.
+func TestG726PackingString(t *testing.T) {
+	t.Parallel()
+	cases := map[audiostream.G726Packing]string{
+		audiostream.G726PackingRFC3551: "rfc3551",
+		audiostream.G726PackingAAL2:    "aal2",
+		audiostream.G726Packing(99):    unknownLabel,
+		audiostream.G726Packing(255):   unknownLabel,
+	}
+	for packing, want := range cases {
+		if got := packing.String(); got != want {
+			t.Errorf("G726Packing(%d).String() = %q, want %q", packing, got, want)
+		}
+	}
+}
+
 func TestSentinelErrors(t *testing.T) {
 	t.Parallel()
 	wrapped := fmt.Errorf("op failed: %w", audiostream.ErrClosed)

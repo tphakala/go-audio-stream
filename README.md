@@ -79,10 +79,12 @@ long-running soak testing, not core functionality.
   silent sender keeps the session open.
 - **Depacketizers**: AAC (RFC 3640 AAC-hbr) and MP4A-LATM (RFC 3016, out-of-band
   and in-band StreamMuxConfig), Opus (RFC 7587), G.711 mu-law and A-law, G.726
-  ADPCM (RFC 3551, 16/24/32/40 kbps, from a `G726-NN` rtpmap or the static payload
-  type 2), and L16 linear PCM (RFC 3551, from an `L16` rtpmap or the static payload
-  types 10 and 11). G.711, G.726, and L16 are delivered as little-endian s16le PCM,
-  so a consumer gets PCM in one byte order regardless of which of them it received. An
+  ADPCM (16/24/32/40 kbps, from a `G726-NN` rtpmap (RFC 3551), an
+  `AAL2-G726-NN` one (ITU-T I.366.2 Annex E; the same codewords in the
+  opposite bit order), or the static payload type 2), and L16 linear PCM
+  (RFC 3551, from an `L16` rtpmap or the static payload types 10 and 11).
+  G.711, G.726, and L16 are delivered as little-endian s16le PCM, so a consumer
+  gets PCM in one byte order regardless of which of them it received. An
   unrecognized codec, a non-audio track, or an AAC mode this milestone does not
   decode degrades to raw payload delivery rather than failing the session.
 - **Source interface**: `rtsp.Client`, `httpsource.Client` and

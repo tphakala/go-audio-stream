@@ -30,15 +30,31 @@
 // by its 'soun' handler and mp4a sample entry, so a multiplexed audio+video
 // fragment feeds only the audio samples. Out of scope: encrypted or DRM content
 // (EXT-X-KEY, or an encrypted fMP4 sample entry), byte-range segments and
-// byte-range EXT-X-MAP (EXT-X-BYTERANGE), an EXT-X-MAP that changes mid-stream,
-// video, non-AAC audio (MP3 or LATM in TS, a non-AAC fMP4 sample entry), adaptive
-// bitrate switching, and Digest authentication. An unsupported container or
-// EXT-X-KEY (playlist-level) encryption fails Open with ErrUnsupportedPlaylist;
-// an encrypted or non-AAC fMP4 sample entry fails with ErrUnsupportedCodec; a
-// segment carrying no audio at all (video-only) fails with ErrMalformedSegment.
+// byte-range EXT-X-MAP (EXT-X-BYTERANGE), a stream that switches container
+// mid-stream by adding or dropping EXT-X-MAP, video, non-AAC audio (MP3 or LATM
+// in TS, a non-AAC fMP4 sample entry), adaptive bitrate switching, and Digest
+// authentication. An unsupported container or EXT-X-KEY (playlist-level)
+// encryption fails Open with ErrUnsupportedPlaylist; an encrypted or non-AAC fMP4
+// sample entry fails with ErrUnsupportedCodec; a segment carrying no audio at all
+// (video-only) fails with ErrMalformedSegment.
+//
+// Changing initialization segment. A live fMP4 playlist that scrolls in a new
+// EXT-X-MAP keeps playing: the replacement init segment is fetched, the demuxer
+// is rebuilt from it, and the media clock continues unbroken (fMP4 fragments
+// carry whole samples, so no framer state is lost across the swap). When the new
+// init carries a different AudioSpecificConfig, that is a real codec change, and
+// it is reported through Config.OnCodecUpdate before the first access unit
+// demuxed under the new configuration reaches OnFrame; an init republished with
+// the same configuration reports nothing. Format().Codec is fixed at Open and
+// does not follow these updates, so a consumer that must track the live
+// configuration reads it from OnCodecUpdate. Registering that callback is what
+// opts a consumer into playing through a configuration change: without it there
+// is no channel for the new configuration, so such a change ends the stream with
+// ErrUnsupportedPlaylist rather than decoding on with a stale one.
 //
 // The read-idle watchdog (Config.ReadIdle) answers "is new audio still
-// arriving": it is stamped on every successful playlist or segment body read.
+// arriving": it is stamped on every successful playlist, initialization-segment,
+// or segment body read.
 // For a live stream it must exceed the playlist target duration, since the
 // client is intentionally idle between reloads. Playlist and segment bodies are
 // bounded by Config.MaxPlaylistBytes and Config.MaxSegmentBytes so an untrusted

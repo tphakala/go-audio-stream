@@ -373,7 +373,7 @@ func TestDeliverG726(t *testing.T) {
 
 	newG726Track := func() *track {
 		tr := &track{id: 3, kind: deliverG726, clockRate: 8000}
-		dec, err := g726.New(audiostream.G726Rate32)
+		dec, err := g726.New(audiostream.G726Rate32, audiostream.G726PackingRFC3551)
 		if err != nil {
 			t.Fatalf("New: %v", err)
 		}
@@ -384,7 +384,7 @@ func TestDeliverG726(t *testing.T) {
 
 	// One packet decodes to the reference decoder's output.
 	tr := newG726Track()
-	ref, _ := g726.New(audiostream.G726Rate32)
+	ref, _ := g726.New(audiostream.G726Rate32, audiostream.G726PackingRFC3551)
 	want, err := ref.DecodeAlloc(payload)
 	if err != nil {
 		t.Fatalf("DecodeAlloc: %v", err)
@@ -1441,5 +1441,61 @@ func TestCumulativeLostSaturatesAtTheSignedMaximum(t *testing.T) {
 		if signed := int32(got<<8) >> 8; signed < 0 {
 			t.Errorf("cumulativeLost(%d) = %#x, which decodes as %d in a signed 24-bit field", tc.in, got, signed)
 		}
+	}
+}
+
+// TestNewTrackG726AAL2Packing checks the codeword packing survives the whole
+// Setup path: a CodecG726 carrying G726PackingAAL2 (what the SDP resolves an
+// AAL2-G726-NN rtpmap to) must build a decoder that unpacks MSB-first, so the
+// delivered PCM matches an AAL2 reference decoder and NOT an RFC 3551 one.
+// Without the packing threaded through configureG726 the track would decode the
+// same bytes in the wrong bit order and deliver plausible but wrong audio.
+func TestNewTrackG726AAL2Packing(t *testing.T) {
+	t.Parallel()
+	payload := []byte{0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, 0xde, 0xf0}
+
+	desc := describedTrack{
+		codec: audiostream.CodecG726{
+			BitRate:   audiostream.G726Rate32,
+			Packing:   audiostream.G726PackingAAL2,
+			ClockRate: 8000,
+			Channels:  1,
+		},
+		clockRate: 8000,
+		media:     audiostream.MediaAudio,
+	}
+	tr := newTrack(0, desc, SetupOptions{}, 1, nil)
+	if tr.kind != deliverG726 {
+		t.Fatalf("kind = %d, want deliverG726", tr.kind)
+	}
+	tr.baseSet.Store(true)
+
+	aal2Ref, err := g726.New(audiostream.G726Rate32, audiostream.G726PackingAAL2)
+	if err != nil {
+		t.Fatalf("New aal2: %v", err)
+	}
+	wantAAL2, err := aal2Ref.DecodeAlloc(payload)
+	if err != nil {
+		t.Fatalf("DecodeAlloc aal2: %v", err)
+	}
+	plainRef, err := g726.New(audiostream.G726Rate32, audiostream.G726PackingRFC3551)
+	if err != nil {
+		t.Fatalf("New rfc3551: %v", err)
+	}
+	wantPlain, err := plainRef.DecodeAlloc(payload)
+	if err != nil {
+		t.Fatalf("DecodeAlloc rfc3551: %v", err)
+	}
+	// Precondition: this payload must distinguish the two packings, else the
+	// assertion below would pass no matter which decoder the track built.
+	if bytes.Equal(wantAAL2, wantPlain) {
+		t.Fatal("test payload does not distinguish the two codeword packings")
+	}
+
+	var got audiostream.Frame
+	pkt := rtp.Packet{Header: rtp.Header{Timestamp: 160}, Payload: payload}
+	tr.deliver(pkt, rtp.Update{Timestamp: 160}, time.Unix(1, 0), func(f audiostream.Frame) { got = f })
+	if !bytes.Equal(got.Data, wantAAL2) {
+		t.Errorf("Data = % x, want AAL2-decoded % x", got.Data, wantAAL2)
 	}
 }
