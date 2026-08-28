@@ -98,9 +98,9 @@ type Config struct {
 	// one demuxed under the old. Like OnFrame it runs on the reader goroutine,
 	// must not block, and must not call Wait (Close, Stats, Info and Format are
 	// the callback-safe ones). The CodecUpdate's Codec and any slices it carries
-	// are owned by the callee only for the duration of the call; copy
-	// AudioSpecificConfig to retain it. TrackID is always 0, this source's only
-	// track.
+	// are read-only and are owned by the callee only for the duration of the
+	// call; copy AudioSpecificConfig to retain it, and do not modify it in place.
+	// TrackID is always 0, this source's only track.
 	//
 	// Format().Codec is fixed at Open and does NOT follow these updates, so a
 	// consumer that needs the live configuration must read it here rather than
@@ -117,8 +117,9 @@ type Config struct {
 	// Logger receives diagnostics for conditions this source handles rather than
 	// fails on (a Basic credential sent over plaintext when permitted, a live
 	// window the client fell behind, an initialization segment whose replacement
-	// changed the audio configuration, and the refusal when such a change has no
-	// OnCodecUpdate to report it). The credential-stripped URL is logged, never
+	// changed the audio configuration), plus the one condition it refuses on
+	// rather than silently degrading: a configuration change with no
+	// OnCodecUpdate to report it. The credential-stripped URL is logged, never
 	// the credentials.
 	Logger *slog.Logger
 }

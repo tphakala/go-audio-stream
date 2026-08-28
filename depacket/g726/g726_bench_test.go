@@ -17,10 +17,9 @@ func benchPayload(n int) []byte {
 	return p
 }
 
-// BenchmarkDecodeDst covers both codeword packings. Decode hoists the packing
-// branch out of its per-sample loop, which is only a defensible trade if the two
-// loops can be measured against each other; with one packing benchmarked the
-// claim would be unfalsifiable in-tree.
+// BenchmarkDecodeDst covers both codeword packings. Decode runs a separate
+// per-sample loop for each, so benchmarking only one would leave half the hot
+// path unmeasured and any future change to the AAL2 reader invisible here.
 func BenchmarkDecodeDst(b *testing.B) {
 	packings := []struct {
 		name string

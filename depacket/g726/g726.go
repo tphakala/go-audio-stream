@@ -231,9 +231,9 @@ func (d *Decoder) Decode(dst, payload []byte) (int, error) {
 	// The two orders share the whole ADPCM state machine and differ only in the
 	// codeword reader, so the packing is resolved once per payload rather than
 	// per sample. That is for clarity, not speed: decodeSample is far past the
-	// inlining budget, so the call to it dominates, and a per-sample branch on
-	// the packing measures at or below the noise floor against it. Do not read
-	// this shape as a claim that the dispatch was worth avoiding.
+	// inlining budget (`go build -gcflags=-m` reports cost 1081 against a budget
+	// of 80), so the non-inlined call to it dominates the loop and the reader
+	// dispatch it replaces was not the cost worth avoiding.
 	pos := 0
 	if d.msbFirst {
 		for k := 0; k < nsamp; k++ {

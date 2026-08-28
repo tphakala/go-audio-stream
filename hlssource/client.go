@@ -747,11 +747,14 @@ func (c *Client) reinitFMP4(initURI string) error {
 	if !changed {
 		return nil // a re-published init with the same configuration, not a codec change
 	}
-	// Retain an independent snapshot for the next comparison, and hand the
-	// callback a separate copy: audioSpecificConfig returns the live demuxer's
-	// own slice by reference, so a consumer that mutates the value it is given,
-	// which the contract documents as read-only, must not be able to corrupt the
-	// running demuxer's resolved configuration.
+	// Two copies of one slice, because audioSpecificConfig returns the live
+	// demuxer's own by reference and Config.OnCodecUpdate documents the value it
+	// hands out as read-only. The snapshot keeps the next comparison independent
+	// of anything a consumer does; the callback's copy keeps a consumer that
+	// ignores the contract away from the demuxer's resolved configuration. They
+	// are redundant barriers against the same hazard, so no single current code
+	// path distinguishes dropping one from keeping both, and each is defensive at
+	// the segmentDemuxer boundary rather than against any implementation in tree.
 	c.asc = append([]byte(nil), asc...)
 	if c.cfg.Logger != nil {
 		c.cfg.Logger.Info("hlssource: initialization segment changed; audio configuration updated",

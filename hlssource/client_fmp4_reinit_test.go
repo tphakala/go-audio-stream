@@ -291,9 +291,9 @@ func TestFMP4InitChangeWithoutCallbackEndsStream(t *testing.T) {
 // per genuine change, each carrying the config that took effect, and none for a
 // segment reusing a config already in effect.
 //
-// The last playlist adds TWO segments under the third init, which is what makes a
-// missing c.initURI update observable: the client would then treat each of them as
-// a fresh init change and re-fetch the same initialization segment. The ASC
+// The third playlist adds TWO segments under the third init, which is what makes
+// a missing c.initURI update observable: the client would then treat each of them
+// as a fresh init change and re-fetch the same initialization segment. The ASC
 // comparison suppresses the duplicate callbacks, so the repeated work is visible
 // only in the per-path request count, which is asserted here.
 func TestFMP4RepeatedInitChangesFireEachUpdate(t *testing.T) {
