@@ -170,8 +170,8 @@ func TestAAL2IncompletePayload(t *testing.T) {
 		rate   audiostream.G726BitRate
 		badLen int
 	}{
-		{"24kbps", audiostream.G726Rate24, 4},
-		{"40kbps", audiostream.G726Rate40, 4},
+		{name24kbps, audiostream.G726Rate24, 4},
+		{name40kbps, audiostream.G726Rate40, 4},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			d, err := g726.New(tc.rate, audiostream.G726PackingAAL2)

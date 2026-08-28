@@ -85,10 +85,31 @@ type Config struct {
 	// call; consumers that retain audio must copy. Nil is allowed: access units
 	// are still counted in Stats, they are simply not delivered.
 	OnFrame func(audiostream.Frame)
+	// OnCodecUpdate, when non-nil, is called on the reader goroutine when a live
+	// playlist scrolls in a new EXT-X-MAP initialization segment whose
+	// AudioSpecificConfig differs from the one in effect, so a consumer can
+	// re-initialize its decoder for the new configuration. It does NOT fire for
+	// the configuration resolved at Open (that one is on Format().Codec), and it
+	// does not fire when a replacement init segment carries the same
+	// AudioSpecificConfig, which is a re-publish rather than a codec change.
+	//
+	// Ordering guarantee: OnCodecUpdate fires BEFORE the OnFrame call for the
+	// first access unit demuxed under the new configuration, and after the last
+	// one demuxed under the old. Like OnFrame it runs on the reader goroutine,
+	// must not block, and must not call Wait (Close, Stats, Info and Format are
+	// the callback-safe ones). The CodecUpdate's Codec and any slices it carries
+	// are owned by the callee only for the duration of the call; copy
+	// AudioSpecificConfig to retain it. TrackID is always 0, this source's only
+	// track.
+	//
+	// Format().Codec is fixed at Open and does NOT follow these updates, so a
+	// consumer that needs the live configuration must read it here rather than
+	// poll Format.
+	OnCodecUpdate func(audiostream.CodecUpdate)
 	// Logger receives diagnostics for conditions this source handles rather than
 	// fails on (a Basic credential sent over plaintext when permitted, a live
-	// window the client fell behind). The credential-stripped URL is logged,
-	// never the credentials.
+	// window the client fell behind, an initialization segment replaced
+	// mid-stream). The credential-stripped URL is logged, never the credentials.
 	Logger *slog.Logger
 }
 

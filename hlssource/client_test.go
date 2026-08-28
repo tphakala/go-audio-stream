@@ -21,6 +21,12 @@ const (
 	segURL1 = "/s1.ts"
 	segRel0 = "s0.ts"
 	segRel1 = "s1.ts"
+
+	// tsSegURL0 and tsSegRel0 are the longer-named MPEG-TS segment path used by
+	// the tests that pair a TS segment against an fMP4 one, kept distinct from
+	// segURL0 so the two shapes are not confused in a fixture map.
+	tsSegURL0 = "/seg0.ts"
+	tsSegRel0 = "seg0.ts"
 )
 
 // fastReload shrinks the live-reload cadence for deterministic tests and returns
@@ -110,7 +116,7 @@ func vodServer(t *testing.T, order []string, segs map[string][]byte) *httptest.S
 func TestOpenResolvesASC(t *testing.T) {
 	stream, _ := adtsStream(3, 40)
 	seg := buildTSSegment(stream, 0x1000, 0x0100)
-	srv := vodServer(t, []string{"/seg0.ts"}, map[string][]byte{"/seg0.ts": seg})
+	srv := vodServer(t, []string{tsSegURL0}, map[string][]byte{tsSegURL0: seg})
 	c, err := Open(context.Background(), Config{URL: srv.URL + "/vod.m3u8"})
 	if err != nil {
 		t.Fatalf("Open: %v", err)
@@ -566,7 +572,7 @@ func TestOpenUnsupportedCodecEndToEnd(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			stream, _ := adtsStream(2, 40)
 			seg := buildTSSegmentType(stream, 0x1000, 0x0100, tc.streamType)
-			srv := vodServer(t, []string{segURL0}, map[string][]byte{segURL0: seg})
+			srv := vodServer(t, []string{tsSegURL0}, map[string][]byte{tsSegURL0: seg})
 			if _, err := Open(context.Background(), Config{URL: srv.URL + "/vod.m3u8"}); !errors.Is(err, ErrUnsupportedCodec) {
 				t.Fatalf("Open with stream_type %#x = %v, want ErrUnsupportedCodec", tc.streamType, err)
 			}

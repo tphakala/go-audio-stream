@@ -170,38 +170,3 @@ func TestFMP4MultiplexedFragmentPicksAudio(t *testing.T) {
 		}
 	}
 }
-
-func TestFMP4InitChangeMidStreamIsUnsupported(t *testing.T) {
-	fastReload(t)
-	init := buildInitSegment(wantASC, 44100, 1)
-	s0 := fmp4Samples(2, 40)
-	s1 := fmp4Samples(2, 44)
-	segs := map[string][]byte{
-		initURL:   init,
-		"/i2.mp4": buildInitSegment(wantASC, 44100, 1),
-		fragURL0:  buildFragment(1, s0, 1024),
-		fragURL1:  buildFragment(1, s1, 1024),
-	}
-	v1 := buildFMP4MediaPlaylist(1, 0, false, initRel, []segSpec{{uri: fragRel0, duration: 1.0}})
-	// The reload changes EXT-X-MAP to a different init URI before the second frag.
-	v2 := buildFMP4MediaPlaylist(1, 0, true, "i2.mp4", []segSpec{
-		{uri: fragRel0, duration: 1.0}, {uri: fragRel1, duration: 1.0},
-	})
-	h := &hlsServer{
-		segments: segs,
-		playlist: func(n int) (string, int) {
-			if n == 1 {
-				return v1, http.StatusOK
-			}
-			return v2, http.StatusOK
-		},
-	}
-	srv := h.start(t)
-	c, err := Open(context.Background(), Config{URL: srv.URL + "/live.m3u8"})
-	if err != nil {
-		t.Fatalf("Open: %v", err)
-	}
-	if err := c.Wait(context.Background()); !errors.Is(err, ErrUnsupportedPlaylist) {
-		t.Fatalf("Wait = %v, want ErrUnsupportedPlaylist (init changed mid-stream)", err)
-	}
-}

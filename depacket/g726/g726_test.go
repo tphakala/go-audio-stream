@@ -11,6 +11,14 @@ import (
 	"github.com/tphakala/go-audio-stream/depacket/g726"
 )
 
+// Subtest names shared by the rate tables in this package's test files.
+const (
+	name16kbps = "16kbps"
+	name24kbps = "24kbps"
+	name32kbps = "32kbps"
+	name40kbps = "40kbps"
+)
+
 // rateCase pairs a bit rate with its codeword width and the testdata basename.
 type rateCase struct {
 	name string
@@ -20,10 +28,10 @@ type rateCase struct {
 }
 
 var rateCases = []rateCase{
-	{"16kbps", audiostream.G726Rate16, 2, "rate2bit"},
-	{"24kbps", audiostream.G726Rate24, 3, "rate3bit"},
-	{"32kbps", audiostream.G726Rate32, 4, "rate4bit"},
-	{"40kbps", audiostream.G726Rate40, 5, "rate5bit"},
+	{name16kbps, audiostream.G726Rate16, 2, "rate2bit"},
+	{name24kbps, audiostream.G726Rate24, 3, "rate3bit"},
+	{name32kbps, audiostream.G726Rate32, 4, "rate4bit"},
+	{name40kbps, audiostream.G726Rate40, 5, "rate5bit"},
 }
 
 func loadVector(t *testing.T, base string) (payload, pcm []byte) {
@@ -157,8 +165,8 @@ func TestDecodeIncompletePayload(t *testing.T) {
 		rate          audiostream.G726BitRate
 		badLen, okLen int
 	}{
-		{"24kbps", audiostream.G726Rate24, 4, 3}, // 4 octets is not a whole number of 3-bit groups; 3 is
-		{"40kbps", audiostream.G726Rate40, 4, 5}, // 4 octets is not a whole number of 5-bit groups; 5 is
+		{name24kbps, audiostream.G726Rate24, 4, 3}, // 4 octets is not a whole number of 3-bit groups; 3 is
+		{name40kbps, audiostream.G726Rate40, 4, 5}, // 4 octets is not a whole number of 5-bit groups; 5 is
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			d, _ := g726.New(tc.rate, audiostream.G726PackingRFC3551)
