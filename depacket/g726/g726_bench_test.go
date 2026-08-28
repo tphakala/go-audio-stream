@@ -20,7 +20,7 @@ func benchPayload(n int) []byte {
 func BenchmarkDecodeDst(b *testing.B) {
 	for _, rc := range rateCases {
 		b.Run(rc.name, func(b *testing.B) {
-			d, err := g726.New(rc.rate)
+			d, err := g726.New(rc.rate, audiostream.G726PackingRFC3551)
 			if err != nil {
 				b.Fatalf("New: %v", err)
 			}
@@ -38,7 +38,7 @@ func BenchmarkDecodeDst(b *testing.B) {
 }
 
 func BenchmarkDecodeAlloc(b *testing.B) {
-	d, err := g726.New(audiostream.G726Rate32)
+	d, err := g726.New(audiostream.G726Rate32, audiostream.G726PackingRFC3551)
 	if err != nil {
 		b.Fatalf("New: %v", err)
 	}

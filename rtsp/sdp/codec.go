@@ -14,12 +14,23 @@ import (
 // whereas PCMU/PCMA occur twice each and stay inline.
 const encodingL16 = "L16"
 
-// The four plain G.726 rtpmap encoding names (RFC 3551), one per bit rate.
+// The four plain G.726 rtpmap encoding names (RFC 3551 section 4.5.4), one per
+// bit rate. They pack codewords least-significant-bit-first.
 const (
 	g726Name16 = "G726-16"
 	g726Name24 = "G726-24"
 	g726Name32 = "G726-32"
 	g726Name40 = "G726-40"
+)
+
+// The four AAL2-G726 rtpmap encoding names (RFC 3551 section 4.5.4.1, ITU-T
+// I.366.2). They carry the same codewords as the plain names above at the same
+// bit rates, packed most-significant-bit-first.
+const (
+	aal2G726Name16 = "AAL2-G726-16"
+	aal2G726Name24 = "AAL2-G726-24"
+	aal2G726Name32 = "AAL2-G726-32"
+	aal2G726Name40 = "AAL2-G726-40"
 )
 
 // g726ClockRate is the fixed RTP clock rate for G.726 (RFC 3551/4856): all four
@@ -182,14 +193,17 @@ func describeTrack(m *Media) DescribedTrack {
 		t.Codec = audiostream.CodecG711{Law: audiostream.MuLaw}
 	case "PCMA":
 		t.Codec = audiostream.CodecG711{Law: audiostream.ALaw}
-	case g726Name16, g726Name24, g726Name32, g726Name40:
+	case g726Name16, g726Name24, g726Name32, g726Name40,
+		aal2G726Name16, aal2G726Name24, aal2G726Name32, aal2G726Name40:
 		// G.726 is single-channel at an 8 kHz clock (RFC 3551/4856: no channels
 		// parameter, 8000 Hz), and the decoder holds one adaptive state, so a
 		// multi-channel or non-8 kHz advertisement cannot be decoded or timed
 		// correctly. Resolve only the conformant form to CodecG726 and leave any
 		// other channel count or clock as CodecUnknown rather than mis-decode it.
-		if br, ok := g726BitRate(strings.ToUpper(encoding)); ok && channels == 1 && clock == g726ClockRate {
-			t.Codec = audiostream.CodecG726{BitRate: br, ClockRate: clock, Channels: channels}
+		// The AAL2 names resolve to the same bit rates with the AAL2 packing, so
+		// the only difference from the plain names is the codeword bit order.
+		if br, pk, ok := g726BitRate(strings.ToUpper(encoding)); ok && channels == 1 && clock == g726ClockRate {
+			t.Codec = audiostream.CodecG726{BitRate: br, Packing: pk, ClockRate: clock, Channels: channels}
 		} else {
 			t.Codec = audiostream.CodecUnknown{RTPMap: rtpmapString(encoding, clock, rawChannels, hasRTPMap)}
 		}
@@ -202,22 +216,30 @@ func describeTrack(m *Media) DescribedTrack {
 	return t
 }
 
-// g726BitRate maps an upper-cased G.726 rtpmap encoding name to its bit rate.
-// ok is false for a name that is not one of the four plain G726-NN forms (the
-// AAL2-G726 variants, which use a different bit order, are deliberately not
-// matched and fall through to CodecUnknown).
-func g726BitRate(up string) (audiostream.G726BitRate, bool) {
+// g726BitRate maps an upper-cased G.726 rtpmap encoding name to its bit rate and
+// codeword packing. The plain G726-NN names resolve to the RFC 3551 section
+// 4.5.4 packing and the AAL2-G726-NN names to the section 4.5.4.1 (ITU-T
+// I.366.2) packing at the same four bit rates. ok is false for any other name.
+func g726BitRate(up string) (audiostream.G726BitRate, audiostream.G726Packing, bool) {
 	switch up {
 	case g726Name16:
-		return audiostream.G726Rate16, true
+		return audiostream.G726Rate16, audiostream.G726PackingRFC3551, true
 	case g726Name24:
-		return audiostream.G726Rate24, true
+		return audiostream.G726Rate24, audiostream.G726PackingRFC3551, true
 	case g726Name32:
-		return audiostream.G726Rate32, true
+		return audiostream.G726Rate32, audiostream.G726PackingRFC3551, true
 	case g726Name40:
-		return audiostream.G726Rate40, true
+		return audiostream.G726Rate40, audiostream.G726PackingRFC3551, true
+	case aal2G726Name16:
+		return audiostream.G726Rate16, audiostream.G726PackingAAL2, true
+	case aal2G726Name24:
+		return audiostream.G726Rate24, audiostream.G726PackingAAL2, true
+	case aal2G726Name32:
+		return audiostream.G726Rate32, audiostream.G726PackingAAL2, true
+	case aal2G726Name40:
+		return audiostream.G726Rate40, audiostream.G726PackingAAL2, true
 	default:
-		return 0, false
+		return 0, 0, false
 	}
 }
 

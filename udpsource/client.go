@@ -288,12 +288,14 @@ func (c *Client) resolveRTPCodec() error {
 			c.cfg.Codec = audiostream.CodecAAC{AudioSpecificConfig: c.cfg.AAC.AudioSpecificConfig}
 		}
 	case audiostream.CodecG726:
-		// Build the decoder once. A bad bit rate surfaces as this package's own
-		// ErrInvalidConfig, wrapping g726.ErrUnknownBitRate so errors.Is still
+		// Build the decoder once, with the caller's codeword packing (RFC 3551 by
+		// default, AAL2 for an AAL2-G726 stream). A bad bit rate or packing
+		// surfaces as this package's own ErrInvalidConfig, wrapping
+		// g726.ErrUnknownBitRate or g726.ErrUnknownPacking so errors.Is still
 		// reaches the precise cause, matching the AAC arm.
-		dec, derr := g726.New(codec.BitRate)
+		dec, derr := g726.New(codec.BitRate, codec.Packing)
 		if derr != nil {
-			return fmt.Errorf("%w: G.726 bit rate: %w", ErrInvalidConfig, derr)
+			return fmt.Errorf("%w: G.726 configuration: %w", ErrInvalidConfig, derr)
 		}
 		c.g726 = dec
 		c.kind = kindG726

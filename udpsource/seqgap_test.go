@@ -23,7 +23,7 @@ func TestRTPG726DeliversPCMAndGap(t *testing.T) {
 
 	// A fresh reference decoder mirrors the source's decoder, which also starts
 	// fresh at Open, so the first packet's output must match packet-for-packet.
-	ref, err := g726.New(audiostream.G726Rate32)
+	ref, err := g726.New(audiostream.G726Rate32, audiostream.G726PackingRFC3551)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}

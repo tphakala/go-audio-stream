@@ -299,15 +299,17 @@ func modeOf(params *sdp.AACParams) string {
 	return params.Mode
 }
 
-// configureG726 selects the ITU-T G.726 ADPCM decoder for a CodecG726 track.
-// The SDP layer only resolves the four valid bit rates, so g726.New cannot
-// fail here in practice; the fallback to raw delivery is defensive, matching
-// the other configure* helpers.
+// configureG726 selects the ITU-T G.726 ADPCM decoder for a CodecG726 track,
+// with the codeword packing the SDP resolved (RFC 3551 for the plain G726-NN
+// names, AAL2 for the AAL2-G726-NN ones). The SDP layer only resolves the four
+// valid bit rates and the two defined packings, so g726.New cannot fail here in
+// practice; the fallback to raw delivery is defensive, matching the other
+// configure* helpers.
 func (tr *track) configureG726(codec audiostream.CodecG726, logger *slog.Logger) {
-	dec, err := g726.New(codec.BitRate)
+	dec, err := g726.New(codec.BitRate, codec.Packing)
 	if err != nil {
 		tr.kind = deliverRaw
-		logWarn(logger, "g726 bit rate invalid; delivering raw payloads", "error", err)
+		logWarn(logger, "g726 configuration invalid; delivering raw payloads", "error", err)
 		return
 	}
 	tr.kind = deliverG726

@@ -19,6 +19,13 @@ var ErrShortBuffer = errors.New("g726: destination buffer too small")
 // defaulted.
 var ErrUnknownBitRate = errors.New("g726: unknown bit rate")
 
+// ErrUnknownPacking is returned by New for a packing order that is neither
+// audiostream.G726PackingRFC3551 nor audiostream.G726PackingAAL2. Unpacking with
+// the wrong bit order recovers different codewords and so produces plausible but
+// wrong audio, so an unrecognized packing is refused rather than defaulted,
+// matching ErrUnknownBitRate and g711's ErrUnknownLaw.
+var ErrUnknownPacking = errors.New("g726: unknown codeword packing")
+
 // ErrIncompletePayload is returned by Decode when the payload does not hold a
 // whole number of RFC 3551 codeword groups: its bit length is not a multiple of
 // the codeword width, so the final octet is not completely packed. RFC 3551
@@ -112,6 +119,11 @@ var rateTables = map[audiostream.G726BitRate]*rateTable{
 // precomputed for the next sample (se, sez, y).
 type Decoder struct {
 	rt *rateTable
+	// msbFirst selects the AAL2 (ITU-T I.366.2) codeword packing, in which the
+	// first codeword's most significant bit is the most significant bit of the
+	// first octet, over the plain RFC 3551 least-significant-bit-first order.
+	// Decode branches on it once per payload, never per sample.
+	msbFirst bool
 
 	sr  [2]float11
 	dq  [6]float11
@@ -129,15 +141,32 @@ type Decoder struct {
 	y   int32
 }
 
-// New returns a G.726 decoder for the given bit rate, or ErrUnknownBitRate if
-// br is not one of the four ITU-T rates. The returned Decoder is reset and
-// ready to decode the first packet of a stream.
-func New(br audiostream.G726BitRate) (*Decoder, error) {
+// New returns a G.726 decoder for the given bit rate and codeword packing. It
+// returns ErrUnknownBitRate if br is not one of the four ITU-T rates and
+// ErrUnknownPacking if packing is neither defined order. The returned Decoder is
+// reset and ready to decode the first packet of a stream.
+//
+// packing selects the wire bit order, not a different codec:
+// audiostream.G726PackingRFC3551 (the zero value) is the plain G726-NN RTP form
+// of RFC 3551 section 4.5.4, and audiostream.G726PackingAAL2 is the
+// AAL2-G726-NN form of section 4.5.4.1. Both carry the same codeword sequence
+// through the same ADPCM state machine, so the two differ only in how the
+// codewords are unpacked from the payload octets.
+func New(br audiostream.G726BitRate, packing audiostream.G726Packing) (*Decoder, error) {
 	rt, ok := rateTables[br]
 	if !ok {
 		return nil, ErrUnknownBitRate
 	}
-	d := &Decoder{rt: rt}
+	var msbFirst bool
+	switch packing {
+	case audiostream.G726PackingRFC3551:
+		msbFirst = false
+	case audiostream.G726PackingAAL2:
+		msbFirst = true
+	default:
+		return nil, ErrUnknownPacking
+	}
+	d := &Decoder{rt: rt, msbFirst: msbFirst}
 	d.Reset()
 	return d, nil
 }
@@ -167,8 +196,13 @@ func (d *Decoder) Reset() {
 
 // Decode expands a G.726 RTP payload into signed 16-bit little-endian PCM,
 // writing into dst and returning the number of bytes written. The payload is
-// unpacked in RFC 3551 section 4.5.4 order (first codeword in the least
-// significant bits). It must hold a whole number of codeword groups: if its bit
+// unpacked in the codeword order the decoder was constructed with: RFC 3551
+// section 4.5.4 (first codeword in the least significant bits) by default, or
+// the AAL2 order of section 4.5.4.1 (first codeword in the most significant
+// bits) for a decoder built with audiostream.G726PackingAAL2. The two orders
+// carry the same codewords, so the choice does not change the payload's length
+// or its framing rules, only how it is unpacked. It must hold a whole number of
+// codeword groups: if its bit
 // length is not a multiple of the codeword width (so the final octet is not
 // completely packed, a malformed packet under RFC 3551 section 4.5.4), Decode
 // writes nothing, leaves the adaptive state untouched, and returns
@@ -192,9 +226,21 @@ func (d *Decoder) Decode(dst, payload []byte) (int, error) {
 	if len(dst) < need {
 		return 0, ErrShortBuffer
 	}
+	// The packing branch is hoisted out of the per-sample loop: the two orders
+	// share the whole ADPCM state machine and differ only in the codeword
+	// reader, so branching once per payload keeps the hot path free of a
+	// per-sample test or indirect call.
 	pos := 0
+	if d.msbFirst {
+		for k := 0; k < nsamp; k++ {
+			code := readCodewordMSB(payload, pos, d.rt.bits)
+			pos += d.rt.bits
+			binary.LittleEndian.PutUint16(dst[2*k:], uint16(d.decodeSample(code)))
+		}
+		return need, nil
+	}
 	for k := 0; k < nsamp; k++ {
-		code := readCodeword(payload, pos, d.rt.bits)
+		code := readCodewordLSB(payload, pos, d.rt.bits)
 		pos += d.rt.bits
 		binary.LittleEndian.PutUint16(dst[2*k:], uint16(d.decodeSample(code)))
 	}
@@ -223,14 +269,33 @@ func (d *Decoder) OutputLen(payload []byte) int {
 	return 2 * ((len(payload) * 8) / d.rt.bits)
 }
 
-// readCodeword extracts one width-bit codeword whose first (oldest) bit is at
-// global bit index pos, packed least-significant-bit-first (RFC 3551 order).
-func readCodeword(payload []byte, pos, width int) int32 {
+// readCodewordLSB extracts one width-bit codeword whose first transmitted bit is
+// at global bit index pos, packed least-significant-bit-first (RFC 3551 section
+// 4.5.4 order): the bit transmitted first is the codeword's least significant,
+// and octet bit 0 is transmitted before octet bit 7.
+func readCodewordLSB(payload []byte, pos, width int) int32 {
 	var v int32
 	for i := 0; i < width; i++ {
 		g := pos + i
 		bit := (payload[g>>3] >> uint(g&7)) & 1
 		v |= int32(bit) << uint(i)
+	}
+	return v
+}
+
+// readCodewordMSB extracts one width-bit codeword whose first transmitted bit is
+// at global bit index pos, packed most-significant-bit-first (the AAL2-G726 form
+// of RFC 3551 section 4.5.4.1, following ITU-T I.366.2): the bit transmitted
+// first is the codeword's most significant, and octet bit 7 is transmitted
+// before octet bit 0. Both orders lay the codewords out in the same sequence at
+// the same bit offsets, so only the two bit numberings are reversed; a payload
+// packed either way yields the same codewords through the matching reader.
+func readCodewordMSB(payload []byte, pos, width int) int32 {
+	var v int32
+	for i := 0; i < width; i++ {
+		g := pos + i
+		bit := (payload[g>>3] >> uint(7-(g&7))) & 1
+		v = v<<1 | int32(bit)
 	}
 	return v
 }

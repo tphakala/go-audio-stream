@@ -63,6 +63,11 @@ func (CodecG711) isCodec() {}
 // channel count, both from the rtpmap (or the RFC 3551 defaults of 8000/1),
 // enough to interpret the delivered PCM.
 //
+// Packing selects the codeword bit order: G726PackingRFC3551 for the plain
+// G726-NN rtpmap names and G726PackingAAL2 for the AAL2-G726-NN names, which
+// carry the same codewords in the opposite bit order. The zero value is the
+// plain RFC 3551 order.
+//
 // G.726 is a single-channel format at an 8 kHz clock (RFC 3551/4856 define no
 // channels parameter and fix the rate at 8000 Hz), and the decoder carries one
 // adaptive predictor and quantizer state, so it decodes one 8 kHz channel.
@@ -71,6 +76,7 @@ func (CodecG711) isCodec() {}
 // CodecUnknown rather than mis-decoded or mis-timed.
 type CodecG726 struct {
 	BitRate   G726BitRate
+	Packing   G726Packing
 	ClockRate int
 	Channels  int
 }

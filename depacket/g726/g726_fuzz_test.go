@@ -32,7 +32,7 @@ func FuzzDecode(f *testing.F) {
 
 	f.Fuzz(func(t *testing.T, sel uint8, payload []byte) {
 		rate := fuzzRates[int(sel)%len(fuzzRates)]
-		d, err := g726.New(rate)
+		d, err := g726.New(rate, audiostream.G726PackingRFC3551)
 		if err != nil {
 			t.Fatalf("New: %v", err)
 		}
@@ -53,7 +53,7 @@ func FuzzDecode(f *testing.F) {
 
 		// Oversized destination guarded by canaries: Decode must not touch the
 		// bytes past what it reports writing.
-		d2, _ := g726.New(rate)
+		d2, _ := g726.New(rate, audiostream.G726PackingRFC3551)
 		dst := make([]byte, len(out)+8)
 		for i := range dst {
 			dst[i] = 0x5A

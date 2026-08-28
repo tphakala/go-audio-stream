@@ -95,3 +95,39 @@ func (r G726BitRate) String() string {
 		return unknownName
 	}
 }
+
+// G726Packing selects the bit order G.726 codewords are packed in on the wire.
+// The two orders carry the same codeword sequence and decode through the same
+// ADPCM state machine; only the unpacking differs, so a depacketizer needs to
+// know which one a stream uses. It lives in this package (like Law and
+// G726BitRate) so CodecG726 can carry it without the root package importing
+// depacket/g726.
+type G726Packing uint8
+
+const (
+	// G726PackingRFC3551 packs codewords least-significant-bit-first: the
+	// first (oldest) codeword occupies the least significant bits of the
+	// first octet. This is the plain G726-16/24/32/40 RTP form of RFC 3551
+	// section 4.5.4, and the zero value, so a CodecG726 that names no
+	// packing decodes as the common case.
+	G726PackingRFC3551 G726Packing = iota
+	// G726PackingAAL2 packs codewords most-significant-bit-first: the first
+	// codeword's most significant bit is the most significant bit of the
+	// first octet. This is the AAL2-G726-16/24/32/40 RTP form of RFC 3551
+	// section 4.5.4.1, following ITU-T I.366.2.
+	G726PackingAAL2
+)
+
+// String returns a short name for the packing order. A value outside the
+// defined orders reports "unknown" rather than a plausible order, so a
+// malformed value is never mislabeled as a bit order the caller can trust.
+func (p G726Packing) String() string {
+	switch p {
+	case G726PackingRFC3551:
+		return "rfc3551"
+	case G726PackingAAL2:
+		return "aal2"
+	default:
+		return unknownName
+	}
+}
