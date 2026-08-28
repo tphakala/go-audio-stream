@@ -8,8 +8,8 @@ The decoder in this package must reproduce the `.pcm` file byte-for-byte from
 the `.payload` file.
 
 Each `rateNbit.aal2payload` is the SAME audio at the SAME bit rate encoded into
-the opposite codeword packing: the AAL2-G726 form of RFC 3551 section 4.5.4.1
-(ITU-T I.366.2), which puts the first codeword in the MOST significant bits.
+the opposite codeword packing: the AAL2-G726 form of ITU-T I.366.2 Annex E,
+which puts the first codeword in the MOST significant bits.
 It is a genuinely different byte stream of the same length, and it must decode
 to the SAME `rateNbit.pcm`, because the two packings carry an identical codeword
 sequence through an identical ADPCM state machine. Reusing the one reference
@@ -17,9 +17,9 @@ PCM for both is deliberate: a bug in the MSB-first unpacker cannot be masked by
 a matching bug in a separately generated expectation.
 
 Note on bit order: RFC 3551 section 4.5.4 packs the plain `G726-NN` RTP form
-LSB-first, which is ffmpeg's `g726le`; section 4.5.4.1 packs the `AAL2-G726-NN`
-form MSB-first, which is ffmpeg's `g726`. This package decodes both, selected
-per stream by `audiostream.G726Packing`.
+LSB-first, which is ffmpeg's `g726le`; ITU-T I.366.2 Annex E packs the
+`AAL2-G726-NN` form MSB-first, which is ffmpeg's `g726`. This package decodes
+both, selected per stream by `audiostream.G726Packing`.
 
 | file            | bits/sample | rate    |
 |-----------------|-------------|---------|

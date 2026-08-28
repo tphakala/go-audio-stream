@@ -44,7 +44,10 @@ var (
 	// with no audio-bearing option. An EXT-X-MAP that is REPLACED mid-stream by
 	// another fMP4 initialization segment is played, not refused: the demuxer is
 	// rebuilt from the new init and a changed AudioSpecificConfig is reported
-	// through Config.OnCodecUpdate.
+	// through Config.OnCodecUpdate. The one exception is a replacement whose
+	// AudioSpecificConfig differs when no Config.OnCodecUpdate is registered:
+	// with no way to deliver the new configuration, the stream ends here rather
+	// than decode on with a stale one.
 	ErrUnsupportedPlaylist = errors.New("hlssource: unsupported playlist")
 	// ErrMalformedSegment reports a segment whose container structure could not be
 	// parsed: for MPEG-TS, no 0x47 sync, no PAT or PMT, no audio PID, or no ADTS

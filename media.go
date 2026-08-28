@@ -113,8 +113,11 @@ const (
 	G726PackingRFC3551 G726Packing = iota
 	// G726PackingAAL2 packs codewords most-significant-bit-first: the first
 	// codeword's most significant bit is the most significant bit of the
-	// first octet. This is the AAL2-G726-16/24/32/40 RTP form of RFC 3551
-	// section 4.5.4.1, following ITU-T I.366.2.
+	// first octet. This is the packing of ITU-T I.366.2 Annex E, carried
+	// under the AAL2-G726-16/24/32/40 rtpmap names. RFC 3551 section 4.5.4
+	// names those subtypes in a closing note and defers their payload format
+	// to "a separate document" that was never published, so the bit order is
+	// specified by I.366.2, not by an RFC.
 	G726PackingAAL2
 )
 

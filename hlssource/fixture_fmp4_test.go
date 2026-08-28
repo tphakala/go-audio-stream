@@ -232,10 +232,13 @@ func buildEncryptedInitSegment(asc []byte, timescale, trackID uint32) []byte {
 	// The sample entry type is the only difference, and 'mp4a' appears exactly
 	// once in this fixture (inside stsd), so rewriting that four-character code
 	// in place yields a structurally valid init with an encrypted entry.
-	i := bytes.Index(plain, []byte("mp4a"))
-	if i < 0 {
-		panic("fixture: no mp4a sample entry to encrypt")
+	// Enforce the premise rather than assume it: bytes.Index takes the FIRST
+	// match, so a second occurrence (from an ASC or a future brand) would send
+	// the patch to the wrong four bytes silently.
+	if n := bytes.Count(plain, []byte("mp4a")); n != 1 {
+		panic(fmt.Sprintf("fixture: want exactly one mp4a sample entry to encrypt, found %d", n))
 	}
+	i := bytes.Index(plain, []byte("mp4a"))
 	out := append([]byte(nil), plain...)
 	copy(out[i:i+4], "enca")
 	return out

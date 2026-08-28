@@ -324,3 +324,58 @@ func TestDeliverRTPSingleFrameNilOnFrameDrains(t *testing.T) {
 		t.Errorf("pendingGap = %d after a valid packet with a nil callback, want 0 (the drain must run even without a callback)", c.pendingGap)
 	}
 }
+
+// TestRTPG726AAL2PackingReachesDecoder proves Config.Codec's Packing is threaded
+// into the decoder on the raw-RTP path, not just accepted and dropped. udpsource
+// is the ONE place a caller hand-builds a CodecG726 (there is no rtpmap to
+// resolve it from), so a resolveRTPCodec that passed a constant instead of
+// codec.Packing would produce wrong audio for every AAL2 sender while the rest of
+// the suite, which only pins the negative case, stayed green.
+func TestRTPG726AAL2PackingReachesDecoder(t *testing.T) {
+	payload := []byte{0x12, 0x34, 0x56, 0x78}
+
+	aal2Ref, err := g726.New(audiostream.G726Rate32, audiostream.G726PackingAAL2)
+	if err != nil {
+		t.Fatalf("New aal2: %v", err)
+	}
+	wantAAL2, err := aal2Ref.DecodeAlloc(payload)
+	if err != nil {
+		t.Fatalf("DecodeAlloc aal2: %v", err)
+	}
+	plainRef, err := g726.New(audiostream.G726Rate32, audiostream.G726PackingRFC3551)
+	if err != nil {
+		t.Fatalf("New rfc3551: %v", err)
+	}
+	wantPlain, err := plainRef.DecodeAlloc(payload)
+	if err != nil {
+		t.Fatalf("DecodeAlloc rfc3551: %v", err)
+	}
+	// Precondition: this payload must distinguish the two packings, else the
+	// assertion below would hold whichever decoder the source built.
+	if bytes.Equal(wantAAL2, wantPlain) {
+		t.Fatal("test payload does not distinguish the two codeword packings")
+	}
+
+	var col collector
+	c := openOK(t, Config{
+		Mode: ModeRTP, PayloadType: 96,
+		Codec: audiostream.CodecG726{
+			BitRate: audiostream.G726Rate32,
+			Packing: audiostream.G726PackingAAL2,
+		},
+		ClockRate: 8000, Channels: 1, OnFrame: col.onFrame,
+	})
+	defer func() { _ = c.Close() }()
+
+	conn := senderFor(t, c)
+	sendAndSettle(t, c, conn, rtpPacket(96, 10, 0, 1, payload))
+	waitCount(t, &col, 1, 2*time.Second)
+
+	frames := col.snapshot()
+	if len(frames) != 1 {
+		t.Fatalf("delivered %d frames, want 1", len(frames))
+	}
+	if !bytes.Equal(frames[0].Data, wantAAL2) {
+		t.Errorf("Data = % x, want AAL2-decoded % x", frames[0].Data, wantAAL2)
+	}
+}

@@ -23,9 +23,11 @@ const (
 	g726Name40 = "G726-40"
 )
 
-// The four AAL2-G726 rtpmap encoding names (RFC 3551 section 4.5.4.1, ITU-T
-// I.366.2). They carry the same codewords as the plain names above at the same
-// bit rates, packed most-significant-bit-first.
+// The four AAL2-G726 rtpmap encoding names. They carry the same codewords as the
+// plain names above at the same bit rates, packed most-significant-bit-first per
+// ITU-T I.366.2 Annex E. RFC 3551 section 4.5.4 names these subtypes and defers
+// their payload format to a separate document that was never published, so
+// neither RFC 3551 nor RFC 4856 registers them.
 const (
 	aal2G726Name16 = "AAL2-G726-16"
 	aal2G726Name24 = "AAL2-G726-24"
@@ -153,7 +155,12 @@ func describeTrack(m *Media) DescribedTrack {
 			encoding, clock, channels = encodingL16, 44100, 1
 		case 2:
 			// RFC 3551 static payload type 2 is G.721, identical to
-			// G.726 at 32 kbps.
+			// G.726 at 32 kbps. RFC 3551 section 6 deprecates it and marks it
+			// reserved precisely "due to conflicting use for the payload formats
+			// G726-32 and AAL2-G726-32", so the packing is genuinely ambiguous
+			// here and the plain RFC 3551 order is ASSUMED, not signalled. A
+			// sender that means the AAL2 order has to say so with an
+			// AAL2-G726-32 rtpmap.
 			encoding, clock, channels = g726Name32, g726ClockRate, 1
 		default:
 			encoding, clock, channels = "", 0, 0
@@ -202,6 +209,9 @@ func describeTrack(m *Media) DescribedTrack {
 		// other channel count or clock as CodecUnknown rather than mis-decode it.
 		// The AAL2 names resolve to the same bit rates with the AAL2 packing, so
 		// the only difference from the plain names is the codeword bit order.
+		// They have no registration of their own, so the same conformance rule is
+		// applied to them by analogy: same codec, same 8 kHz clock, same single
+		// adaptive state.
 		if br, pk, ok := g726BitRate(strings.ToUpper(encoding)); ok && channels == 1 && clock == g726ClockRate {
 			t.Codec = audiostream.CodecG726{BitRate: br, Packing: pk, ClockRate: clock, Channels: channels}
 		} else {
@@ -218,8 +228,8 @@ func describeTrack(m *Media) DescribedTrack {
 
 // g726BitRate maps an upper-cased G.726 rtpmap encoding name to its bit rate and
 // codeword packing. The plain G726-NN names resolve to the RFC 3551 section
-// 4.5.4 packing and the AAL2-G726-NN names to the section 4.5.4.1 (ITU-T
-// I.366.2) packing at the same four bit rates. ok is false for any other name.
+// 4.5.4 packing and the AAL2-G726-NN names to the ITU-T I.366.2 Annex E packing
+// at the same four bit rates. ok is false for any other name.
 func g726BitRate(up string) (audiostream.G726BitRate, audiostream.G726Packing, bool) {
 	switch up {
 	case g726Name16:

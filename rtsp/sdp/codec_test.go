@@ -293,8 +293,11 @@ func TestCodecsG726Static(t *testing.T) {
 	if g.BitRate != audiostream.G726Rate32 || g.ClockRate != 8000 || g.Channels != 1 {
 		t.Errorf("CodecG726 = %+v, want {32kbps 8000 1}", g)
 	}
-	// The static payload type is the plain RFC 3551 form; there is no static
-	// payload type for the AAL2 packing.
+	// Static payload type 2 is ambiguous by RFC 3551 section 6, which marks it
+	// reserved "due to conflicting use for the payload formats G726-32 and
+	// AAL2-G726-32". With nothing on the wire to distinguish them, this resolves
+	// the plain RFC 3551 form; pinning that here makes the assumption a decision
+	// rather than an accident.
 	if g.Packing != audiostream.G726PackingRFC3551 {
 		t.Errorf("Packing = %v, want rfc3551", g.Packing)
 	}

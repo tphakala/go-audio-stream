@@ -33,7 +33,9 @@ var ErrUnknownPacking = errors.New("g726: unknown codeword packing")
 // for G726-40/32/24/16, which for an octet payload is exactly this divisibility
 // (always satisfied at 16 and 32 kbps; length a multiple of 3 or 5 octets at 24
 // or 40 kbps). Such a payload is malformed, so it is refused rather than decoded
-// with its trailing bits silently dropped.
+// with its trailing bits silently dropped. The rule is a property of the codeword
+// geometry rather than of the bit order, so it governs the AAL2 packing
+// identically and this error is returned for either.
 var ErrIncompletePayload = errors.New("g726: payload is not a whole number of codewords")
 
 // float11 is the ITU-T internal floating-point representation of a signal
@@ -149,7 +151,7 @@ type Decoder struct {
 // packing selects the wire bit order, not a different codec:
 // audiostream.G726PackingRFC3551 (the zero value) is the plain G726-NN RTP form
 // of RFC 3551 section 4.5.4, and audiostream.G726PackingAAL2 is the
-// AAL2-G726-NN form of section 4.5.4.1. Both carry the same codeword sequence
+// AAL2-G726-NN form of ITU-T I.366.2 Annex E. Both carry the same codeword sequence
 // through the same ADPCM state machine, so the two differ only in how the
 // codewords are unpacked from the payload octets.
 func New(br audiostream.G726BitRate, packing audiostream.G726Packing) (*Decoder, error) {
@@ -198,7 +200,7 @@ func (d *Decoder) Reset() {
 // writing into dst and returning the number of bytes written. The payload is
 // unpacked in the codeword order the decoder was constructed with: RFC 3551
 // section 4.5.4 (first codeword in the least significant bits) by default, or
-// the AAL2 order of section 4.5.4.1 (first codeword in the most significant
+// the AAL2 order of ITU-T I.366.2 Annex E (first codeword in the most significant
 // bits) for a decoder built with audiostream.G726PackingAAL2. The two orders
 // carry the same codewords, so the choice does not change the payload's length
 // or its framing rules, only how it is unpacked. It must hold a whole number of
@@ -285,7 +287,7 @@ func readCodewordLSB(payload []byte, pos, width int) int32 {
 
 // readCodewordMSB extracts one width-bit codeword whose first transmitted bit is
 // at global bit index pos, packed most-significant-bit-first (the AAL2-G726 form
-// of RFC 3551 section 4.5.4.1, following ITU-T I.366.2): the bit transmitted
+// of ITU-T I.366.2 Annex E): the bit transmitted
 // first is the codeword's most significant, and octet bit 7 is transmitted
 // before octet bit 0. Both orders lay the codewords out in the same sequence at
 // the same bit offsets, so only the two bit numberings are reversed; a payload

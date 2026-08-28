@@ -91,18 +91,12 @@ func TestPackingMismatchProducesDifferentAudio(t *testing.T) {
 			aal2 := loadAAL2Payload(t, rc.base)
 			plain, want := loadVector(t, rc.base)
 
-			wrongOnAAL2, err := mustDecode(t, rc.rate, audiostream.G726PackingRFC3551, aal2)
-			if err != nil {
-				t.Fatalf("decode aal2 payload as rfc3551: %v", err)
-			}
+			wrongOnAAL2 := mustDecode(t, rc.rate, audiostream.G726PackingRFC3551, aal2)
 			if bytes.Equal(wrongOnAAL2, want) {
 				t.Fatal("an AAL2 payload decoded as RFC 3551 reproduced the reference PCM; the packing is not being applied")
 			}
 
-			wrongOnPlain, err := mustDecode(t, rc.rate, audiostream.G726PackingAAL2, plain)
-			if err != nil {
-				t.Fatalf("decode rfc3551 payload as aal2: %v", err)
-			}
+			wrongOnPlain := mustDecode(t, rc.rate, audiostream.G726PackingAAL2, plain)
 			if bytes.Equal(wrongOnPlain, want) {
 				t.Fatal("an RFC 3551 payload decoded as AAL2 reproduced the reference PCM; the packing is not being applied")
 			}
@@ -110,14 +104,19 @@ func TestPackingMismatchProducesDifferentAudio(t *testing.T) {
 	}
 }
 
-// mustDecode builds a decoder for one rate and packing and decodes payload with it.
-func mustDecode(t *testing.T, rate audiostream.G726BitRate, packing audiostream.G726Packing, payload []byte) ([]byte, error) {
+// mustDecode builds a decoder for one rate and packing, decodes payload with it,
+// and fails the test on any error, so callers read as a single expression.
+func mustDecode(t *testing.T, rate audiostream.G726BitRate, packing audiostream.G726Packing, payload []byte) []byte {
 	t.Helper()
 	d, err := g726.New(rate, packing)
 	if err != nil {
 		t.Fatalf("New(%v, %v): %v", rate, packing, err)
 	}
-	return d.DecodeAlloc(payload)
+	out, err := d.DecodeAlloc(payload)
+	if err != nil {
+		t.Fatalf("DecodeAlloc(%v, %v): %v", rate, packing, err)
+	}
+	return out
 }
 
 func TestNewUnknownPacking(t *testing.T) {
@@ -133,14 +132,15 @@ func TestAAL2SplitEqualsWhole(t *testing.T) {
 	for _, rc := range rateCases {
 		t.Run(rc.name, func(t *testing.T) {
 			payload := loadAAL2Payload(t, rc.base)
-			// Split on a byte offset that is also a whole-codeword boundary: a
-			// multiple of the codeword width in bytes holds a whole number of
-			// codewords at every rate.
-			cut := rc.bits * 10
-			whole, err := mustDecode(t, rc.rate, audiostream.G726PackingAAL2, payload)
-			if err != nil {
-				t.Fatalf("whole DecodeAlloc: %v", err)
+			// Split near the midpoint on a whole-codeword boundary, matching the
+			// RFC 3551 sibling. A fixed cut would slice out of range rather than
+			// skip cleanly if the vectors were ever regenerated shorter, and
+			// testdata/README.md documents a regeneration procedure.
+			cut := (len(payload) / (2 * rc.bits)) * rc.bits
+			if cut == 0 || cut >= len(payload) {
+				t.Skipf("payload too short to split at a codeword boundary")
 			}
+			whole := mustDecode(t, rc.rate, audiostream.G726PackingAAL2, payload)
 			d, err := g726.New(rc.rate, audiostream.G726PackingAAL2)
 			if err != nil {
 				t.Fatalf("New: %v", err)
@@ -166,12 +166,12 @@ func TestAAL2SplitEqualsWhole(t *testing.T) {
 // packing, so the AAL2 decoder rejects exactly the same payload lengths.
 func TestAAL2IncompletePayload(t *testing.T) {
 	for _, tc := range []struct {
-		name   string
-		rate   audiostream.G726BitRate
-		badLen int
+		name          string
+		rate          audiostream.G726BitRate
+		badLen, okLen int
 	}{
-		{name24kbps, audiostream.G726Rate24, 4},
-		{name40kbps, audiostream.G726Rate40, 4},
+		{name24kbps, audiostream.G726Rate24, 4, 3},
+		{name40kbps, audiostream.G726Rate40, 4, 5},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			d, err := g726.New(tc.rate, audiostream.G726PackingAAL2)
@@ -180,6 +180,17 @@ func TestAAL2IncompletePayload(t *testing.T) {
 			}
 			if _, derr := d.DecodeAlloc(make([]byte, tc.badLen)); !errors.Is(derr, g726.ErrIncompletePayload) {
 				t.Fatalf("DecodeAlloc(%d bytes): got %v, want ErrIncompletePayload", tc.badLen, derr)
+			}
+			// A rejected payload must leave the adaptive state untouched, exactly
+			// as on the RFC 3551 path: a conformant payload decoded afterwards
+			// must match a fresh decoder's output on the same bytes.
+			good := make([]byte, tc.okLen)
+			gotAfter, derr := d.DecodeAlloc(good)
+			if derr != nil {
+				t.Fatalf("DecodeAlloc(%d bytes): unexpected %v", tc.okLen, derr)
+			}
+			if want := mustDecode(t, tc.rate, audiostream.G726PackingAAL2, good); !bytes.Equal(gotAfter, want) {
+				t.Error("a rejected payload advanced the adaptive state")
 			}
 		})
 	}

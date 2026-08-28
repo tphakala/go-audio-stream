@@ -47,10 +47,14 @@
 // demuxed under the new configuration reaches OnFrame; an init republished with
 // the same configuration reports nothing. Format().Codec is fixed at Open and
 // does not follow these updates, so a consumer that must track the live
-// configuration reads it from OnCodecUpdate.
+// configuration reads it from OnCodecUpdate. Registering that callback is what
+// opts a consumer into playing through a configuration change: without it there
+// is no channel for the new configuration, so such a change ends the stream with
+// ErrUnsupportedPlaylist rather than decoding on with a stale one.
 //
 // The read-idle watchdog (Config.ReadIdle) answers "is new audio still
-// arriving": it is stamped on every successful playlist or segment body read.
+// arriving": it is stamped on every successful playlist, initialization-segment,
+// or segment body read.
 // For a live stream it must exceed the playlist target duration, since the
 // client is intentionally idle between reloads. Playlist and segment bodies are
 // bounded by Config.MaxPlaylistBytes and Config.MaxSegmentBytes so an untrusted

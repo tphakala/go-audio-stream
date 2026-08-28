@@ -18,8 +18,10 @@ var fuzzRates = []audiostream.G726BitRate{
 }
 
 // FuzzDecode checks that Decode never panics or writes out of bounds for
-// arbitrary payloads at any rate, and that its byte count is consistent with
-// the codeword width.
+// arbitrary payloads at any rate and EITHER codeword packing, and that its byte
+// count is consistent with the codeword width. The packing is derived from a
+// spare bit of the same selector byte, so the AAL2 (MSB-first) reader, the one
+// piece of new bit manipulation, shares the corpus with the RFC 3551 one.
 func FuzzDecode(f *testing.F) {
 	f.Add(uint8(2), []byte{0x00})
 	f.Add(uint8(4), []byte{0x12, 0x34, 0x56, 0x78})
@@ -32,7 +34,11 @@ func FuzzDecode(f *testing.F) {
 
 	f.Fuzz(func(t *testing.T, sel uint8, payload []byte) {
 		rate := fuzzRates[int(sel)%len(fuzzRates)]
-		d, err := g726.New(rate, audiostream.G726PackingRFC3551)
+		packing := audiostream.G726PackingRFC3551
+		if sel&0x80 != 0 {
+			packing = audiostream.G726PackingAAL2
+		}
+		d, err := g726.New(rate, packing)
 		if err != nil {
 			t.Fatalf("New: %v", err)
 		}
@@ -53,7 +59,7 @@ func FuzzDecode(f *testing.F) {
 
 		// Oversized destination guarded by canaries: Decode must not touch the
 		// bytes past what it reports writing.
-		d2, _ := g726.New(rate, audiostream.G726PackingRFC3551)
+		d2, _ := g726.New(rate, packing)
 		dst := make([]byte, len(out)+8)
 		for i := range dst {
 			dst[i] = 0x5A

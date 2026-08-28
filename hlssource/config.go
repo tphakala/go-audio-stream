@@ -105,11 +105,20 @@ type Config struct {
 	// Format().Codec is fixed at Open and does NOT follow these updates, so a
 	// consumer that needs the live configuration must read it here rather than
 	// poll Format.
+	//
+	// Registering it is what opts the source into playing through a mid-stream
+	// configuration change. Leaving it nil is safe rather than lossy: because
+	// this callback is then the only channel the new configuration could have
+	// used, a replacement initialization segment that changes the
+	// AudioSpecificConfig ends the stream with ErrUnsupportedPlaylist instead of
+	// decoding on with a stale configuration. A replacement carrying the SAME
+	// configuration is played either way.
 	OnCodecUpdate func(audiostream.CodecUpdate)
 	// Logger receives diagnostics for conditions this source handles rather than
 	// fails on (a Basic credential sent over plaintext when permitted, a live
-	// window the client fell behind, an initialization segment replaced
-	// mid-stream). The credential-stripped URL is logged, never the credentials.
+	// window the client fell behind, an initialization segment whose replacement
+	// changed the audio configuration). The credential-stripped URL is logged,
+	// never the credentials.
 	Logger *slog.Logger
 }
 

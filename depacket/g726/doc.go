@@ -12,11 +12,15 @@
 // Decoder is built. audiostream.G726PackingRFC3551 is the plain G726-NN form of
 // RFC 3551 section 4.5.4, which packs the first (oldest) codeword in the least
 // significant bits of each octet; audiostream.G726PackingAAL2 is the
-// AAL2-G726-NN form of section 4.5.4.1 (ITU-T I.366.2), which packs it in the
-// most significant bits. The two carry the same codewords through the same
+// AAL2-G726-NN form of ITU-T I.366.2 Annex E, which packs it in the most
+// significant bits. The two carry the same codewords through the same
 // ADPCM state machine and differ only in the unpacking, so a stream decoded
-// with the wrong packing yields plausible but wrong audio; the packing is
-// therefore never guessed. Output is s16le PCM at the track's clock rate (8000
+// with the wrong packing yields plausible but wrong audio; this package
+// therefore never guesses it, and refuses an unrecognized value rather than
+// defaulting. (One layer up, rtsp/sdp must assume the plain order for RFC 3551
+// static payload type 2, which section 6 of that RFC marks reserved for exactly
+// this ambiguity; every rtpmap-named form is unambiguous.) Output is s16le PCM
+// at the track's clock rate (8000
 // Hz for the RFC 3551 defaults); the caller owns any audiostream.Frame
 // assembly.
 //

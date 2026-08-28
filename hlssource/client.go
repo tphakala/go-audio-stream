@@ -123,9 +123,13 @@ var _ audiostream.Source = (*Client)(nil)
 // call to demux processes one whole segment, delivering each AAC access unit to
 // onAU in order with its duration; discontinuity requests a continuity-domain
 // reset before the segment (a no-op for the self-contained fMP4 fragments). end
-// flushes any buffered trailing frame at true stream end. audioSpecificConfig
-// returns the resolved AAC configuration once known. gapCount is the running
-// count of lost or unparsable audio, surfaced as the source's malformed counter.
+// flushes any buffered trailing frame at true stream end, or when this demuxer is
+// retired mid-stream on an initialization-segment change. audioSpecificConfig
+// returns the resolved AAC configuration once known, by reference: it is the
+// demuxer's own slice, so a caller that hands it outside the package copies it
+// first. gapCount is the running count of lost or unparsable audio for THIS
+// demuxer; the source's malformed counter is that plus every retired demuxer's
+// final count (see syncMalformed).
 type segmentDemuxer interface {
 	demux(seg []byte, discontinuity bool, onAU func(au []byte, dur time.Duration)) error
 	end(onAU func(au []byte, dur time.Duration))
@@ -224,10 +228,14 @@ func (c *Client) openHandshake(ctx context.Context) error {
 	if asc == nil {
 		return fmt.Errorf("%w: first segment carried no AAC access unit", ErrMalformedSegment)
 	}
-	c.codec = audiostream.CodecAAC{AudioSpecificConfig: asc}
-	// Seed the change-comparison snapshot with an independent copy, so a later
-	// init swap compares against what Open resolved even if the demuxer that
-	// produced it reuses its buffer.
+	// audioSpecificConfig returns the demuxer's own slice by reference, so both of
+	// these take a copy. c.codec is the one that makes it load-bearing: Format
+	// hands it to arbitrary callers, including from inside OnFrame, and an alias
+	// would let any of them reach into the running demuxer's resolved
+	// configuration. c.asc is the change-comparison snapshot; its copy is
+	// defensive at the segmentDemuxer boundary rather than against any current
+	// implementation, since neither demuxer mutates its ASC after resolving it.
+	c.codec = audiostream.CodecAAC{AudioSpecificConfig: append([]byte(nil), asc...)}
 	c.asc = append([]byte(nil), asc...)
 	c.demux = d
 	c.initURI = seg.initURI
@@ -427,6 +435,12 @@ func (c *Client) classifyRequestErr(base, reqCtx context.Context, err error) err
 // with KindCompressed and, per the AudioFormat contract for compressed audio,
 // SampleRate and Channels 0 (the decoder determines the true geometry). It is
 // immutable after Open and safe from any goroutine, including from inside OnFrame.
+//
+// Immutable means it does not follow a mid-stream EXT-X-MAP change either: a live
+// fMP4 playlist can scroll in a new initialization segment whose configuration
+// differs, and Format keeps reporting what Open resolved. A consumer that must
+// track the live configuration registers Config.OnCodecUpdate, without which such
+// a change ends the stream rather than going unreported.
 func (c *Client) Format() audiostream.AudioFormat {
 	return audiostream.AudioFormat{
 		Codec: c.codec,
@@ -625,9 +639,13 @@ func (c *Client) processSegment(seg mediaSegment, disc bool) error {
 	// is not, so a stream that switches between TS and fMP4 (one side "") still
 	// ends here rather than swapping demuxer families mid-stream.
 	if seg.initURI != c.initURI {
-		if seg.initURI == "" || c.initURI == "" {
-			return fmt.Errorf("%w: stream switched container mid-stream (EXT-X-MAP %s)",
-				ErrUnsupportedPlaylist, addedOrRemoved(seg.initURI))
+		if seg.initURI == "" {
+			return fmt.Errorf("%w: stream switched container mid-stream (EXT-X-MAP dropped: fMP4 to MPEG-TS)",
+				ErrUnsupportedPlaylist)
+		}
+		if c.initURI == "" {
+			return fmt.Errorf("%w: stream switched container mid-stream (EXT-X-MAP added: MPEG-TS to fMP4)",
+				ErrUnsupportedPlaylist)
 		}
 		if err := c.reinitFMP4(seg.initURI); err != nil {
 			return err
@@ -644,16 +662,6 @@ func (c *Client) processSegment(seg mediaSegment, disc bool) error {
 	})
 	c.syncMalformed()
 	return derr
-}
-
-// addedOrRemoved names which side of a container switch the new segment is on,
-// for the ErrUnsupportedPlaylist message: a segment that gained an EXT-X-MAP
-// switched from MPEG-TS to fMP4, one that lost it switched the other way.
-func addedOrRemoved(newInitURI string) string {
-	if newInitURI == "" {
-		return "removed"
-	}
-	return "added"
 }
 
 // reinitFMP4 rebuilds the fMP4 demuxer from a replacement EXT-X-MAP
@@ -673,9 +681,23 @@ func addedOrRemoved(newInitURI string) string {
 // same config is a re-publish and fires nothing. Format().Codec keeps reporting
 // what Open resolved either way, so it stays lock-free for a concurrent caller.
 //
-// A hostile or broken playlist that names a new init URI on every segment costs
-// one extra bounded GET per segment, on top of the segment fetch it already
-// performs; it cannot loop or allocate without bound.
+// A changed configuration is never delivered silently. Format().Codec is fixed
+// at Open, so Config.OnCodecUpdate is the ONLY way the new AudioSpecificConfig
+// can reach a consumer, and a supervisor-wrapped source cannot even reach
+// Format (audiostream.Source does not include it). When the configuration
+// changed and no callback is registered, this therefore keeps the pre-existing
+// terminal behaviour and ends the stream with ErrUnsupportedPlaylist, which is
+// retryable: a supervisor reconnects and Open re-resolves the configuration from
+// the new init, exactly as it did before this path existed. Registering the
+// callback is what opts a consumer into playing through the change. The
+// alternative, continuing with a stale ASC, would feed access units encoded
+// under the new configuration to a decoder configured for the old one and
+// produce plausible but wrong audio, which this library refuses to do anywhere.
+//
+// N segments in a playlist cost at most 2N bounded GETs (one init, one segment),
+// so a hostile or broken playlist that names a new init URI on every segment
+// doubles the fetch count it already commanded; it cannot loop or allocate
+// without bound.
 func (c *Client) reinitFMP4(initURI string) error {
 	initBody, err := c.get(c.reqBaseCtx(), initURI, c.cfg.MaxSegmentBytes, ErrSegmentTooLarge)
 	if err != nil {
@@ -689,35 +711,46 @@ func (c *Client) reinitFMP4(initURI string) error {
 	if err != nil {
 		return err
 	}
+	// Everything that can fail happens BEFORE any state is mutated, so a rejected
+	// replacement leaves the client exactly as it was rather than half-swapped.
+	// The nil check defends the segmentDemuxer boundary rather than any current
+	// implementation: newFMP4Demux resolves the config or fails, so it does not
+	// fire today.
+	asc := d.audioSpecificConfig()
+	if asc == nil {
+		return fmt.Errorf("%w: replacement initialization segment carried no AudioSpecificConfig", ErrMalformedSegment)
+	}
+	changed := !bytes.Equal(asc, c.asc)
+	if changed && c.cfg.OnCodecUpdate == nil {
+		return fmt.Errorf("%w: the initialization segment changed the audio configuration mid-stream "+
+			"and no Config.OnCodecUpdate is registered to receive it", ErrUnsupportedPlaylist)
+	}
 
+	// Validation is complete; from here nothing can fail, so the swap happens in
+	// full or not at all.
 	now := time.Now()
 	c.demux.end(func(au []byte, dur time.Duration) { c.deliverAU(au, dur, now) })
 	c.malformedBase += c.demux.gapCount()
 	c.demux = d
 	c.initURI = initURI
 	c.syncMalformed()
-
-	asc := d.audioSpecificConfig()
-	if asc == nil {
-		return fmt.Errorf("%w: replacement initialization segment carried no AudioSpecificConfig", ErrMalformedSegment)
-	}
-	if bytes.Equal(asc, c.asc) {
+	if !changed {
 		return nil // a re-published init with the same configuration, not a codec change
 	}
 	// Retain an independent snapshot for the next comparison, and hand the
-	// callback a separate copy: the contract documents the slice as read-only,
-	// but a consumer that mutates it in place must not reach back into c.asc and
-	// skew a later comparison.
+	// callback a separate copy: audioSpecificConfig returns the live demuxer's
+	// own slice by reference, so a consumer that mutates the value it is given,
+	// which the contract documents as read-only, must not be able to corrupt the
+	// running demuxer's resolved configuration.
 	c.asc = append([]byte(nil), asc...)
 	if c.cfg.Logger != nil {
-		c.cfg.Logger.Info("hlssource: initialization segment changed; audio configuration updated")
+		c.cfg.Logger.Info("hlssource: initialization segment changed; audio configuration updated",
+			"url", c.url, "asc", fmt.Sprintf("%x", asc))
 	}
-	if c.cfg.OnCodecUpdate != nil {
-		c.cfg.OnCodecUpdate(audiostream.CodecUpdate{
-			TrackID: 0,
-			Codec:   audiostream.CodecAAC{AudioSpecificConfig: append([]byte(nil), asc...)},
-		})
-	}
+	c.cfg.OnCodecUpdate(audiostream.CodecUpdate{
+		TrackID: 0,
+		Codec:   audiostream.CodecAAC{AudioSpecificConfig: append([]byte(nil), asc...)},
+	})
 	return nil
 }
 
@@ -781,7 +814,8 @@ func (c *Client) reloadWait(delivered bool) bool {
 // context, so only Close or the watchdog ends the stream.
 func (c *Client) reqBaseCtx() context.Context { return c.baseCtx }
 
-// stampRead records a successful playlist or segment body read for the watchdog.
+// stampRead records a successful playlist, initialization-segment, or segment
+// body read for the watchdog.
 func (c *Client) stampRead() { c.lastReadAt.Store(time.Now().UnixNano()) }
 
 // syncMalformed publishes the demuxer's running framer-discard count as the

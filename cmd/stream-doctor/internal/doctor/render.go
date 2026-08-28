@@ -82,7 +82,7 @@ func codecName(c audiostream.Codec) string {
 	case audiostream.CodecG726:
 		// Name the AAL2 packing explicitly: the two forms are the same codec at
 		// the same bit rate and differ only in codeword bit order, so a run that
-		// sounds wrong is most often a packing mismatch, and the report should
+		// sounds wrong can easily be a packing mismatch, and the report should
 		// say which one was used.
 		if v.Packing == audiostream.G726PackingAAL2 {
 			return "AAL2-G.726 " + v.BitRate.String() + " (ADPCM)"

@@ -22,9 +22,8 @@ const (
 	segRel0 = "s0.ts"
 	segRel1 = "s1.ts"
 
-	// tsSegURL0 and tsSegRel0 are the longer-named MPEG-TS segment path used by
-	// the tests that pair a TS segment against an fMP4 one, kept distinct from
-	// segURL0 so the two shapes are not confused in a fixture map.
+	// tsSegURL0 and tsSegRel0 name a second MPEG-TS segment path, distinct from
+	// segURL0 so a fixture map can hold both without collision.
 	tsSegURL0 = "/seg0.ts"
 	tsSegRel0 = "seg0.ts"
 )
@@ -45,11 +44,29 @@ type hlsServer struct {
 	segments map[string][]byte
 	playlist func(reloadN int) (body string, status int)
 	reloads  int
+	// requests counts every request by path, so a test can assert how many times
+	// a given segment or initialization segment was actually fetched. A count is
+	// the only way to observe work the client repeats needlessly, since a
+	// redundant re-fetch is invisible in the delivered frames.
+	requests map[string]int
+}
+
+// requestCount reports how many times path has been requested.
+func (h *hlsServer) requestCount(path string) int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.requests[path]
 }
 
 func (h *hlsServer) start(t *testing.T) *httptest.Server {
 	t.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		h.mu.Lock()
+		if h.requests == nil {
+			h.requests = make(map[string]int)
+		}
+		h.requests[r.URL.Path]++
+		h.mu.Unlock()
 		if body, ok := h.segment(r.URL.Path); ok {
 			w.Header().Set("Content-Type", "video/mp2t")
 			_, _ = w.Write(body)
@@ -572,7 +589,7 @@ func TestOpenUnsupportedCodecEndToEnd(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			stream, _ := adtsStream(2, 40)
 			seg := buildTSSegmentType(stream, 0x1000, 0x0100, tc.streamType)
-			srv := vodServer(t, []string{tsSegURL0}, map[string][]byte{tsSegURL0: seg})
+			srv := vodServer(t, []string{segURL0}, map[string][]byte{segURL0: seg})
 			if _, err := Open(context.Background(), Config{URL: srv.URL + "/vod.m3u8"}); !errors.Is(err, ErrUnsupportedCodec) {
 				t.Fatalf("Open with stream_type %#x = %v, want ErrUnsupportedCodec", tc.streamType, err)
 			}
