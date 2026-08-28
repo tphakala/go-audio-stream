@@ -64,7 +64,7 @@ jobs:
           {
             echo "## go-audio-stream ${GITHUB_REF_NAME}"
             echo
-            echo "Pure-Go audio stream sources: an RTSP 1.0 client (\`rtsp\`), an HTTP progressive source (\`httpsource\`), an HLS source (\`hlssource\`), and a raw UDP/RTP source (\`udpsource\`), plus RTP/RTCP depacketizers (AAC, MP4A-LATM, Opus, G.711, L16). The library core has zero runtime dependencies."
+            echo "Pure-Go audio stream sources: an RTSP 1.0 client (\`rtsp\`), an HTTP progressive source (\`httpsource\`), an HLS source (\`hlssource\`), and a raw UDP/RTP source (\`udpsource\`), plus RTP/RTCP depacketizers (AAC, MP4A-LATM, Opus, G.711, G.726 ADPCM, L16) and \`supervisor\`, which wraps any single-session source into a transparently reconnecting one. The library core has zero runtime dependencies."
             echo
             echo "Also ships \`stream-doctor\`, a diagnostic CLI that probes an \`rtsp(s)\` camera or an \`http(s)\` progressive source and reports connectivity, codec support, and packet statistics. See [cmd/stream-doctor/README.md](https://github.com/tphakala/go-audio-stream/blob/${GITHUB_REF_NAME}/cmd/stream-doctor/README.md)."
             echo
