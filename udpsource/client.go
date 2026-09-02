@@ -11,6 +11,7 @@ import (
 
 	audiostream "github.com/tphakala/go-audio-stream"
 	"github.com/tphakala/go-audio-stream/depacket/aac"
+	"github.com/tphakala/go-audio-stream/depacket/flac"
 	"github.com/tphakala/go-audio-stream/depacket/g711"
 	"github.com/tphakala/go-audio-stream/depacket/g726"
 	"github.com/tphakala/go-audio-stream/depacket/opus"
@@ -29,6 +30,7 @@ const (
 	kindOpus                    // deliver the Opus packet (compressed) unchanged
 	kindAAC                     // run the RFC 3640 AAC-hbr depacketizer, one CodecAAC frame per access unit
 	kindG726                    // run the ITU-T G.726 ADPCM decoder, expanding to s16le
+	kindFLAC                    // reassemble FLAC frames across packets, one compressed frame per completed frame
 )
 
 // Client is a single raw-UDP audio source. It binds one UDP socket (and, when
@@ -100,6 +102,10 @@ type Client struct {
 	// udpsource-side copy: an access unit is delivered synchronously to OnFrame
 	// before the next Depacketize call that could overwrite its aliased backing.
 	aac *aac.Depacketizer
+	// flac reassembles FLAC frames across RTP packets for a CodecFLAC ModeRTP
+	// source, nil otherwise. Like aac it carries cross-packet fragment state, so
+	// it is dropped on both a sequence gap and an SSRC change (see resetReassembly).
+	flac *flac.Depacketizer
 	// g726 is the ITU-T G.726 ADPCM decoder for a CodecG726 ModeRTP source,
 	// nil otherwise. It carries adaptive state across packets, so it is reset
 	// only on an SSRC change, never on a plain sequence gap.
@@ -299,6 +305,9 @@ func (c *Client) resolveRTPCodec() error {
 		}
 		c.g726 = dec
 		c.kind = kindG726
+	case audiostream.CodecFLAC:
+		c.kind = kindFLAC
+		c.flac = flac.New()
 	case audiostream.CodecUnknown:
 		c.kind = kindOpaque
 	case nil:
@@ -577,7 +586,7 @@ func (c *Client) processRTP(pkt rtp.Packet, now time.Time) {
 		// reassembled from the old source must be dropped before its first packet,
 		// and any gap still pending from the old source's sequence space (AAC or a
 		// single-frame codec) must not carry onto the new source's first frame.
-		c.resetAAC()
+		c.resetReassembly()
 		if c.g726 != nil {
 			// A new source restarts the G.726 stream, so its adaptive predictor
 			// and quantizer state must restart too. Done only on an SSRC change,
@@ -618,18 +627,24 @@ func (c *Client) processRTP(pkt rtp.Packet, now time.Time) {
 		// spliced onto the next access unit, mirroring rtsp.resetDepacketizer. The
 		// gap branch is after the duplicate return, so a duplicate (no real hole)
 		// never discards a valid in-progress fragment.
-		c.resetAAC()
+		c.resetReassembly()
 	}
 	c.packets.Add(1)
 	c.deliverRTP(pkt, up, now)
 }
 
-// resetAAC drops any partially reassembled AAC access unit. It is a no-op for
-// every non-AAC source (c.aac is nil), so the shared processRTP path can call it
-// unconditionally on a discontinuity.
-func (c *Client) resetAAC() {
+// resetReassembly drops any partially reassembled AAC access unit or FLAC frame.
+// It is a no-op for every source that carries neither (c.aac and c.flac both
+// nil), so the shared processRTP path can call it unconditionally on a
+// discontinuity. Both fragment a unit across packets, so a lost fragment must not
+// be spliced onto the next unit; a Client resolves to exactly one codec, so at
+// most one of the two is non-nil.
+func (c *Client) resetReassembly() {
 	if c.aac != nil {
 		c.aac.Reset()
+	}
+	if c.flac != nil {
+		c.flac.Reset()
 	}
 }
 
@@ -641,6 +656,13 @@ func (c *Client) deliverRTP(pkt rtp.Packet, up rtp.Update, now time.Time) {
 		// AAC yields zero-or-more access units per packet, not a single output
 		// slice, so it has its own delivery loop.
 		c.deliverAAC(pkt, up, now)
+		return
+	}
+	if c.kind == kindFLAC {
+		// FLAC reassembles a frame across packets and completes zero-or-one frame
+		// per packet, so like AAC it has its own path rather than the single-output
+		// switch below.
+		c.deliverFLAC(pkt, up, now)
 		return
 	}
 	// Fold this packet's gap into the pending total before the codec transform.
@@ -784,6 +806,55 @@ func (c *Client) deliverAAC(pkt rtp.Packet, up rtp.Update, now time.Time) {
 			SeqGap:     seqGap,
 		})
 	}
+}
+
+// deliverFLAC reassembles a FLAC frame across RTP packets and hands each
+// completed frame to OnFrame as one compressed frame. A packet completes exactly
+// one frame (an unfragmented packet or a frame's final fragment), or none (a
+// buffering non-final fragment). A malformed payload (empty, or a reassembly
+// overflow) is counted once and skipped, keeping the reader running, matching the
+// AAC and single-frame paths.
+//
+// The pending gap is folded in at the top and drained onto the delivered frame,
+// so a loss immediately before a buffering fragment (which delivers no frame)
+// still surfaces on the next delivered frame. The drain runs before the
+// nil-callback return so the counter stays bounded. The returned frame aliases
+// either pkt.Payload (unfragmented) or the depacketizer's reassembly buffer, both
+// valid only for the synchronous callback, so the FLAC path allocates nothing in
+// steady state, matching the AAC and Opus paths.
+func (c *Client) deliverFLAC(pkt rtp.Packet, up rtp.Update, now time.Time) {
+	c.pendingGap += up.Gap
+	frame, err := c.flac.Depacketize(pkt.Payload, pkt.Header.Marker, pkt.Header.Timestamp)
+	if err != nil {
+		// The depacketizer self-resets its fragment state on the error, so the next
+		// packet starts clean. The pending gap is retained for the next delivered
+		// frame.
+		c.malformed.Add(1)
+		return
+	}
+	if frame == nil {
+		// A buffering fragment: not a frame and not an error. Its wire bytes are
+		// already counted; the frame surfaces when its final fragment arrives.
+		return
+	}
+	c.payload.Add(uint64(len(frame)))
+	// Drain the pending gap onto this frame before the nil-callback return, so a
+	// loss stranded on a preceding buffering fragment or malformed packet surfaces
+	// here and the counter cannot grow unbounded. A plain gap never clears it
+	// early; only an SSRC reset (in processRTP) does.
+	gap := c.pendingGap
+	c.pendingGap = 0
+	if c.cfg.OnFrame == nil {
+		return
+	}
+	c.cfg.OnFrame(audiostream.Frame{
+		TrackID:    0,
+		Data:       frame,
+		RTPTime:    pkt.Header.Timestamp,
+		PTS:        mediatime.PTSFromSamples(c.relTicks(up.Timestamp), c.cfg.ClockRate),
+		ReceivedAt: now,
+		SeqGap:     gap,
+	})
 }
 
 // deliverPCM delivers one raw-PCM datagram as a frame, byte-swapping a

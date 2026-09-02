@@ -12,8 +12,9 @@
 // there is no SDP, the caller supplies the payload type and its codec, clock
 // rate, and channel count in Config. G.711 (companded to s16le), L16
 // (byte-swapped from big-endian to s16le), Opus (delivered as a compressed
-// packet), and AAC (RFC 3640 AAC-hbr, delivered as one CodecAAC access unit per
-// frame, still compressed since the library does not decode) are framed by
+// packet), AAC (RFC 3640 AAC-hbr, delivered as one CodecAAC access unit per
+// frame, still compressed since the library does not decode), and FLAC (raw
+// frames reassembled across packets and delivered compressed) are framed by
 // reusing the library's existing depacketizers; an unrecognized codec is passed
 // through opaquely. Because a raw RTP stream carries no SDP fmtp, the AAC-hbr
 // AU-header widths come from Config.AAC. ModePCM treats each datagram as

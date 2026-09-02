@@ -90,6 +90,8 @@ func codecName(c audiostream.Codec) string {
 		return "G.726 " + v.BitRate.String() + " (ADPCM)"
 	case audiostream.CodecL16:
 		return "L16"
+	case audiostream.CodecFLAC:
+		return "FLAC"
 	case audiostream.CodecUnknown:
 		if v.RTPMap == "" {
 			return unknownLabel
@@ -102,7 +104,8 @@ func codecName(c audiostream.Codec) string {
 
 // decodable reports whether the doctor can turn a track's audio into a WAV:
 // true for CodecAAC, CodecMP4ALATM (AAC access units), CodecOpus, CodecG711,
-// CodecG726, and CodecL16; false for CodecUnknown and any non-audio track.
+// CodecG726, and CodecL16; false for CodecUnknown, CodecFLAC (an audio codec the
+// doctor bundles no decoder for), and any non-audio track.
 func decodable(t rtsp.Track) bool {
 	if t.Media != audiostream.MediaAudio {
 		return false

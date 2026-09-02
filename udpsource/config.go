@@ -101,7 +101,8 @@ type Config struct {
 	// A datagram whose payload type differs is counted malformed and dropped.
 	PayloadType uint8
 	// Codec identifies the RTP payload's codec (ModeRTP): CodecG711, CodecL16,
-	// CodecG726, CodecOpus, CodecAAC, or CodecUnknown for an opaque passthrough.
+	// CodecG726, CodecOpus, CodecAAC, CodecFLAC, or CodecUnknown for an opaque
+	// passthrough.
 	//
 	// A raw RTP source carries no rtpmap, so for CodecG726 the caller supplies
 	// both BitRate and Packing. Packing's zero value is the plain RFC 3551
