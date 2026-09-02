@@ -236,12 +236,14 @@ func (p *playlistParser) handleTag(tag, attr string) error {
 		}
 		// ParseUint accepts any value up to MaxUint64, but each segment's absolute
 		// number is mediaSequence plus its index in the playlist (handleURI), and
-		// the index runs up to MaxSegmentsPerPlaylist-1. A mediaSequence within that
-		// distance of MaxUint64 would wrap a later segment's seq back through 0,
-		// breaking the seq-based reload dedup and window arithmetic. Reject any value
-		// too large to add the whole segment cap without wrapping; the margin is the
-		// cap because that bounds how many indices can be added.
-		if seq > math.MaxUint64-MaxSegmentsPerPlaylist {
+		// the index runs up to MaxSegmentsPerPlaylist-1 (the cap is checked before
+		// each append, so len is at most MaxSegmentsPerPlaylist-1 at the point the
+		// index is taken). A mediaSequence within that distance of MaxUint64 would
+		// wrap a later segment's seq back through 0, breaking the seq-based reload
+		// dedup and window arithmetic. Reject any value too large to add the largest
+		// index without wrapping; the largest accepted value leaves the final
+		// segment at exactly MaxUint64.
+		if seq > math.MaxUint64-(MaxSegmentsPerPlaylist-1) {
 			return fmt.Errorf("%w: EXT-X-MEDIA-SEQUENCE %q too large (would wrap segment numbering)", ErrMalformedPlaylist, attr)
 		}
 		p.media.mediaSequence = seq

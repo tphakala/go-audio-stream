@@ -219,10 +219,15 @@ func g726PackingOverride(s string) (rtsp.G726PackingOverride, bool) {
 
 // effectiveG726Packing resolves a validated override against the packing Describe
 // reported from the rtpmap, returning the packing the decoder will actually use.
-// It mirrors the library's own resolution (a forced value wins; the SDP default
-// and any unrecognized value defer to the SDP), so the report cannot name a
-// different packing from the one the decoder used. ok is false for an
-// unrecognized override, matching g726PackingOverride's contract.
+// It hand-mirrors rtsp.(G726PackingOverride).resolve, which is unexported and so
+// cannot be called across this module boundary (a forced value wins; the SDP
+// default and any unrecognized value defer to the SDP), so the report cannot name
+// a different packing from the one the decoder used. The two switches must be kept
+// in step: a G726PackingOverride constant added to the rtsp package must be added
+// here too. That is safe in practice because G.726 has exactly two codeword bit
+// orders (RFC 3551 LSB-first and AAL2 MSB-first), so no third forced value can
+// arise. ok is false for an unrecognized override, matching g726PackingOverride's
+// contract.
 func effectiveG726Packing(override rtsp.G726PackingOverride, fromSDP audiostream.G726Packing) (audiostream.G726Packing, bool) {
 	switch override {
 	case rtsp.G726PackingFromSDP:

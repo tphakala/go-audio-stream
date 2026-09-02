@@ -257,8 +257,8 @@ func TestParseMediaSequenceWrapGuard(t *testing.T) {
 		wantErr bool
 	}{
 		{"maxuint64 wraps", strconv.FormatUint(math.MaxUint64, 10), true},
-		{"one below max still within margin", strconv.FormatUint(math.MaxUint64-1, 10), true},
-		{"largest safe value parses", strconv.FormatUint(math.MaxUint64-segCap, 10), false},
+		{"just above the safe boundary is rejected", strconv.FormatUint(math.MaxUint64-segCap+2, 10), true},
+		{"largest safe value parses (last segment lands on MaxUint64)", strconv.FormatUint(math.MaxUint64-segCap+1, 10), false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			body := "#EXTM3U\n#EXT-X-TARGETDURATION:6\n#EXT-X-MEDIA-SEQUENCE:" + tc.seq + "\n#EXTINF:6,\na.ts\n"

@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"sync"
 	"testing"
+	"time"
 
 	audiostream "github.com/tphakala/go-audio-stream"
 )
@@ -182,7 +183,15 @@ func openTimeline(t *testing.T, srv *httptest.Server, tl *timeline) *Client {
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
-	t.Cleanup(func() { _ = c.Close() })
+	t.Cleanup(func() {
+		_ = c.Close()
+		// Close only starts shutdown; wait (bounded) for the reader goroutine to run
+		// its deferred teardown so it does not outlive the test and bleed into a
+		// later one. A test that already ran Wait to completion returns immediately.
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = c.Wait(ctx)
+	})
 	return c
 }
 
@@ -620,8 +629,19 @@ func TestFMP4CloseMidStreamEndsStream(t *testing.T) {
 
 	tl := &timeline{}
 	c := openTimeline(t, srv, tl)
-	// Open resolved the first segment, so the stream is live and reloading. Close it
-	// and require the terminal local-close cause from Wait.
+	// Open only resolves the first segment; reader() runs in a goroutine. Wait until
+	// the origin has served a second /live.m3u8 (a reload past the Open-time fetch)
+	// so Close genuinely exercises shutdown during an active live reload rather than
+	// possibly landing before the reader starts looping.
+	deadline := time.Now().Add(3 * time.Second)
+	for h.requestCount("/live.m3u8") < 2 {
+		if time.Now().After(deadline) {
+			t.Fatal("reader never issued a second playlist request; cannot exercise a mid-reload close")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	// The stream is live and actively reloading. Close it and require the terminal
+	// local-close cause from Wait.
 	if err := c.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
 	}

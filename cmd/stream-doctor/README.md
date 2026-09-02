@@ -91,8 +91,8 @@ stream-doctor -report -full-stream rtsp://camera.local/stream
 
 # A G.726 camera whose audio sounds wrong: A/B the codeword packing with -wav.
 # The report names the packing actually used, so you can confirm the fix.
-stream-doctor -wav aal2.wav -g726-packing aal2 rtsp://camera.local/stream
-stream-doctor -wav rfc3551.wav -g726-packing rfc3551 rtsp://camera.local/stream
+stream-doctor -report -wav aal2.wav -g726-packing aal2 rtsp://camera.local/stream
+stream-doctor -report -wav rfc3551.wav -g726-packing rfc3551 rtsp://camera.local/stream
 
 # Self-signed rtsps, or credentials passed as flags instead of in the URL.
 stream-doctor -report -insecure-tls rtsps://camera.local/stream
