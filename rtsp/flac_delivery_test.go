@@ -95,27 +95,35 @@ func TestDeliverFLACGapDropsPartialReassembly(t *testing.T) {
 }
 
 // A continuation fragment carrying a different RTP timestamp than the fragment
-// that started the frame is counted malformed and delivers no frame, and the
-// partial reassembly is dropped so two frames' bytes are never spliced.
-func TestDeliverFLACTimestampMismatchDropsPartial(t *testing.T) {
+// that started the frame means the frame boundary was lost. The stale partial is
+// dropped and the mismatched packet starts the new frame, which then reassembles
+// carrying only its own bytes, so the mismatch neither splices two frames nor
+// drops the new frame's opening fragment (and is not counted as malformed input).
+func TestDeliverFLACTimestampMismatchRecovers(t *testing.T) {
 	t.Parallel()
 	tr := newFLACTrack()
-	tr.deliver(rtp.Packet{Header: rtp.Header{Timestamp: 100, Marker: false}, Payload: []byte{0x01, 0x02}}, rtp.Update{Timestamp: 100}, time.Unix(1, 0), func(audiostream.Frame) {
+	// Frame A's opening fragment at timestamp 100.
+	tr.deliver(rtp.Packet{Header: rtp.Header{Timestamp: 100, Marker: false}, Payload: []byte{0x0A, 0x0A}}, rtp.Update{Timestamp: 100}, time.Unix(1, 0), func(audiostream.Frame) {
 		t.Fatal("a buffering fragment must deliver no frame")
 	})
+	// Frame B's opening fragment at a different timestamp: it starts frame B, is
+	// not delivered yet, and is not counted malformed.
 	n := 0
-	tr.deliver(rtp.Packet{Header: rtp.Header{Timestamp: 200, Marker: false}, Payload: []byte{0x03}}, rtp.Update{Timestamp: 200}, time.Unix(1, 0), func(audiostream.Frame) { n++ })
+	tr.deliver(rtp.Packet{Header: rtp.Header{Timestamp: 200, Marker: false}, Payload: []byte{0x0B, 0x0B}}, rtp.Update{Timestamp: 200}, time.Unix(1, 0), func(audiostream.Frame) { n++ })
 	if n != 0 {
-		t.Fatalf("delivered %d frames on a timestamp mismatch, want 0", n)
+		t.Fatalf("delivered %d frames on the mismatched opening fragment, want 0", n)
 	}
-	if tr.malformed.Load() != 1 {
-		t.Errorf("malformed = %d, want 1", tr.malformed.Load())
+	if tr.malformed.Load() != 0 {
+		t.Errorf("malformed = %d, want 0 (a recovered discontinuity is not malformed input)", tr.malformed.Load())
 	}
-	// After the mismatch reset, a fresh frame reassembles cleanly.
+	// Frame B completes, carrying only frame B's bytes.
 	var got audiostream.Frame
-	tr.deliver(rtp.Packet{Header: rtp.Header{Timestamp: 300, Marker: true}, Payload: []byte{0xAB}}, rtp.Update{Timestamp: 300}, time.Unix(1, 0), func(f audiostream.Frame) { got = copyFrame(&f); n++ })
-	if n != 1 || !bytes.Equal(got.Data, []byte{0xAB}) {
-		t.Errorf("after mismatch: n=%d data=% x, want one frame AB", n, got.Data)
+	tr.deliver(rtp.Packet{Header: rtp.Header{Timestamp: 200, Marker: true}, Payload: []byte{0x0C}}, rtp.Update{Timestamp: 200}, time.Unix(1, 0), func(f audiostream.Frame) { got = copyFrame(&f); n++ })
+	if n != 1 {
+		t.Fatalf("delivered %d frames, want 1", n)
+	}
+	if want := []byte{0x0B, 0x0B, 0x0C}; !bytes.Equal(got.Data, want) {
+		t.Errorf("Data = % x, want % x (stale partial spliced or new frame start dropped)", got.Data, want)
 	}
 }
 

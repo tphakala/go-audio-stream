@@ -118,27 +118,45 @@ func TestOversizeFirstFragment(t *testing.T) {
 }
 
 // A continuation fragment carrying a different RTP timestamp than the fragment
-// that started the frame drops the partial reassembly and reports
-// ErrTimestampMismatch, so two frames' bytes are never spliced together.
-func TestTimestampMismatchDropsPartial(t *testing.T) {
+// that started the frame means the frame boundary was lost. The stale partial is
+// dropped and the mismatched packet is reprocessed as the start of the new frame,
+// so the new frame reassembles cleanly and never carries the old frame's bytes,
+// nor loses its own opening fragment.
+func TestTimestampMismatchDropsPartialAndRecovers(t *testing.T) {
 	d := New()
-	if _, err := d.Depacketize([]byte{0x01, 0x02}, false, ts); err != nil {
-		t.Fatalf("first fragment: %v", err)
+	// Buffer the start of frame A at timestamp ts.
+	if _, err := d.Depacketize([]byte{0x0A, 0x0A}, false, ts); err != nil {
+		t.Fatalf("frame A fragment: %v", err)
 	}
-	// A continuation with a different timestamp: the frame boundary was lost.
-	if _, err := d.Depacketize([]byte{0x03}, false, ts+1); !errors.Is(err, ErrTimestampMismatch) {
-		t.Fatalf("mismatch err = %v, want ErrTimestampMismatch", err)
+	// Frame B's first fragment arrives at a different timestamp (A's boundary was
+	// lost). It must START frame B (buffering), not error and not drop it.
+	if got, err := d.Depacketize([]byte{0x0B, 0x0B}, false, ts+1); got != nil || err != nil {
+		t.Fatalf("mismatched fragment: got %x, %v; want nil, nil (buffering the new frame)", got, err)
 	}
-	// The partial was dropped, so a fresh frame reassembles cleanly.
-	if _, err := d.Depacketize([]byte{0xAA}, false, ts+2); err != nil {
-		t.Fatalf("new first fragment after mismatch: %v", err)
-	}
-	got, err := d.Depacketize([]byte{0xBB}, true, ts+2)
+	got, err := d.Depacketize([]byte{0x0C}, true, ts+1)
 	if err != nil {
-		t.Fatalf("new final fragment: %v", err)
+		t.Fatalf("frame B final fragment: %v", err)
 	}
-	if want := []byte{0xAA, 0xBB}; !bytes.Equal(got, want) {
-		t.Fatalf("frame = %x, want %x (mismatch did not cleanly reset)", got, want)
+	// Frame B only; frame A's 0x0A bytes must not be spliced in, and frame B's
+	// opening 0x0B fragment must not be lost.
+	if want := []byte{0x0B, 0x0B, 0x0C}; !bytes.Equal(got, want) {
+		t.Fatalf("frame = %x, want %x (stale partial spliced, or new frame's start dropped)", got, want)
+	}
+}
+
+// A mismatched packet that is itself a complete single-packet frame (marker set)
+// is delivered as that frame, not dropped.
+func TestTimestampMismatchCompleteFrameRecovered(t *testing.T) {
+	d := New()
+	if _, err := d.Depacketize([]byte{0x0A, 0x0A}, false, ts); err != nil {
+		t.Fatalf("frame A fragment: %v", err)
+	}
+	got, err := d.Depacketize([]byte{0x0B, 0x0C}, true, ts+1)
+	if err != nil {
+		t.Fatalf("mismatched complete frame: %v", err)
+	}
+	if want := []byte{0x0B, 0x0C}; !bytes.Equal(got, want) {
+		t.Fatalf("frame = %x, want %x (complete frame lost on mismatch)", got, want)
 	}
 }
 
@@ -169,8 +187,7 @@ func FuzzDepacketize(f *testing.F) {
 		// the reassembly state machine.
 		for i := 0; i < 4; i++ {
 			_, err := d.Depacketize(payload, marker || i == 3, rtpTime)
-			if err != nil && !errors.Is(err, ErrEmptyPayload) && !errors.Is(err, ErrFrameOverflow) &&
-				!errors.Is(err, ErrTimestampMismatch) {
+			if err != nil && !errors.Is(err, ErrEmptyPayload) && !errors.Is(err, ErrFrameOverflow) {
 				t.Fatalf("unexpected error value: %v", err)
 			}
 		}

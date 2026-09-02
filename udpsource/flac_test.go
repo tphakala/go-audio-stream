@@ -70,18 +70,24 @@ func TestDeliverFLACMalformedRetainsGap(t *testing.T) {
 }
 
 // A continuation fragment carrying a different RTP timestamp than the fragment
-// that started the frame is counted malformed and delivers no frame; the partial
-// reassembly is dropped so two frames' bytes are never spliced.
-func TestDeliverFLACTimestampMismatchDropsPartial(t *testing.T) {
+// that started the frame means the frame boundary was lost. The stale partial is
+// dropped and the mismatched packet starts the new frame, which reassembles
+// carrying only its own bytes; the mismatch is not counted as malformed input.
+func TestDeliverFLACTimestampMismatchRecovers(t *testing.T) {
 	n := 0
-	c := &Client{kind: kindFLAC, flac: flac.New(), cfg: Config{ClockRate: 48000, OnFrame: func(audiostream.Frame) { n++ }}}
-	c.deliverRTP(rtp.Packet{Header: rtp.Header{Timestamp: 100, Marker: false}, Payload: []byte{0x01, 0x02}}, rtp.Update{Timestamp: 100}, time.Unix(1, 0)) // buffering
-	c.deliverRTP(rtp.Packet{Header: rtp.Header{Timestamp: 200, Marker: false}, Payload: []byte{0x03}}, rtp.Update{Timestamp: 200}, time.Unix(1, 0))       // mismatch
-	if n != 0 {
-		t.Fatalf("delivered %d frames on a timestamp mismatch, want 0", n)
+	var got audiostream.Frame
+	c := &Client{kind: kindFLAC, flac: flac.New(), cfg: Config{ClockRate: 48000, OnFrame: func(f audiostream.Frame) { got = f; n++ }}}
+	c.deliverRTP(rtp.Packet{Header: rtp.Header{Timestamp: 100, Marker: false}, Payload: []byte{0x0A, 0x0A}}, rtp.Update{Timestamp: 100}, time.Unix(1, 0)) // frame A start
+	c.deliverRTP(rtp.Packet{Header: rtp.Header{Timestamp: 200, Marker: false}, Payload: []byte{0x0B, 0x0B}}, rtp.Update{Timestamp: 200}, time.Unix(1, 0)) // mismatch -> starts frame B
+	if n != 0 || c.malformed.Load() != 0 {
+		t.Fatalf("n=%d malformed=%d, want 0 and 0 (recovered discontinuity)", n, c.malformed.Load())
 	}
-	if c.malformed.Load() != 1 {
-		t.Errorf("malformed = %d, want 1", c.malformed.Load())
+	c.deliverRTP(rtp.Packet{Header: rtp.Header{Timestamp: 200, Marker: true}, Payload: []byte{0x0C}}, rtp.Update{Timestamp: 200}, time.Unix(1, 0)) // completes frame B
+	if n != 1 {
+		t.Fatalf("delivered %d frames, want 1", n)
+	}
+	if want := []byte{0x0B, 0x0B, 0x0C}; !bytes.Equal(got.Data, want) {
+		t.Errorf("Data = % x, want % x", got.Data, want)
 	}
 }
 

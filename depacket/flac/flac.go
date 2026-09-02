@@ -29,14 +29,6 @@ var (
 	// ErrFrameOverflow is returned when a fragmented frame's accumulated size
 	// would exceed MaxFrameSize. The partial reassembly is discarded.
 	ErrFrameOverflow = errors.New("flac: fragment reassembly overflow")
-	// ErrTimestampMismatch is returned when a continuation fragment carries a
-	// different RTP timestamp than the fragment that started the frame. All
-	// fragments of one FLAC frame share the frame's timestamp, so a change means
-	// the frame boundary was lost (a dropped final fragment, or a misframing
-	// sender); the partial reassembly is discarded rather than spliced across the
-	// boundary. This is the marker-only path's own integrity check, analogous to
-	// the AAC depacketizer rejecting a continuation whose declared AU size differs.
-	ErrTimestampMismatch = errors.New("flac: RTP timestamp changed mid-reassembly")
 )
 
 // Depacketizer reassembles FLAC frames from RTP payloads. A FLAC-over-RTP
@@ -78,10 +70,12 @@ func New() *Depacketizer {
 //
 // rtpTime is the packet's RTP timestamp. Every fragment of one FLAC frame
 // carries the frame's timestamp, so a continuation whose timestamp differs from
-// the fragment that started the frame is rejected with ErrTimestampMismatch and
-// the partial reassembly discarded: this catches a lost final fragment or a
-// misframing sender at the depacketizer, rather than relying solely on the
-// caller resetting on a sequence gap.
+// the fragment that started the frame means the current partial's boundary was
+// lost (a dropped final fragment, or a misframing sender). The stale partial is
+// discarded and this packet is reprocessed as the start of the new frame it
+// belongs to, so the mismatch neither splices two frames together nor drops the
+// new frame's opening bytes. This catches the boundary loss at the depacketizer
+// rather than relying solely on the caller resetting on a sequence gap.
 //
 // An empty payload returns ErrEmptyPayload; a fragmented frame whose accumulated
 // size would exceed MaxFrameSize returns ErrFrameOverflow. On any error the
@@ -117,11 +111,17 @@ func (d *Depacketizer) Depacketize(payload []byte, marker bool, rtpTime uint32) 
 	}
 
 	// Continuation of a frame already being reassembled. All fragments of one
-	// frame share its timestamp, so a change means the frame boundary was lost;
-	// drop the partial rather than splice two frames' bytes together.
+	// frame share its timestamp, so a change means the current partial's frame
+	// boundary was lost (a dropped final fragment, or a misframing sender). Drop
+	// the stale partial, then reprocess THIS packet as the start of the new frame
+	// it actually belongs to. Dropping it too (returning an error here) would only
+	// move the corruption forward: a marker-clear packet is the new frame's first
+	// fragment, so discarding it leaves that frame reassembled short and delivered
+	// corrupt anyway. After Reset, fragActive is false, so the recursive call takes
+	// the fresh-packet path and cannot recurse again.
 	if rtpTime != d.fragTime {
 		d.Reset()
-		return nil, ErrTimestampMismatch
+		return d.Depacketize(payload, marker, rtpTime)
 	}
 	// Check the incoming length before appending so a run of fragments cannot be
 	// copied into the buffer just to be rejected on the next call.
