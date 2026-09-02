@@ -6,12 +6,15 @@ import (
 	"testing"
 )
 
+// ts is an arbitrary RTP timestamp for a frame; fragments of one frame share it.
+const ts = uint32(9000)
+
 // An unfragmented frame (marker set, no reassembly in progress) is returned as
 // the payload itself, aliased, with no allocation.
 func TestUnfragmentedFrameAliasesPayload(t *testing.T) {
 	d := New()
 	frame := []byte{0xFF, 0xF8, 0x69, 0x18, 0x00, 0x01, 0x02, 0x03}
-	got, err := d.Depacketize(frame, true)
+	got, err := d.Depacketize(frame, true, ts)
 	if err != nil {
 		t.Fatalf("Depacketize: %v", err)
 	}
@@ -24,20 +27,20 @@ func TestUnfragmentedFrameAliasesPayload(t *testing.T) {
 }
 
 // A frame split across packets reassembles into the concatenation, completing
-// only when the marker arrives.
+// only when the marker arrives. Every fragment shares the frame's timestamp.
 func TestFragmentedReassembly(t *testing.T) {
 	d := New()
 	p0 := []byte{0xFF, 0xF8, 0x01, 0x02}
 	p1 := []byte{0x03, 0x04, 0x05}
 	p2 := []byte{0x06, 0x07}
 
-	if got, err := d.Depacketize(p0, false); got != nil || err != nil {
+	if got, err := d.Depacketize(p0, false, ts); got != nil || err != nil {
 		t.Fatalf("first fragment: got %x, %v; want nil, nil (buffering)", got, err)
 	}
-	if got, err := d.Depacketize(p1, false); got != nil || err != nil {
+	if got, err := d.Depacketize(p1, false, ts); got != nil || err != nil {
 		t.Fatalf("middle fragment: got %x, %v; want nil, nil (buffering)", got, err)
 	}
-	got, err := d.Depacketize(p2, true)
+	got, err := d.Depacketize(p2, true, ts)
 	if err != nil {
 		t.Fatalf("final fragment: %v", err)
 	}
@@ -51,12 +54,12 @@ func TestFragmentedReassembly(t *testing.T) {
 // unfragmented packet is delivered whole rather than appended to the last frame.
 func TestReassemblyResetsAfterCompletion(t *testing.T) {
 	d := New()
-	_, _ = d.Depacketize([]byte{0x01, 0x02}, false)
-	if _, err := d.Depacketize([]byte{0x03}, true); err != nil {
+	_, _ = d.Depacketize([]byte{0x01, 0x02}, false, ts)
+	if _, err := d.Depacketize([]byte{0x03}, true, ts); err != nil {
 		t.Fatalf("complete first frame: %v", err)
 	}
 	next := []byte{0xAA, 0xBB}
-	got, err := d.Depacketize(next, true)
+	got, err := d.Depacketize(next, true, ts+1)
 	if err != nil {
 		t.Fatalf("second frame: %v", err)
 	}
@@ -69,18 +72,18 @@ func TestReassemblyResetsAfterCompletion(t *testing.T) {
 // frame so the next packet starts clean.
 func TestEmptyPayload(t *testing.T) {
 	d := New()
-	if _, err := d.Depacketize(nil, true); !errors.Is(err, ErrEmptyPayload) {
+	if _, err := d.Depacketize(nil, true, ts); !errors.Is(err, ErrEmptyPayload) {
 		t.Fatalf("empty payload err = %v, want ErrEmptyPayload", err)
 	}
 
-	_, _ = d.Depacketize([]byte{0x01, 0x02}, false) // buffering
-	if _, err := d.Depacketize(nil, false); !errors.Is(err, ErrEmptyPayload) {
+	_, _ = d.Depacketize([]byte{0x01, 0x02}, false, ts) // buffering
+	if _, err := d.Depacketize(nil, false, ts); !errors.Is(err, ErrEmptyPayload) {
 		t.Fatalf("empty mid-reassembly err = %v, want ErrEmptyPayload", err)
 	}
 	// The partial frame must have been dropped: a fresh unfragmented packet is
 	// delivered whole.
 	next := []byte{0x09, 0x08}
-	got, err := d.Depacketize(next, true)
+	got, err := d.Depacketize(next, true, ts)
 	if err != nil {
 		t.Fatalf("after empty reset: %v", err)
 	}
@@ -94,14 +97,14 @@ func TestEmptyPayload(t *testing.T) {
 func TestFragmentOverflow(t *testing.T) {
 	d := New()
 	// Start at the cap (allowed), then push one byte over it.
-	if _, err := d.Depacketize(make([]byte, MaxFrameSize), false); err != nil {
+	if _, err := d.Depacketize(make([]byte, MaxFrameSize), false, ts); err != nil {
 		t.Fatalf("cap-sized first fragment: %v", err)
 	}
-	if _, err := d.Depacketize([]byte{0x00}, false); !errors.Is(err, ErrFrameOverflow) {
+	if _, err := d.Depacketize([]byte{0x00}, false, ts); !errors.Is(err, ErrFrameOverflow) {
 		t.Fatalf("overflow err = %v, want ErrFrameOverflow", err)
 	}
 	// Reassembly was reset, so a normal frame works again.
-	if _, err := d.Depacketize([]byte{0x01}, true); err != nil {
+	if _, err := d.Depacketize([]byte{0x01}, true, ts); err != nil {
 		t.Fatalf("after overflow reset: %v", err)
 	}
 }
@@ -109,18 +112,43 @@ func TestFragmentOverflow(t *testing.T) {
 // A single payload larger than the cap cannot even start reassembly.
 func TestOversizeFirstFragment(t *testing.T) {
 	d := New()
-	if _, err := d.Depacketize(make([]byte, MaxFrameSize+1), false); !errors.Is(err, ErrFrameOverflow) {
+	if _, err := d.Depacketize(make([]byte, MaxFrameSize+1), false, ts); !errors.Is(err, ErrFrameOverflow) {
 		t.Fatalf("oversize first fragment err = %v, want ErrFrameOverflow", err)
+	}
+}
+
+// A continuation fragment carrying a different RTP timestamp than the fragment
+// that started the frame drops the partial reassembly and reports
+// ErrTimestampMismatch, so two frames' bytes are never spliced together.
+func TestTimestampMismatchDropsPartial(t *testing.T) {
+	d := New()
+	if _, err := d.Depacketize([]byte{0x01, 0x02}, false, ts); err != nil {
+		t.Fatalf("first fragment: %v", err)
+	}
+	// A continuation with a different timestamp: the frame boundary was lost.
+	if _, err := d.Depacketize([]byte{0x03}, false, ts+1); !errors.Is(err, ErrTimestampMismatch) {
+		t.Fatalf("mismatch err = %v, want ErrTimestampMismatch", err)
+	}
+	// The partial was dropped, so a fresh frame reassembles cleanly.
+	if _, err := d.Depacketize([]byte{0xAA}, false, ts+2); err != nil {
+		t.Fatalf("new first fragment after mismatch: %v", err)
+	}
+	got, err := d.Depacketize([]byte{0xBB}, true, ts+2)
+	if err != nil {
+		t.Fatalf("new final fragment: %v", err)
+	}
+	if want := []byte{0xAA, 0xBB}; !bytes.Equal(got, want) {
+		t.Fatalf("frame = %x, want %x (mismatch did not cleanly reset)", got, want)
 	}
 }
 
 // Reset mid-reassembly drops the partial frame.
 func TestResetDropsPartial(t *testing.T) {
 	d := New()
-	_, _ = d.Depacketize([]byte{0x01, 0x02, 0x03}, false)
+	_, _ = d.Depacketize([]byte{0x01, 0x02, 0x03}, false, ts)
 	d.Reset()
 	tail := []byte{0xEE, 0xFF}
-	got, err := d.Depacketize(tail, true)
+	got, err := d.Depacketize(tail, true, ts+1)
 	if err != nil {
 		t.Fatalf("after reset: %v", err)
 	}
@@ -132,23 +160,24 @@ func TestResetDropsPartial(t *testing.T) {
 // Depacketize must never panic on arbitrary input and must never return a
 // non-sentinel error.
 func FuzzDepacketize(f *testing.F) {
-	f.Add([]byte{0xFF, 0xF8, 0x01}, true)
-	f.Add([]byte{}, false)
-	f.Add([]byte{0x00}, false)
-	f.Fuzz(func(t *testing.T, payload []byte, marker bool) {
+	f.Add([]byte{0xFF, 0xF8, 0x01}, true, uint32(1))
+	f.Add([]byte{}, false, uint32(0))
+	f.Add([]byte{0x00}, false, uint32(7))
+	f.Fuzz(func(t *testing.T, payload []byte, marker bool, rtpTime uint32) {
 		d := New()
 		// Feed the same payload a few times with alternating markers to exercise
 		// the reassembly state machine.
 		for i := 0; i < 4; i++ {
-			_, err := d.Depacketize(payload, marker || i == 3)
-			if err != nil && !errors.Is(err, ErrEmptyPayload) && !errors.Is(err, ErrFrameOverflow) {
+			_, err := d.Depacketize(payload, marker || i == 3, rtpTime)
+			if err != nil && !errors.Is(err, ErrEmptyPayload) && !errors.Is(err, ErrFrameOverflow) &&
+				!errors.Is(err, ErrTimestampMismatch) {
 				t.Fatalf("unexpected error value: %v", err)
 			}
 		}
 		// Success-path invariant: a fresh depacketizer fed one non-empty marker
 		// packet returns exactly that payload as the completed frame.
 		if len(payload) > 0 {
-			frame, err := New().Depacketize(payload, true)
+			frame, err := New().Depacketize(payload, true, rtpTime)
 			if err != nil {
 				t.Fatalf("unfragmented marker packet errored: %v", err)
 			}
@@ -167,7 +196,7 @@ func TestUnfragmentedDepacketizeZeroAlloc(t *testing.T) {
 	frame := make([]byte, 512)
 	frame[0], frame[1] = 0xFF, 0xF8
 	got := testing.AllocsPerRun(100, func() {
-		if _, err := d.Depacketize(frame, true); err != nil {
+		if _, err := d.Depacketize(frame, true, ts); err != nil {
 			t.Fatalf("Depacketize: %v", err)
 		}
 	})
@@ -184,7 +213,7 @@ func BenchmarkDepacketizeUnfragmented(b *testing.B) {
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		if _, err := d.Depacketize(frame, true); err != nil {
+		if _, err := d.Depacketize(frame, true, ts); err != nil {
 			b.Fatal(err)
 		}
 	}

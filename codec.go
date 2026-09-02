@@ -134,13 +134,15 @@ func (CodecMP4ALATM) isCodec() {}
 // FLAC frame but never decodes it, so a CodecFLAC frame is handed to a FLAC
 // decoder unchanged.
 //
-// StreamInfo carries the raw FLAC STREAMINFO metadata block (a well-formed one is
-// 34 bytes) when the SDP fmtp advertised one (the streaminfo= parameter,
-// base64-decoded), and is nil otherwise. The bytes are passed through without a
-// length or content check, so a decoder must validate them. It is out-of-band
-// configuration a decoder can use to initialize (sample rate, channel count, bit
-// depth, block-size bounds) without scanning the bitstream, mirroring how
-// CodecAAC.AudioSpecificConfig carries the AAC ASC. As
+// StreamInfo carries the raw 34-byte FLAC STREAMINFO metadata block when the SDP
+// fmtp advertised a well-formed one (the streaminfo= parameter, base64-decoded to
+// exactly 34 bytes), and is nil otherwise: absent, or a value that does not
+// decode to a full 34-byte block, leaves it nil so a decoder falls back to the
+// frame headers rather than trusting truncated or oversized metadata. Its content
+// is not otherwise validated. It is out-of-band configuration a decoder can use
+// to initialize (sample rate, channel count, bit depth, block-size bounds)
+// without scanning the bitstream, mirroring how CodecAAC.AudioSpecificConfig
+// carries the AAC ASC. As
 // with every KindCompressed codec, the true output geometry comes from the
 // decoder (or the STREAMINFO / frame headers), not from the SDP rtpmap, so no
 // sample rate or channel count is exposed here: the transport's advertised clock

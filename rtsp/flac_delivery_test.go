@@ -94,6 +94,31 @@ func TestDeliverFLACGapDropsPartialReassembly(t *testing.T) {
 	}
 }
 
+// A continuation fragment carrying a different RTP timestamp than the fragment
+// that started the frame is counted malformed and delivers no frame, and the
+// partial reassembly is dropped so two frames' bytes are never spliced.
+func TestDeliverFLACTimestampMismatchDropsPartial(t *testing.T) {
+	t.Parallel()
+	tr := newFLACTrack()
+	tr.deliver(rtp.Packet{Header: rtp.Header{Timestamp: 100, Marker: false}, Payload: []byte{0x01, 0x02}}, rtp.Update{Timestamp: 100}, time.Unix(1, 0), func(audiostream.Frame) {
+		t.Fatal("a buffering fragment must deliver no frame")
+	})
+	n := 0
+	tr.deliver(rtp.Packet{Header: rtp.Header{Timestamp: 200, Marker: false}, Payload: []byte{0x03}}, rtp.Update{Timestamp: 200}, time.Unix(1, 0), func(audiostream.Frame) { n++ })
+	if n != 0 {
+		t.Fatalf("delivered %d frames on a timestamp mismatch, want 0", n)
+	}
+	if tr.malformed.Load() != 1 {
+		t.Errorf("malformed = %d, want 1", tr.malformed.Load())
+	}
+	// After the mismatch reset, a fresh frame reassembles cleanly.
+	var got audiostream.Frame
+	tr.deliver(rtp.Packet{Header: rtp.Header{Timestamp: 300, Marker: true}, Payload: []byte{0xAB}}, rtp.Update{Timestamp: 300}, time.Unix(1, 0), func(f audiostream.Frame) { got = copyFrame(&f); n++ })
+	if n != 1 || !bytes.Equal(got.Data, []byte{0xAB}) {
+		t.Errorf("after mismatch: n=%d data=% x, want one frame AB", n, got.Data)
+	}
+}
+
 // An empty FLAC payload is counted malformed and delivers no frame.
 func TestDeliverFLACEmptyPayloadMalformed(t *testing.T) {
 	t.Parallel()

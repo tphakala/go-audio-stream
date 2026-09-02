@@ -69,6 +69,22 @@ func TestDeliverFLACMalformedRetainsGap(t *testing.T) {
 	}
 }
 
+// A continuation fragment carrying a different RTP timestamp than the fragment
+// that started the frame is counted malformed and delivers no frame; the partial
+// reassembly is dropped so two frames' bytes are never spliced.
+func TestDeliverFLACTimestampMismatchDropsPartial(t *testing.T) {
+	n := 0
+	c := &Client{kind: kindFLAC, flac: flac.New(), cfg: Config{ClockRate: 48000, OnFrame: func(audiostream.Frame) { n++ }}}
+	c.deliverRTP(rtp.Packet{Header: rtp.Header{Timestamp: 100, Marker: false}, Payload: []byte{0x01, 0x02}}, rtp.Update{Timestamp: 100}, time.Unix(1, 0)) // buffering
+	c.deliverRTP(rtp.Packet{Header: rtp.Header{Timestamp: 200, Marker: false}, Payload: []byte{0x03}}, rtp.Update{Timestamp: 200}, time.Unix(1, 0))       // mismatch
+	if n != 0 {
+		t.Fatalf("delivered %d frames on a timestamp mismatch, want 0", n)
+	}
+	if c.malformed.Load() != 1 {
+		t.Errorf("malformed = %d, want 1", c.malformed.Load())
+	}
+}
+
 // With a nil OnFrame, deliverFLAC still drains the pending gap onto a completed
 // frame so the counter cannot grow unbounded across a nil-callback stream.
 func TestDeliverFLACNilOnFrameDrains(t *testing.T) {

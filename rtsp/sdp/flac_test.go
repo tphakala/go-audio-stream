@@ -64,6 +64,26 @@ func TestCodecsFLACNoFmtp(t *testing.T) {
 	}
 }
 
+// A base64-valid streaminfo that decodes to the wrong length is malformed
+// metadata: StreamInfo stays nil (a decoder recovers from the frame headers)
+// while the track stays FLAC. A STREAMINFO block is exactly 34 bytes.
+func TestCodecsFLACWrongLengthStreaminfo(t *testing.T) {
+	t.Parallel()
+	short := base64.StdEncoding.EncodeToString(make([]byte, 10)) // decodes cleanly, but not 34 bytes
+	body := []byte("v=0\r\n" +
+		"m=audio 0 RTP/AVP 96\r\n" +
+		"a=rtpmap:96 FLAC/48000/2\r\n" +
+		"a=fmtp:96 streaminfo=" + short + "\r\n")
+	tracks := parseCodecs(t, body)
+	f, ok := tracks[0].Codec.(audiostream.CodecFLAC)
+	if !ok {
+		t.Fatalf("Codec = %T, want CodecFLAC", tracks[0].Codec)
+	}
+	if f.StreamInfo != nil {
+		t.Errorf("StreamInfo = % x, want nil for a non-34-byte STREAMINFO", f.StreamInfo)
+	}
+}
+
 // A streaminfo value that is not valid base64 leaves StreamInfo nil without
 // demoting the track: an unusable fmtp must not make a FLAC stream unplayable.
 func TestCodecsFLACMalformedStreaminfo(t *testing.T) {

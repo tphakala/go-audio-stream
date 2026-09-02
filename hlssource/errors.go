@@ -88,9 +88,11 @@ var (
 // conditions a retry cannot fix: an encrypted, container-switching, or over-cap
 // playlist, or non-AAC audio, is exactly as unsatisfiable on the next attempt.
 //
-// ErrMalformedPlaylist now signals only a structurally broken body (a missing
-// #EXTM3U header, no target duration, an unparseable EXTINF, and the like), so a
-// consumer MAY classify it as permanent in its own Config.Retryable. The
+// ErrMalformedPlaylist signals a structurally broken body (a missing #EXTM3U
+// header, no target duration, an unparseable EXTINF, and the like), and also a
+// completed VOD playlist (EXT-X-ENDLIST) that carries no playable segment, which
+// no reload can ever fix. Either case is terminal, so a consumer MAY classify it
+// as permanent in its own Config.Retryable. The
 // well-formed live playlist whose segments are all currently EXT-X-GAP ("no
 // playable segment") is reported as the distinct ErrNoPlayableSegment, which RFC
 // 8216 permits and a later reload can recover, so it must stay retryable: it is

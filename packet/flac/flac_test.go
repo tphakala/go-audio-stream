@@ -98,12 +98,16 @@ func TestPacketizeErrors(t *testing.T) {
 func TestPacketizeReusesDst(t *testing.T) {
 	frame := make([]byte, 100)
 	dst := make([]packetflac.Fragment, 0, 8)
+	// Capture the backing array's first element via a full-capacity reslice
+	// (valid because reslicing is bounded by cap, not len). If Packetize appends
+	// in place, the returned slice's first element is this same address.
+	base := &dst[:cap(dst)][0]
 	got, err := packetflac.Packetize(dst, frame, 30)
 	if err != nil {
 		t.Fatalf("Packetize: %v", err)
 	}
-	if cap(got) < 4 || &got[:1][0] != &dst[:1][0] {
-		t.Error("Packetize should append into the provided slice")
+	if len(got) == 0 || &got[0] != base {
+		t.Error("Packetize should append into the provided backing array, not allocate a new one")
 	}
 }
 
@@ -123,8 +127,10 @@ func TestRoundTripThroughDepacketizer(t *testing.T) {
 			}
 			d := depacketflac.New()
 			var out []byte
+			// All fragments of one frame share the frame's RTP timestamp.
+			const frameTS = uint32(42)
 			for i, fr := range frags {
-				got, derr := d.Depacketize(fr.Data, fr.Marker)
+				got, derr := d.Depacketize(fr.Data, fr.Marker, frameTS)
 				if derr != nil {
 					t.Fatalf("Depacketize frag %d (len=%d, mtu=%d): %v", i, frameLen, mtu, derr)
 				}

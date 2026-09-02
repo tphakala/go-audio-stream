@@ -747,7 +747,7 @@ func (tr *track) deliverG726(pkt rtp.Packet, up rtp.Update, now time.Time, onFra
 // so a lost fragment cannot be spliced onto the next frame.
 func (tr *track) deliverFLAC(pkt rtp.Packet, up rtp.Update, now time.Time, onFrame func(audiostream.Frame)) {
 	tr.pendingGap += up.Gap
-	frame, err := tr.flac.Depacketize(pkt.Payload, pkt.Header.Marker)
+	frame, err := tr.flac.Depacketize(pkt.Payload, pkt.Header.Marker, pkt.Header.Timestamp)
 	if err != nil {
 		// The depacketizer self-resets its fragment state on an error, so the next
 		// packet starts clean. The pending gap is retained for the next delivered

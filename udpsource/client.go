@@ -824,7 +824,7 @@ func (c *Client) deliverAAC(pkt rtp.Packet, up rtp.Update, now time.Time) {
 // steady state, matching the AAC and Opus paths.
 func (c *Client) deliverFLAC(pkt rtp.Packet, up rtp.Update, now time.Time) {
 	c.pendingGap += up.Gap
-	frame, err := c.flac.Depacketize(pkt.Payload, pkt.Header.Marker)
+	frame, err := c.flac.Depacketize(pkt.Payload, pkt.Header.Marker, pkt.Header.Timestamp)
 	if err != nil {
 		// The depacketizer self-resets its fragment state on the error, so the next
 		// packet starts clean. The pending gap is retained for the next delivered
