@@ -125,3 +125,28 @@ type CodecMP4ALATM struct {
 }
 
 func (CodecMP4ALATM) isCodec() {}
+
+// CodecFLAC is FLAC (Free Lossless Audio Codec, RFC 9639) carried over RTP as a
+// stream of raw FLAC frames: one frame per RTP packet, or a single frame
+// fragmented across packets. The RTP marker bit is set on an unfragmented
+// single-packet frame and on the last fragment of a fragmented one. Like AAC and
+// Opus it is delivered as KindCompressed: the library reassembles and reports each
+// FLAC frame but never decodes it, so a CodecFLAC frame is handed to a FLAC
+// decoder unchanged.
+//
+// StreamInfo carries the raw FLAC STREAMINFO metadata block (a well-formed one is
+// 34 bytes) when the SDP fmtp advertised one (the streaminfo= parameter,
+// base64-decoded), and is nil otherwise. The bytes are passed through without a
+// length or content check, so a decoder must validate them. It is out-of-band
+// configuration a decoder can use to initialize (sample rate, channel count, bit
+// depth, block-size bounds) without scanning the bitstream, mirroring how
+// CodecAAC.AudioSpecificConfig carries the AAC ASC. As
+// with every KindCompressed codec, the true output geometry comes from the
+// decoder (or the STREAMINFO / frame headers), not from the SDP rtpmap, so no
+// sample rate or channel count is exposed here: the transport's advertised clock
+// cannot be trusted for compressed audio.
+type CodecFLAC struct {
+	StreamInfo []byte
+}
+
+func (CodecFLAC) isCodec() {}

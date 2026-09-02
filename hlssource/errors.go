@@ -34,8 +34,24 @@ var (
 	// ErrMalformedPlaylist reports a body that is not a valid m3u8 playlist: a
 	// missing #EXTM3U header, a media playlist with no target duration, an
 	// unparseable EXTINF, a segment URI with no preceding EXTINF, or a body that
-	// is neither a media nor a master playlist.
+	// is neither a media nor a master playlist. It is also the terminal cause for
+	// a well-formed VOD playlist (EXT-X-ENDLIST) that carries no playable segment:
+	// unlike the live all-gap case (ErrNoPlayableSegment), a finished playlist can
+	// never gain one, so it is reported as a permanent-shaped cause rather than a
+	// retryable one.
 	ErrMalformedPlaylist = errors.New("hlssource: malformed playlist")
+	// ErrNoPlayableSegment reports a well-formed LIVE media playlist (no
+	// EXT-X-ENDLIST) that currently carries no playable (non-EXT-X-GAP) segment.
+	// RFC 8216 permits a live playlist to mark all of its present segments
+	// EXT-X-GAP when the media is temporarily unavailable, and a later reload can
+	// bring playable segments, so this is an open-phase transient rather than a
+	// permanent defect. It is kept distinct from ErrMalformedPlaylist (a
+	// structurally broken body) precisely so a consumer can treat malformed bodies
+	// as permanent in its own Config.Retryable without abandoning a recoverable
+	// all-gap live stream. A VOD playlist (EXT-X-ENDLIST) with no playable segment
+	// is terminal, not transient, and reports ErrMalformedPlaylist instead: no
+	// reload will ever add a segment, so it must not be retried forever.
+	ErrNoPlayableSegment = errors.New("hlssource: playlist has no playable segment")
 	// ErrUnsupportedPlaylist reports a valid playlist this source will not play:
 	// encrypted content (EXT-X-KEY with a method other than NONE), a byte-range
 	// segment or byte-range fMP4 initialization segment (EXT-X-BYTERANGE, or
@@ -72,14 +88,16 @@ var (
 // conditions a retry cannot fix: an encrypted, container-switching, or over-cap
 // playlist, or non-AAC audio, is exactly as unsatisfiable on the next attempt.
 //
-// ErrMalformedPlaylist is deliberately NOT in this permanent set. It often
-// signals genuine garbage, but openHandshake also returns it for a well-formed
-// live playlist whose segments are all currently EXT-X-GAP ("no playable
-// segment"), which RFC 8216 permits and which a later reload can recover, so
-// treating every ErrMalformedPlaylist as terminal would abandon a recoverable
-// source. The segment-level causes ErrMalformedSegment and ErrSegmentTooLarge are
-// excluded for the same reason: a single malformed or oversized segment can be a
-// transient origin hiccup a reconnect and fresh playlist recover from.
+// ErrMalformedPlaylist now signals only a structurally broken body (a missing
+// #EXTM3U header, no target duration, an unparseable EXTINF, and the like), so a
+// consumer MAY classify it as permanent in its own Config.Retryable. The
+// well-formed live playlist whose segments are all currently EXT-X-GAP ("no
+// playable segment") is reported as the distinct ErrNoPlayableSegment, which RFC
+// 8216 permits and a later reload can recover, so it must stay retryable: it is
+// deliberately excluded from any permanent set. The segment-level causes
+// ErrMalformedSegment and ErrSegmentTooLarge are excluded for the same reason: a
+// single malformed or oversized segment can be a transient origin hiccup a
+// reconnect and fresh playlist recover from.
 //
 // supervisor.DefaultRetryable does not recognize these package-typed causes (its
 // terminal set is the root sentinels context.Canceled, context.DeadlineExceeded,

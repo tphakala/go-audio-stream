@@ -97,6 +97,7 @@ func TestNewTrackCodecSelection(t *testing.T) {
 		{name: "g711 mulaw", codec: audiostream.CodecG711{Law: audiostream.MuLaw}, wantKind: deliverG711},
 		{name: "l16", codec: audiostream.CodecL16{ClockRate: 48000, Channels: 1}, wantKind: deliverL16},
 		{name: "g726", codec: audiostream.CodecG726{BitRate: audiostream.G726Rate32, ClockRate: 8000, Channels: 1}, wantKind: deliverG726},
+		{name: "flac", codec: audiostream.CodecFLAC{}, wantKind: deliverFLAC},
 		{name: "unknown", codec: audiostream.CodecUnknown{}, wantKind: deliverRaw},
 	}
 	for _, tc := range cases {
@@ -106,6 +107,9 @@ func TestNewTrackCodecSelection(t *testing.T) {
 			tr := newTrack(0, desc, SetupOptions{}, 1, nil)
 			if tr.kind != tc.wantKind {
 				t.Errorf("kind = %d, want %d", tr.kind, tc.wantKind)
+			}
+			if _, isFLAC := tc.codec.(audiostream.CodecFLAC); isFLAC && tr.flac == nil {
+				t.Error("FLAC track must build a depacketizer")
 			}
 		})
 	}

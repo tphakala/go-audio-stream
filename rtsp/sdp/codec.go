@@ -1,6 +1,7 @@
 package sdp
 
 import (
+	"encoding/base64"
 	"encoding/hex"
 	"strconv"
 	"strings"
@@ -50,7 +51,7 @@ type DescribedTrack struct {
 	// listed no formats.
 	PayloadType int
 	// Codec is the resolved codec: CodecAAC, CodecMP4ALATM, CodecOpus,
-	// CodecG711, CodecG726, CodecL16, or CodecUnknown. Never nil.
+	// CodecG711, CodecG726, CodecL16, CodecFLAC, or CodecUnknown. Never nil.
 	Codec audiostream.Codec
 	// ClockRate is the RTP clock rate in Hz, 0 if unknown.
 	ClockRate int
@@ -197,6 +198,13 @@ func describeTrack(m *Media) DescribedTrack {
 		t.LATM = params
 	case "OPUS":
 		t.Codec = audiostream.CodecOpus{}
+	case "FLAC":
+		// FLAC over RTP carries raw FLAC frames; the STREAMINFO a decoder needs is
+		// advertised out of band in the fmtp streaminfo= parameter (base64). A
+		// missing or malformed streaminfo leaves StreamInfo nil: the track is still
+		// FLAC and still depacketizes, and a decoder can recover geometry from the
+		// frame headers, so an unusable fmtp must not demote the track.
+		t.Codec = audiostream.CodecFLAC{StreamInfo: parseFLACFmtp(m.FMTPs[pt])}
 	case "PCMU":
 		t.Codec = audiostream.CodecG711{Law: audiostream.MuLaw}
 	case "PCMA":
@@ -316,6 +324,33 @@ func parseAACFmtp(params string) *AACParams {
 		}
 	})
 	return p
+}
+
+// parseFLACFmtp extracts the STREAMINFO block from a FLAC fmtp parameter string,
+// returning the base64-decoded bytes or nil when no streaminfo= parameter is
+// present or its value does not decode. It never errors: an absent or malformed
+// STREAMINFO leaves a FLAC track playable (a decoder can recover geometry from
+// the frame headers), so describeTrack keeps the track as CodecFLAC with a nil
+// StreamInfo rather than demoting it. Both padded and unpadded base64 are
+// accepted, since senders differ on whether they include the trailing '='.
+func parseFLACFmtp(params string) []byte {
+	var streamInfo []byte
+	parseFmtpPairs(params, func(key, value string) {
+		if key != "streaminfo" || value == "" {
+			// An absent or empty streaminfo leaves StreamInfo nil, as CodecFLAC
+			// documents: base64-decoding "" yields a non-nil zero-length slice,
+			// which would contradict that nil and hand a decoder a 0-byte STREAMINFO.
+			return
+		}
+		if b, err := base64.StdEncoding.DecodeString(value); err == nil {
+			streamInfo = b
+			return
+		}
+		if b, err := base64.RawStdEncoding.DecodeString(value); err == nil {
+			streamInfo = b
+		}
+	})
+	return streamInfo
 }
 
 // parseLATMFmtp parses a semicolon-separated MP4A-LATM fmtp parameter list,

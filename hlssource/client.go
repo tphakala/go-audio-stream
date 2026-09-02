@@ -216,7 +216,19 @@ func (c *Client) openHandshake(ctx context.Context) error {
 	}
 	seg, ok := firstPlayable(media)
 	if !ok {
-		return fmt.Errorf("%w: playlist has no playable segment", ErrMalformedPlaylist)
+		// fetchMediaPlaylist has already validated the body's structure, so a
+		// missing playable segment here is never a malformed playlist. For a LIVE
+		// playlist (no EXT-X-ENDLIST) it is a well-formed playlist whose present
+		// segments are all EXT-X-GAP, or one with no segments yet; RFC 8216 permits
+		// that and a later reload can bring playable segments, so surface the
+		// retryable ErrNoPlayableSegment. A VOD playlist (EXT-X-ENDLIST) is final:
+		// no reload will ever add a playable segment, so returning a retryable cause
+		// would spin a supervisor forever against a dead playlist. Keep the
+		// permanent-shaped ErrMalformedPlaylist for that terminal case.
+		if media.endList {
+			return fmt.Errorf("%w: VOD playlist has no playable segment", ErrMalformedPlaylist)
+		}
+		return ErrNoPlayableSegment
 	}
 	d, err := c.buildDemuxer(ctx, seg)
 	if err != nil {
