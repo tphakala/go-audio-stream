@@ -476,30 +476,39 @@ func TestOpenInvalidConfig(t *testing.T) {
 		name string
 		cfg  Config
 		want error
+		// wantCause, when non-nil, is a precise underlying cause Open's error must
+		// also wrap (checked with errors.Is in addition to want). The zero value
+		// skips the check, so a row asserts a cause only when the precise one is the
+		// point of the case.
+		wantCause error
 	}{
-		{"empty listen addr", Config{Mode: ModeRTP, Codec: audiostream.CodecOpus{}, ClockRate: 48000}, ErrInvalidConfig},
-		{"rtp missing clock", Config{ListenAddr: loopbackAddr, Mode: ModeRTP, Codec: audiostream.CodecOpus{}}, ErrInvalidConfig},
-		{"rtp nil codec", Config{ListenAddr: loopbackAddr, Mode: ModeRTP, ClockRate: 48000}, ErrInvalidConfig},
-		{"rtp pcm codec missing channels", Config{ListenAddr: loopbackAddr, Mode: ModeRTP, Codec: audiostream.CodecG711{Law: audiostream.MuLaw}, ClockRate: 8000}, ErrInvalidConfig},
-		{"rtp g726 missing channels", Config{ListenAddr: loopbackAddr, Mode: ModeRTP, Codec: audiostream.CodecG726{BitRate: audiostream.G726Rate32}, ClockRate: 8000}, ErrInvalidConfig},
-		{"rtp g726 bad rate", Config{ListenAddr: loopbackAddr, Mode: ModeRTP, Codec: audiostream.CodecG726{BitRate: 99}, ClockRate: 8000, Channels: 1}, ErrInvalidConfig},
-		{"rtp g726 non-mono", Config{ListenAddr: loopbackAddr, Mode: ModeRTP, Codec: audiostream.CodecG726{BitRate: audiostream.G726Rate32}, ClockRate: 8000, Channels: 2}, ErrInvalidConfig},
-		{"rtp g726 wrong clock", Config{ListenAddr: loopbackAddr, Mode: ModeRTP, Codec: audiostream.CodecG726{BitRate: audiostream.G726Rate32}, ClockRate: 16000, Channels: 1}, ErrInvalidConfig},
+		{"empty listen addr", Config{Mode: ModeRTP, Codec: audiostream.CodecOpus{}, ClockRate: 48000}, ErrInvalidConfig, nil},
+		{"rtp missing clock", Config{ListenAddr: loopbackAddr, Mode: ModeRTP, Codec: audiostream.CodecOpus{}}, ErrInvalidConfig, nil},
+		{"rtp nil codec", Config{ListenAddr: loopbackAddr, Mode: ModeRTP, ClockRate: 48000}, ErrInvalidConfig, nil},
+		{"rtp pcm codec missing channels", Config{ListenAddr: loopbackAddr, Mode: ModeRTP, Codec: audiostream.CodecG711{Law: audiostream.MuLaw}, ClockRate: 8000}, ErrInvalidConfig, nil},
+		{"rtp g726 missing channels", Config{ListenAddr: loopbackAddr, Mode: ModeRTP, Codec: audiostream.CodecG726{BitRate: audiostream.G726Rate32}, ClockRate: 8000}, ErrInvalidConfig, nil},
+		{"rtp g726 bad rate", Config{ListenAddr: loopbackAddr, Mode: ModeRTP, PayloadType: 96, Codec: audiostream.CodecG726{BitRate: 99, Packing: audiostream.G726PackingRFC3551}, ClockRate: 8000, Channels: 1}, ErrInvalidConfig, g726.ErrUnknownBitRate},
+		{"rtp g726 non-mono", Config{ListenAddr: loopbackAddr, Mode: ModeRTP, Codec: audiostream.CodecG726{BitRate: audiostream.G726Rate32}, ClockRate: 8000, Channels: 2}, ErrInvalidConfig, nil},
+		{"rtp g726 wrong clock", Config{ListenAddr: loopbackAddr, Mode: ModeRTP, Codec: audiostream.CodecG726{BitRate: audiostream.G726Rate32}, ClockRate: 16000, Channels: 1}, ErrInvalidConfig, nil},
 		// An out-of-range packing is refused for the same reason as an
 		// out-of-range bit rate: unpacking with the wrong bit order decodes
 		// without error into plausible but wrong audio.
-		{"rtp g726 bad packing", Config{ListenAddr: loopbackAddr, Mode: ModeRTP, Codec: audiostream.CodecG726{BitRate: audiostream.G726Rate32, Packing: audiostream.G726Packing(99)}, ClockRate: 8000, Channels: 1}, ErrInvalidConfig},
-		{"pcm missing rate", Config{ListenAddr: loopbackAddr, Mode: ModePCM, Format: PCMFormat{Channels: 1}}, ErrInvalidConfig},
-		{"bad source ip", Config{ListenAddr: loopbackAddr, Mode: ModeRTP, Codec: audiostream.CodecOpus{}, ClockRate: 48000, SourceIP: "not-an-ip"}, ErrInvalidConfig},
-		{"payload type above 127", Config{ListenAddr: loopbackAddr, Mode: ModeRTP, PayloadType: 200, Codec: audiostream.CodecOpus{}, ClockRate: 48000}, ErrInvalidConfig},
-		{"unsupported codec", Config{ListenAddr: loopbackAddr, Mode: ModeRTP, Codec: audiostream.CodecMP3{}, ClockRate: 90000}, ErrUnsupportedCodec},
-		{"aac invalid widths", Config{ListenAddr: loopbackAddr, Mode: ModeRTP, PayloadType: 97, Codec: audiostream.CodecAAC{}, ClockRate: 44100, AAC: AACParams{SizeLength: 0, IndexLength: 3, IndexDeltaLength: 3, SamplesPerFrame: 1024}}, ErrInvalidConfig},
+		{"rtp g726 bad packing", Config{ListenAddr: loopbackAddr, Mode: ModeRTP, PayloadType: 96, Codec: audiostream.CodecG726{BitRate: audiostream.G726Rate32, Packing: audiostream.G726Packing(99)}, ClockRate: 8000, Channels: 1}, ErrInvalidConfig, g726.ErrUnknownPacking},
+		{"pcm missing rate", Config{ListenAddr: loopbackAddr, Mode: ModePCM, Format: PCMFormat{Channels: 1}}, ErrInvalidConfig, nil},
+		{"bad source ip", Config{ListenAddr: loopbackAddr, Mode: ModeRTP, Codec: audiostream.CodecOpus{}, ClockRate: 48000, SourceIP: "not-an-ip"}, ErrInvalidConfig, nil},
+		{"payload type above 127", Config{ListenAddr: loopbackAddr, Mode: ModeRTP, PayloadType: 200, Codec: audiostream.CodecOpus{}, ClockRate: 48000}, ErrInvalidConfig, nil},
+		{"unsupported codec", Config{ListenAddr: loopbackAddr, Mode: ModeRTP, Codec: audiostream.CodecMP3{}, ClockRate: 90000}, ErrUnsupportedCodec, nil},
+		{"aac invalid widths", Config{ListenAddr: loopbackAddr, Mode: ModeRTP, PayloadType: 97, Codec: audiostream.CodecAAC{}, ClockRate: 44100, AAC: AACParams{SizeLength: 0, IndexLength: 3, IndexDeltaLength: 3, SamplesPerFrame: 1024}}, ErrInvalidConfig, aac.ErrConfigInvalid},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			if _, err := Open(context.Background(), tc.cfg); !errors.Is(err, tc.want) {
+			_, err := Open(context.Background(), tc.cfg)
+			if !errors.Is(err, tc.want) {
 				t.Fatalf("Open = %v, want %v", err, tc.want)
+			}
+			if tc.wantCause != nil && !errors.Is(err, tc.wantCause) {
+				t.Fatalf("Open = %v, want it to wrap %v", err, tc.wantCause)
 			}
 		})
 	}
@@ -1311,55 +1320,6 @@ func TestRTPAACExplicitCodecASCWinsOverParams(t *testing.T) {
 	}
 	if !bytes.Equal(got.AudioSpecificConfig, codecASC) {
 		t.Errorf("reported ASC = % x, want the CodecAAC value's % x (not the AACParams fallback)", got.AudioSpecificConfig, codecASC)
-	}
-}
-
-func TestRTPAACConfigInvalidWrapsCause(t *testing.T) {
-	_, err := Open(context.Background(), Config{
-		ListenAddr: loopbackAddr, Mode: ModeRTP, PayloadType: 97, Codec: audiostream.CodecAAC{}, ClockRate: 44100,
-		AAC: AACParams{SizeLength: 0, IndexLength: 3, IndexDeltaLength: 3, SamplesPerFrame: 1024},
-	})
-	if !errors.Is(err, ErrInvalidConfig) {
-		t.Errorf("Open error = %v, want ErrInvalidConfig", err)
-	}
-	if !errors.Is(err, aac.ErrConfigInvalid) {
-		t.Errorf("Open error = %v, want it to wrap aac.ErrConfigInvalid", err)
-	}
-}
-
-// TestRTPG726ConfigInvalidWrapsCause is the G.726 counterpart of
-// TestRTPAACConfigInvalidWrapsCause. The G.726 arm of resolveRTPCodec documents
-// that a bad bit rate or packing surfaces as ErrInvalidConfig while still
-// wrapping the precise g726 cause, so errors.Is reaches it; nothing asserted
-// that, so the wrap could have been dropped silently.
-func TestRTPG726ConfigInvalidWrapsCause(t *testing.T) {
-	for _, tc := range []struct {
-		name      string
-		codec     audiostream.CodecG726
-		wantCause error
-	}{
-		{
-			name:      "bad bit rate",
-			codec:     audiostream.CodecG726{BitRate: audiostream.G726BitRate(99), Packing: audiostream.G726PackingRFC3551, ClockRate: 8000, Channels: 1},
-			wantCause: g726.ErrUnknownBitRate,
-		},
-		{
-			name:      "bad packing",
-			codec:     audiostream.CodecG726{BitRate: audiostream.G726Rate32, Packing: audiostream.G726Packing(99), ClockRate: 8000, Channels: 1},
-			wantCause: g726.ErrUnknownPacking,
-		},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			_, err := Open(context.Background(), Config{
-				ListenAddr: loopbackAddr, Mode: ModeRTP, PayloadType: 96, Codec: tc.codec, ClockRate: 8000,
-			})
-			if !errors.Is(err, ErrInvalidConfig) {
-				t.Errorf("Open error = %v, want ErrInvalidConfig", err)
-			}
-			if !errors.Is(err, tc.wantCause) {
-				t.Errorf("Open error = %v, want it to wrap %v", err, tc.wantCause)
-			}
-		})
 	}
 }
 

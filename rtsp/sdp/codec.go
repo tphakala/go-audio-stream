@@ -185,7 +185,8 @@ func describeTrack(m *Media) DescribedTrack {
 	t.ClockRate = clock
 	t.Channels = channels
 
-	switch strings.ToUpper(encoding) {
+	up := strings.ToUpper(encoding)
+	switch up {
 	case "MPEG4-GENERIC":
 		params := parseAACFmtp(m.FMTPs[pt])
 		t.Codec = audiostream.CodecAAC{AudioSpecificConfig: params.Config}
@@ -212,7 +213,7 @@ func describeTrack(m *Media) DescribedTrack {
 		// They have no registration of their own, so the same conformance rule is
 		// applied to them by analogy: same codec, same 8 kHz clock, same single
 		// adaptive state.
-		if br, pk, ok := resolveG726(strings.ToUpper(encoding)); ok && channels == 1 && clock == g726ClockRate {
+		if br, pk, ok := resolveG726(up); ok && channels == 1 && clock == g726ClockRate {
 			t.Codec = audiostream.CodecG726{BitRate: br, Packing: pk, ClockRate: clock, Channels: channels}
 		} else {
 			t.Codec = audiostream.CodecUnknown{RTPMap: rtpmapString(encoding, clock, rawChannels, hasRTPMap)}

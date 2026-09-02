@@ -181,6 +181,13 @@ func Open(ctx context.Context, cfg Config) (*Client, error) {
 	defer func() {
 		if !ok {
 			cancel()
+			// openHandshake may have left an idle keep-alive connection in the pool
+			// (the playlist and any first-segment fetch succeeded before a later step
+			// failed). Reap it here so a failed Open does not strand a socket, the same
+			// leak teardown closes on the reader path. Under supervisor's
+			// reconnect-per-attempt Factory an Open that fails after connecting would
+			// otherwise accumulate one idle socket per attempt until IdleConnTimeout.
+			c.httpc.CloseIdleConnections()
 		}
 	}()
 
@@ -335,6 +342,12 @@ func newHTTPClient(cfg *Config, tgt *target) *http.Client {
 		TLSClientConfig:     tlsConfigFor(cfg, tgt),
 		TLSHandshakeTimeout: cfg.Timeout,
 		ForceAttemptHTTP2:   true,
+		// Bound how long a pooled connection may sit idle. http.DefaultTransport
+		// uses 90s; this transport is hand-rolled and otherwise inherits 0 (no
+		// limit). teardown closes idle connections promptly on a clean shutdown, so
+		// this is the belt-and-braces reap for a connection that goes idle while the
+		// session is still live.
+		IdleConnTimeout: 90 * time.Second,
 	}
 	return &http.Client{
 		Transport: tr,
@@ -875,9 +888,20 @@ func (c *Client) closed() bool {
 	}
 }
 
-// teardown is the reader's terminal sequence: join the watchdog goroutine. It
-// runs after the loop funneled its cause, so closing is already closed.
-func (c *Client) teardown() { c.wg.Wait() }
+// teardown closes the transport's idle keep-alive connections, then waits for the
+// client's goroutines to finish. The transport keeps connections alive across a
+// session's many small segment fetches, so without this a retired Client strands
+// up to MaxIdleConnsPerHost idle sockets per host, each pinned against GC by its
+// readLoop/writeLoop pair. That matters under supervisor, which builds a fresh
+// Client per reconnect attempt: a flapping source would otherwise accumulate one
+// abandoned pool per attempt. teardown runs deferred in reader after the segment
+// loop has returned, so no request is in flight when the idle conns are closed.
+func (c *Client) teardown() {
+	if c.httpc != nil {
+		c.httpc.CloseIdleConnections()
+	}
+	c.wg.Wait()
+}
 
 // watchdog ends the stream with audiostream.ErrReadTimeout when no successful
 // playlist or segment read arrives within Config.ReadIdle. It re-arms from its

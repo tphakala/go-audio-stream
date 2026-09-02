@@ -136,10 +136,10 @@ type track struct {
 	// but leaves baselineFixed set, so the reset falls back to the first-packet
 	// baseline rather than re-applying a stale seed.
 	baselineFixed bool
-	// pcmBuf is the reused s16le output scratch shared by the two codecs that
-	// write PCM into it, G.711 (deliverG711 expands companded bytes) and L16
-	// (deliverL16 byte-swaps). A track is only ever one codec, so the two paths
-	// never contend for it.
+	// pcmBuf is the reused s16le output scratch shared by the three codecs that
+	// write PCM into it via scratch: G.711 (deliverG711 expands companded bytes),
+	// L16 (deliverL16 byte-swaps) and G.726 (deliverG726 decodes ADPCM). A track
+	// is only ever one codec, so the paths never contend for it.
 	pcmBuf []byte
 	// l16FrameSize is the byte width of one L16 sample-frame (2 * channels), set
 	// by newTrack for a CodecL16 track and 0 otherwise. deliverL16 rejects a
@@ -308,16 +308,16 @@ func modeOf(params *sdp.AACParams) string {
 // g726.New cannot fail here in practice; the fallback to raw delivery is
 // defensive, matching the other configure* helpers.
 func (tr *track) configureG726(codec audiostream.CodecG726, override G726PackingOverride, logger *slog.Logger) {
-	if !override.valid() {
-		// An out-of-range override resolves to the SDP packing below (fail-open, so
-		// a bad config value never fails Setup), but that is exactly the
+	packing, ok := override.resolve(codec.Packing)
+	if !ok {
+		// An out-of-range override resolves to the SDP packing (fail-open, so a bad
+		// config value never fails Setup), but that is exactly the
 		// silent-wrong-audio outcome the option exists to escape, so it must not
 		// pass without a diagnostic. Name the bad value and state that the SDP
 		// packing is being used instead.
 		logWarn(logger, "g726 packing override value out of range; using SDP packing",
 			"track", tr.id, "override", uint8(override), "sdp", codec.Packing.String())
 	}
-	packing := override.packing(codec.Packing)
 	if packing != codec.Packing {
 		logWarn(logger, "g726 codeword packing overridden by caller",
 			"track", tr.id, "sdp", codec.Packing.String(), "using", packing.String())
@@ -330,6 +330,21 @@ func (tr *track) configureG726(codec audiostream.CodecG726, override G726Packing
 	}
 	tr.kind = deliverG726
 	tr.g726 = dec
+}
+
+// scratch returns tr.pcmBuf resized to n bytes for a PCM delivery path to write
+// into, growing the backing array with a 1.25x headroom factor when it must
+// reallocate and reslicing in place otherwise. The returned slice aliases
+// tr.pcmBuf and stays valid only until the next scratch call on the same track;
+// the single-codec-per-track invariant means the G.711, L16 and G.726 paths
+// never contend for it.
+func (tr *track) scratch(n int) []byte {
+	if cap(tr.pcmBuf) < n {
+		tr.pcmBuf = make([]byte, n, n+n/4)
+	} else {
+		tr.pcmBuf = tr.pcmBuf[:n]
+	}
+	return tr.pcmBuf
 }
 
 // configureLATM selects the MP4A-LATM depacketizer for a CodecMP4ALATM track,
@@ -627,19 +642,14 @@ func (tr *track) deliverG711(pkt rtp.Packet, up rtp.Update, now time.Time, onFra
 	// Folded past the nil-callback return above, not before it: with no callback
 	// deliverOne is never reached to drain, so accumulating here would leak.
 	tr.pendingGap += up.Gap
-	need := 2 * len(pkt.Payload)
-	if cap(tr.pcmBuf) < need {
-		tr.pcmBuf = make([]byte, need, need+need/4)
-	} else {
-		tr.pcmBuf = tr.pcmBuf[:need]
-	}
-	n, err := g711.Depacketize(tr.pcmBuf, pkt.Payload, tr.law)
+	buf := tr.scratch(2 * len(pkt.Payload))
+	n, err := g711.Depacketize(buf, pkt.Payload, tr.law)
 	if err != nil {
 		// The pending gap is retained for the next delivered frame.
 		tr.malformed.Add(1)
 		return
 	}
-	tr.deliverOne(tr.pcmBuf[:n], pkt, up, now, onFrame)
+	tr.deliverOne(buf[:n], pkt, up, now, onFrame)
 }
 
 // deliverL16 converts big-endian L16 linear PCM (RFC 3551, network byte order)
@@ -680,13 +690,8 @@ func (tr *track) deliverL16(pkt rtp.Packet, up rtp.Update, now time.Time, onFram
 	// Folded past the nil-callback return, mirroring the malformed branch: the
 	// accumulator is touched only when a frame will be delivered to drain it.
 	tr.pendingGap += up.Gap
-	if cap(tr.pcmBuf) < n {
-		tr.pcmBuf = make([]byte, n, n+n/4)
-	} else {
-		tr.pcmBuf = tr.pcmBuf[:n]
-	}
+	dst := tr.scratch(n)
 	src := pkt.Payload
-	dst := tr.pcmBuf
 	for i := 0; i+1 < n; i += 2 {
 		dst[i] = src[i+1]
 		dst[i+1] = src[i]
@@ -706,19 +711,14 @@ func (tr *track) deliverG726(pkt rtp.Packet, up rtp.Update, now time.Time, onFra
 		return
 	}
 	tr.pendingGap += up.Gap
-	need := tr.g726.OutputLen(pkt.Payload)
-	if cap(tr.pcmBuf) < need {
-		tr.pcmBuf = make([]byte, need, need+need/4)
-	} else {
-		tr.pcmBuf = tr.pcmBuf[:need]
-	}
-	n, err := tr.g726.Decode(tr.pcmBuf, pkt.Payload)
+	buf := tr.scratch(tr.g726.OutputLen(pkt.Payload))
+	n, err := tr.g726.Decode(buf, pkt.Payload)
 	if err != nil {
 		// The pending gap is retained for the next delivered frame.
 		tr.malformed.Add(1)
 		return
 	}
-	tr.deliverOne(tr.pcmBuf[:n], pkt, up, now, onFrame)
+	tr.deliverOne(buf[:n], pkt, up, now, onFrame)
 }
 
 // deliverRaw delivers the undecoded RTP payload as one frame. It is the

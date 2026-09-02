@@ -20,6 +20,7 @@ type Options struct {
 	InsecureAuth bool   // permit HTTP Basic credentials over a plaintext http connection (mirrors httpsource.Config.AllowInsecureAuth)
 	FullStream   bool   // set up all tracks (discarding non-target ones) for cameras that reject audio-only SETUP
 	Transport    string // media transport: "tcp" (default), "udp", or "udp-then-tcp" (RTSP only, ignored for http)
+	G726Packing  string // G.726 codeword packing override: "sdp" (default), "rfc3551", or "aal2" (RTSP only)
 	Username     string
 	Password     string
 }
@@ -37,6 +38,15 @@ const (
 	transportTCP        = "tcp"
 	transportUDP        = "udp"
 	transportUDPThenTCP = "udp-then-tcp"
+)
+
+// Accepted -g726-packing flag values, mapped to a library G726PackingOverride by
+// g726PackingOverride. "sdp" (the default) leaves the rtpmap-resolved packing in
+// charge; the other two force the codeword bit order whatever the SDP advertised.
+const (
+	g726PackingSDP     = "sdp"
+	g726PackingRFC3551 = "rfc3551"
+	g726PackingAAL2    = "aal2"
 )
 
 // Version is the stream-doctor version string, printed by --version and in the
@@ -75,6 +85,9 @@ Flags:
                         reject audio-only SETUP (RTSP only; ignored for http)
   -transport mode       media transport: tcp, udp, or udp-then-tcp
                         (default tcp; RTSP only, ignored for http)
+  -g726-packing mode    G.726 codeword packing: sdp, rfc3551, or aal2
+                        (default sdp; RTSP only). Use to A/B a camera that
+                        advertises one packing but sends the other.
   -user username        stream username (overridden by URL userinfo)
   -password password    stream password (overridden by URL userinfo)
   -version              print the version and exit
@@ -102,6 +115,7 @@ func parseArgs(args []string) (Options, error) {
 	fs.BoolVar(&opts.InsecureAuth, "insecure-auth", false, "permit HTTP Basic credentials over a plaintext http connection")
 	fs.BoolVar(&opts.FullStream, "full-stream", false, "set up all tracks, not just audio")
 	fs.StringVar(&opts.Transport, "transport", transportTCP, "media transport: tcp, udp, or udp-then-tcp")
+	fs.StringVar(&opts.G726Packing, "g726-packing", g726PackingSDP, "G.726 codeword packing: sdp, rfc3551, or aal2")
 	fs.StringVar(&opts.Username, "user", "", "stream username")
 	fs.StringVar(&opts.Password, "password", "", "stream password")
 	fs.BoolVar(&version, "version", false, "print the version and exit")
@@ -143,6 +157,12 @@ func parseArgs(args []string) (Options, error) {
 	// falling back to TCP at Dial time.
 	if _, ok := transportPreference(opts.Transport); !ok {
 		return Options{}, fmt.Errorf("%w: -transport must be tcp, udp, or udp-then-tcp, got %q", ErrUsage, opts.Transport)
+	}
+	// Validate the G.726 packing selector against the same mapping the RTSP
+	// adapter uses, so an unknown value fails here rather than silently deferring
+	// to the SDP packing at Setup time.
+	if _, ok := g726PackingOverride(opts.G726Packing); !ok {
+		return Options{}, fmt.Errorf("%w: -g726-packing must be sdp, rfc3551, or aal2, got %q", ErrUsage, opts.G726Packing)
 	}
 
 	return opts, nil

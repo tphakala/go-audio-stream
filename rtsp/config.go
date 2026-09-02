@@ -245,47 +245,26 @@ const (
 	G726PackingForceAAL2
 )
 
-// A constant added here must be added to BOTH packing and valid below. They
-// enumerate this list separately, and the two omissions are not equally
-// forgiving: adding a constant to valid alone suppresses the out-of-range
-// warning while packing still ignores the value, so the caller's override is
-// silently inert and the wrong-audio failure this option exists to escape comes
-// back with no diagnostic. Adding it to packing alone only logs a spurious
-// warning while behaving correctly.
-
-// packing resolves the override against the packing the SDP reported, returning
-// the packing the decoder should actually use.
-func (o G726PackingOverride) packing(fromSDP audiostream.G726Packing) audiostream.G726Packing {
+// resolve maps the override against the packing the SDP reported. It returns the
+// packing the decoder should use and whether o was one of the defined override
+// constants. Unifying the mapping and the validity check in one switch is
+// deliberate: a fourth constant added to this method cannot be registered for
+// resolution but missed for validation (or the reverse), the drift a separate
+// packing/valid pair invited. An out-of-range value resolves to the SDP packing
+// (fail-open, so a bad config value never fails Setup) and reports ok=false,
+// which configureG726 turns into an out-of-range warning so the value is not
+// silently inert; the zero value G726PackingFromSDP also defers to the SDP but
+// reports ok=true, so it draws no warning.
+func (o G726PackingOverride) resolve(fromSDP audiostream.G726Packing) (packing audiostream.G726Packing, ok bool) {
 	switch o {
+	case G726PackingFromSDP:
+		return fromSDP, true
 	case G726PackingForceRFC3551:
-		return audiostream.G726PackingRFC3551
+		return audiostream.G726PackingRFC3551, true
 	case G726PackingForceAAL2:
-		return audiostream.G726PackingAAL2
+		return audiostream.G726PackingAAL2, true
 	default:
-		// G726PackingFromSDP (the zero value) and any out-of-range value both
-		// defer to the SDP, folded into one arm the way resolveTransport folds its
-		// own zero and out-of-range cases. An out-of-range value is treated as "no
-		// override" rather than rejected, so a caller that builds SetupOptions from
-		// its own config cannot turn a bad value into a failed Setup; the SDP still
-		// decides. The two are not indistinguishable to the caller, though:
-		// configureG726 separates them with valid() so an out-of-range value is
-		// warned about rather than resolving silently to the SDP packing.
-		return fromSDP
-	}
-}
-
-// valid reports whether o is one of the three defined override constants.
-// packing resolves an out-of-range value to the SDP packing (fail-open, so a bad
-// config value never fails Setup), which means such a value produces no audible
-// correction and, on its own, no diagnostic. configureG726 uses this to warn
-// when the caller's override value is out of range, so a garbage config value is
-// not silently inert.
-func (o G726PackingOverride) valid() bool {
-	switch o {
-	case G726PackingFromSDP, G726PackingForceRFC3551, G726PackingForceAAL2:
-		return true
-	default:
-		return false
+		return fromSDP, false
 	}
 }
 

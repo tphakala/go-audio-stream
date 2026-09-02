@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"sync"
 	"testing"
+	"time"
 
 	audiostream "github.com/tphakala/go-audio-stream"
 )
@@ -165,6 +166,35 @@ func twoPhaseServer(segs map[string][]byte, body1, body2 string) *hlsServer {
 	}
 }
 
+// openTimeline opens a live stream from srv against tl, wiring the timeline's
+// OnFrame and OnCodecUpdate, and fails the test if Open errors. It registers the
+// Client's Close as a cleanup so the reader goroutine and the transport's idle
+// connections are released even when a test returns early; Close is idempotent and
+// funnels through the same shutdown path as a natural end, so a test that runs to
+// ErrStreamEnded first is unaffected. The caller creates tl (so a test can set
+// mutateOnUpdate), drives the stream with Wait, and asserts on tl.
+func openTimeline(t *testing.T, srv *httptest.Server, tl *timeline) *Client {
+	t.Helper()
+	c, err := Open(context.Background(), Config{
+		URL:           srv.URL + "/live.m3u8",
+		OnFrame:       tl.onFrame,
+		OnCodecUpdate: tl.onCodecUpdate,
+	})
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = c.Close()
+		// Close only starts shutdown; wait (bounded) for the reader goroutine to run
+		// its deferred teardown so it does not outlive the test and bleed into a
+		// later one. A test that already ran Wait to completion returns immediately.
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = c.Wait(ctx)
+	})
+	return c
+}
+
 // TestFMP4InitChangeSameASCContinues covers a replacement initialization segment
 // that carries the SAME AudioSpecificConfig: a re-publish, not a codec change.
 // The stream must keep playing and deliver both segments' access units, and
@@ -176,14 +206,7 @@ func TestFMP4InitChangeSameASCContinues(t *testing.T) {
 	srv := twoPhaseServer(segs, v1, v2).start(t)
 
 	tl := &timeline{}
-	c, err := Open(context.Background(), Config{
-		URL:           srv.URL + "/live.m3u8",
-		OnFrame:       tl.onFrame,
-		OnCodecUpdate: tl.onCodecUpdate,
-	})
-	if err != nil {
-		t.Fatalf("Open: %v", err)
-	}
+	c := openTimeline(t, srv, tl)
 	if werr := c.Wait(context.Background()); !errors.Is(werr, ErrStreamEnded) {
 		t.Fatalf("Wait = %v, want ErrStreamEnded (a replaced init must not end the stream)", werr)
 	}
@@ -211,14 +234,7 @@ func TestFMP4InitChangeNewASCFiresCodecUpdate(t *testing.T) {
 	srv := twoPhaseServer(segs, v1, v2).start(t)
 
 	tl := &timeline{}
-	c, err := Open(context.Background(), Config{
-		URL:           srv.URL + "/live.m3u8",
-		OnFrame:       tl.onFrame,
-		OnCodecUpdate: tl.onCodecUpdate,
-	})
-	if err != nil {
-		t.Fatalf("Open: %v", err)
-	}
+	c := openTimeline(t, srv, tl)
 	if werr := c.Wait(context.Background()); !errors.Is(werr, ErrStreamEnded) {
 		t.Fatalf("Wait = %v, want ErrStreamEnded", werr)
 	}
@@ -347,14 +363,7 @@ func TestFMP4RepeatedInitChangesFireEachUpdate(t *testing.T) {
 	srv := h.start(t)
 
 	tl := &timeline{mutateOnUpdate: true}
-	c, err := Open(context.Background(), Config{
-		URL:           srv.URL + "/live.m3u8",
-		OnFrame:       tl.onFrame,
-		OnCodecUpdate: tl.onCodecUpdate,
-	})
-	if err != nil {
-		t.Fatalf("Open: %v", err)
-	}
+	c := openTimeline(t, srv, tl)
 	if werr := c.Wait(context.Background()); !errors.Is(werr, ErrStreamEnded) {
 		t.Fatalf("Wait = %v, want ErrStreamEnded", werr)
 	}
@@ -461,14 +470,7 @@ func TestFMP4InitChangeFailureEndsStream(t *testing.T) {
 			srv := twoPhaseServer(segs, v1, v2).start(t)
 
 			tl := &timeline{}
-			c, err := Open(context.Background(), Config{
-				URL:           srv.URL + "/live.m3u8",
-				OnFrame:       tl.onFrame,
-				OnCodecUpdate: tl.onCodecUpdate,
-			})
-			if err != nil {
-				t.Fatalf("Open: %v", err)
-			}
+			c := openTimeline(t, srv, tl)
 			if werr := c.Wait(context.Background()); !errors.Is(werr, tc.wantErr) {
 				t.Fatalf("Wait = %v, want %v (%s)", werr, tc.wantErr, tc.wantWhy)
 			}
@@ -588,14 +590,7 @@ func TestFMP4InitChangeCarriesRetiredDemuxerGapCount(t *testing.T) {
 	srv := h.start(t)
 
 	tl := &timeline{}
-	c, err := Open(context.Background(), Config{
-		URL:           srv.URL + "/live.m3u8",
-		OnFrame:       tl.onFrame,
-		OnCodecUpdate: tl.onCodecUpdate,
-	})
-	if err != nil {
-		t.Fatalf("Open: %v", err)
-	}
+	c := openTimeline(t, srv, tl)
 	if werr := c.Wait(context.Background()); !errors.Is(werr, ErrStreamEnded) {
 		t.Fatalf("Wait = %v, want ErrStreamEnded", werr)
 	}
@@ -606,5 +601,51 @@ func TestFMP4InitChangeCarriesRetiredDemuxerGapCount(t *testing.T) {
 	if got := c.Stats().Tracks[0].Malformed; got != want {
 		t.Errorf("Malformed = %d after two init changes, want %d: 0 means a retired demuxer's gap was dropped, "+
 			"more means it was counted more than once", got, want)
+	}
+}
+
+// TestFMP4CloseMidStreamEndsStream covers Close on a live stream. An fMP4 live
+// playlist that never publishes ENDLIST keeps reloading, so the reader is still
+// running when the consumer closes the Client. Close must stop the stream and make
+// Wait return audiostream.ErrClosed, the terminal local-close cause, rather than
+// block. It also exercises teardown on the closed path, where the transport's idle
+// keep-alive connections are released. No other test in this file closes a
+// still-running Client; the rest run to a natural ErrStreamEnded.
+func TestFMP4CloseMidStreamEndsStream(t *testing.T) {
+	fastReload(t)
+	s0 := fmp4Samples(2, 40)
+	segs := map[string][]byte{
+		initURL:  buildInitSegment(wantASC, 44100, trackInit1),
+		fragURL0: buildFragment(trackInit1, s0, 1024),
+	}
+	// A live playlist: no ENDLIST and the same body on every reload, so the client
+	// reloads indefinitely and Wait blocks until Close.
+	live := buildFMP4MediaPlaylist(1, 0, false, initRel, []segSpec{{uri: fragRel0, duration: 1.0}})
+	h := &hlsServer{
+		segments: segs,
+		playlist: func(int) (string, int) { return live, http.StatusOK },
+	}
+	srv := h.start(t)
+
+	tl := &timeline{}
+	c := openTimeline(t, srv, tl)
+	// Open only resolves the first segment; reader() runs in a goroutine. Wait until
+	// the origin has served a second /live.m3u8 (a reload past the Open-time fetch)
+	// so Close genuinely exercises shutdown during an active live reload rather than
+	// possibly landing before the reader starts looping.
+	deadline := time.Now().Add(3 * time.Second)
+	for h.requestCount("/live.m3u8") < 2 {
+		if time.Now().After(deadline) {
+			t.Fatal("reader never issued a second playlist request; cannot exercise a mid-reload close")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	// The stream is live and actively reloading. Close it and require the terminal
+	// local-close cause from Wait.
+	if err := c.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if werr := c.Wait(context.Background()); !errors.Is(werr, audiostream.ErrClosed) {
+		t.Fatalf("Wait = %v, want audiostream.ErrClosed after Close", werr)
 	}
 }

@@ -43,6 +43,14 @@ func videoTrack() rtsp.Track {
 	return rtsp.Track{ID: 1, Media: audiostream.MediaVideo, Codec: audiostream.CodecUnknown{RTPMap: testH264}, ClockRate: 90000, Channels: 0, PayloadType: 96}
 }
 
+func g726Track() rtsp.Track {
+	return rtsp.Track{
+		ID: 0, Media: audiostream.MediaAudio,
+		Codec:     audiostream.CodecG726{BitRate: audiostream.G726Rate32, Packing: audiostream.G726PackingRFC3551, ClockRate: 8000, Channels: 1},
+		ClockRate: 8000, Channels: 1, PayloadType: 96,
+	}
+}
+
 func happySession() rtsp.SessionInfo {
 	return rtsp.SessionInfo{
 		SessionTimeout:  60 * time.Second,
@@ -301,6 +309,42 @@ func TestRunSetupAudioOnly(t *testing.T) {
 		t.Fatalf("Run() error = %v, want nil", err)
 	}
 	want := []setupCall{{TrackID: 0, Discard: false}}
+	if !equalSetups(f.setups, want) {
+		t.Errorf("setups = %+v, want %+v", f.setups, want)
+	}
+	if code := mapExit(err, res); code != ExitOK {
+		t.Errorf("mapExit = %d, want ExitOK", code)
+	}
+}
+
+// TestRunThreadsG726Packing pins that the -g726-packing flag reaches the library:
+// setup() must pass the mapped override on SetupOptions.G726Packing to every Setup
+// call, the audio target and, under -full-stream, each discarded track. Without
+// this, dropping the field from either SetupOptions literal in setup() would leave
+// the flag inert on the decoder while every other test in the module stayed green.
+func TestRunThreadsG726Packing(t *testing.T) {
+	t.Parallel()
+	f := &fakeProber{
+		tracks:  []rtsp.Track{g726Track(), videoTrack()},
+		session: happySession(),
+		result: CaptureResult{
+			Frames:  frames500(),
+			Stats:   audiostream.TrackStats{Packets: 500, PayloadBytes: 64000},
+			Elapsed: 10 * time.Second,
+			Reason:  EndCompleted,
+		},
+	}
+	opts := Options{URL: testTargetURL, Duration: 10 * time.Second, FullStream: true, G726Packing: g726PackingAAL2}
+
+	var out strings.Builder
+	res, err := Run(context.Background(), opts, f, &out, io.Discard, testEnv(), fixedClock(5*time.Millisecond))
+	if err != nil {
+		t.Fatalf("Run() error = %v, want nil", err)
+	}
+	want := []setupCall{
+		{TrackID: 0, Discard: false, G726Packing: rtsp.G726PackingForceAAL2},
+		{TrackID: 1, Discard: true, G726Packing: rtsp.G726PackingForceAAL2},
+	}
 	if !equalSetups(f.setups, want) {
 		t.Errorf("setups = %+v, want %+v", f.setups, want)
 	}

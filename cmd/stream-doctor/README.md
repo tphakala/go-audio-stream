@@ -89,6 +89,11 @@ stream-doctor -report -transport udp-then-tcp rtsp://camera.local/stream
 # Cameras that reject an audio-only SETUP: set up all tracks.
 stream-doctor -report -full-stream rtsp://camera.local/stream
 
+# A G.726 camera whose audio sounds wrong: A/B the codeword packing with -wav.
+# The report names the packing actually used, so you can confirm the fix.
+stream-doctor -report -wav aal2.wav -g726-packing aal2 rtsp://camera.local/stream
+stream-doctor -report -wav rfc3551.wav -g726-packing rfc3551 rtsp://camera.local/stream
+
 # Self-signed rtsps, or credentials passed as flags instead of in the URL.
 stream-doctor -report -insecure-tls rtsps://camera.local/stream
 stream-doctor -report -user U -password P rtsp://camera.local/stream
@@ -113,6 +118,7 @@ with `-user` / `-password`; the URL userinfo wins if both are present.
 | `-insecure-auth` | off | permit HTTP Basic credentials over a plaintext `http` connection |
 | `-full-stream` | off | set up all tracks, not just audio, for cameras that reject audio-only SETUP (RTSP only) |
 | `-transport mode` | `tcp` | media transport: `tcp`, `udp`, or `udp-then-tcp` (RTSP only) |
+| `-g726-packing mode` | `sdp` | G.726 codeword packing: `sdp`, `rfc3551`, or `aal2` (RTSP only). Overrides the rtpmap-resolved packing for a camera that advertises one order but sends the other; the report names the effective packing. |
 | `-user username` | "" | stream username (overridden by URL userinfo) |
 | `-password password` | "" | stream password (overridden by URL userinfo) |
 | `-version` | | print the version and exit |

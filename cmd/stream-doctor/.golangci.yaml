@@ -51,12 +51,14 @@ linters:
         - performance
       settings:
         hugeParam:
-          # rtsp.Track is 88 bytes with the FMTP and PayloadType diagnostic fields.
-          # The doctor passes it by value through cold-path helpers (once per
-          # run: decodable, setupDetail, the writeWAV family, Collect), where a
-          # copy is free, so the default 80-byte threshold is too aggressive.
-          # Kept active above this so a genuinely huge param is still caught.
-          sizeThreshold: 128
+          # rtsp.Track is 88 bytes with the FMTP and PayloadType diagnostic fields,
+          # and Options reaches 128 bytes once every flag has a field. The doctor
+          # passes both by value through cold-path helpers (once per run:
+          # decodable, setupDetail, the writeWAV family, Collect, classifyFailure,
+          # proberFor), where a copy is free, so the default 80-byte threshold is
+          # too aggressive. Kept just above Options so a genuinely huge param is
+          # still caught.
+          sizeThreshold: 136
     revive:
       rules:
         - name: unused-parameter

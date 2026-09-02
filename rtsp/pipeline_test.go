@@ -111,6 +111,27 @@ func TestNewTrackCodecSelection(t *testing.T) {
 	}
 }
 
+// TestNewTrackG726OverrideDoesNotRescueUnknown pins the documented contract that
+// SetupOptions.G726Packing applies only to a track the SDP already resolved to
+// CodecG726. newTrack consults the override solely in the CodecG726 dispatch arm,
+// so a CodecUnknown track never reaches it and stays on deliverRaw whatever the
+// packing value: the forced override in the input is inert by construction. The
+// test therefore guards the dispatch itself, that passing a forced override
+// alongside a CodecUnknown descriptor is a no-op and never promotes it to
+// deliverG726.
+func TestNewTrackG726OverrideDoesNotRescueUnknown(t *testing.T) {
+	t.Parallel()
+	desc := describedTrack{
+		codec:     audiostream.CodecUnknown{RTPMap: "G726-32/8000"},
+		clockRate: 8000,
+		media:     audiostream.MediaAudio,
+	}
+	tr := newTrack(0, desc, SetupOptions{G726Packing: G726PackingForceAAL2}, 1, nil)
+	if tr.kind != deliverRaw {
+		t.Errorf("kind = %d, want deliverRaw (override must not rescue a CodecUnknown track)", tr.kind)
+	}
+}
+
 func TestChannelTableLookup(t *testing.T) {
 	t.Parallel()
 	tr0 := &track{id: 0}
@@ -283,7 +304,7 @@ func TestDeliverOpus(t *testing.T) {
 
 	var got audiostream.Frame
 	n := 0
-	tr.deliver(pkt, up, time.Unix(1, 0), func(f audiostream.Frame) { got = f; n++ })
+	tr.deliver(pkt, up, time.Unix(1, 0), func(f audiostream.Frame) { got = copyFrame(&f); n++ })
 	if n != 1 {
 		t.Fatalf("delivered %d frames, want 1", n)
 	}
@@ -333,7 +354,7 @@ func TestDeliverG711(t *testing.T) {
 			pkt := rtp.Packet{Header: rtp.Header{Timestamp: 160}, Payload: payload}
 
 			var got audiostream.Frame
-			tr.deliver(pkt, rtp.Update{Timestamp: 160}, time.Unix(1, 0), func(f audiostream.Frame) { got = f })
+			tr.deliver(pkt, rtp.Update{Timestamp: 160}, time.Unix(1, 0), func(f audiostream.Frame) { got = copyFrame(&f) })
 			want, derr := g711.DepacketizeAlloc(payload, tc.law)
 			if derr != nil {
 				t.Fatalf("DepacketizeAlloc: %v", derr)
@@ -393,7 +414,7 @@ func TestDeliverG726(t *testing.T) {
 	}
 	var got audiostream.Frame
 	pkt := rtp.Packet{Header: rtp.Header{Timestamp: 160}, Payload: payload}
-	tr.deliver(pkt, rtp.Update{Timestamp: 160}, time.Unix(1, 0), func(f audiostream.Frame) { got = f })
+	tr.deliver(pkt, rtp.Update{Timestamp: 160}, time.Unix(1, 0), func(f audiostream.Frame) { got = copyFrame(&f) })
 	if !bytes.Equal(got.Data, want) {
 		t.Errorf("first frame Data = % x, want % x", got.Data, want)
 	}
@@ -414,7 +435,7 @@ func TestDeliverG726(t *testing.T) {
 	// A plain gap must NOT reset the decoder: the second packet continues the
 	// adapted state, matching wantSecond.
 	tr.resetDepacketizer(false)
-	tr.deliver(pkt, rtp.Update{Timestamp: 320, Gap: 1}, time.Unix(2, 0), func(f audiostream.Frame) { got = f })
+	tr.deliver(pkt, rtp.Update{Timestamp: 320, Gap: 1}, time.Unix(2, 0), func(f audiostream.Frame) { got = copyFrame(&f) })
 	if !bytes.Equal(got.Data, wantSecond) {
 		t.Errorf("after plain gap Data = % x, want continued-state % x", got.Data, wantSecond)
 	}
@@ -427,7 +448,7 @@ func TestDeliverG726(t *testing.T) {
 	tr2 := newG726Track()
 	tr2.deliver(pkt, rtp.Update{Timestamp: 160}, time.Unix(1, 0), func(audiostream.Frame) {})
 	tr2.resetDepacketizer(true)
-	tr2.deliver(pkt, rtp.Update{Timestamp: 160}, time.Unix(3, 0), func(f audiostream.Frame) { got = f })
+	tr2.deliver(pkt, rtp.Update{Timestamp: 160}, time.Unix(3, 0), func(f audiostream.Frame) { got = copyFrame(&f) })
 	if !bytes.Equal(got.Data, want) {
 		t.Errorf("after SSRC reset Data = % x, want fresh-state % x", got.Data, want)
 	}
@@ -448,7 +469,7 @@ func TestDeliverL16(t *testing.T) {
 
 	var got audiostream.Frame
 	n := 0
-	tr.deliver(pkt, rtp.Update{Timestamp: 480}, time.Unix(1, 0), func(f audiostream.Frame) { got = f; n++ })
+	tr.deliver(pkt, rtp.Update{Timestamp: 480}, time.Unix(1, 0), func(f audiostream.Frame) { got = copyFrame(&f); n++ })
 	if n != 1 {
 		t.Fatalf("delivered %d frames, want 1", n)
 	}
@@ -565,7 +586,7 @@ func TestDeliverL16StereoWholeFrames(t *testing.T) {
 	// 8 bytes = 2 whole stereo frames: delivered as one frame.
 	var got audiostream.Frame
 	tr.deliver(rtp.Packet{Payload: []byte{0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, 0xde, 0xf0}},
-		rtp.Update{}, time.Unix(1, 0), func(f audiostream.Frame) { got = f; n++ })
+		rtp.Update{}, time.Unix(1, 0), func(f audiostream.Frame) { got = copyFrame(&f); n++ })
 	if n != 1 {
 		t.Fatalf("whole-frame stereo packet delivered %d frames, want 1", n)
 	}
@@ -584,7 +605,7 @@ func TestDeliverRaw(t *testing.T) {
 	payload := []byte{0xde, 0xad, 0xbe, 0xef}
 	pkt := rtp.Packet{Header: rtp.Header{Timestamp: 0}, Payload: payload}
 	var got audiostream.Frame
-	tr.deliver(pkt, rtp.Update{Timestamp: 0, Gap: 4}, time.Unix(1, 0), func(f audiostream.Frame) { got = f })
+	tr.deliver(pkt, rtp.Update{Timestamp: 0, Gap: 4}, time.Unix(1, 0), func(f audiostream.Frame) { got = copyFrame(&f) })
 	if !bytes.Equal(got.Data, payload) {
 		t.Errorf("Data = % x, want raw payload % x", got.Data, payload)
 	}
@@ -1446,62 +1467,6 @@ func TestCumulativeLostSaturatesAtTheSignedMaximum(t *testing.T) {
 	}
 }
 
-// TestNewTrackG726AAL2Packing checks the codeword packing survives the whole
-// Setup path: a CodecG726 carrying G726PackingAAL2 (what the SDP resolves an
-// AAL2-G726-NN rtpmap to) must build a decoder that unpacks MSB-first, so the
-// delivered PCM matches an AAL2 reference decoder and NOT an RFC 3551 one.
-// Without the packing threaded through configureG726 the track would decode the
-// same bytes in the wrong bit order and deliver plausible but wrong audio.
-func TestNewTrackG726AAL2Packing(t *testing.T) {
-	t.Parallel()
-	payload := []byte{0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, 0xde, 0xf0}
-
-	desc := describedTrack{
-		codec: audiostream.CodecG726{
-			BitRate:   audiostream.G726Rate32,
-			Packing:   audiostream.G726PackingAAL2,
-			ClockRate: 8000,
-			Channels:  1,
-		},
-		clockRate: 8000,
-		media:     audiostream.MediaAudio,
-	}
-	tr := newTrack(0, desc, SetupOptions{}, 1, nil)
-	if tr.kind != deliverG726 {
-		t.Fatalf("kind = %d, want deliverG726", tr.kind)
-	}
-	tr.baseSet.Store(true)
-
-	aal2Ref, err := g726.New(audiostream.G726Rate32, audiostream.G726PackingAAL2)
-	if err != nil {
-		t.Fatalf("New aal2: %v", err)
-	}
-	wantAAL2, err := aal2Ref.DecodeAlloc(payload)
-	if err != nil {
-		t.Fatalf("DecodeAlloc aal2: %v", err)
-	}
-	plainRef, err := g726.New(audiostream.G726Rate32, audiostream.G726PackingRFC3551)
-	if err != nil {
-		t.Fatalf("New rfc3551: %v", err)
-	}
-	wantPlain, err := plainRef.DecodeAlloc(payload)
-	if err != nil {
-		t.Fatalf("DecodeAlloc rfc3551: %v", err)
-	}
-	// Precondition: this payload must distinguish the two packings, else the
-	// assertion below would pass no matter which decoder the track built.
-	if bytes.Equal(wantAAL2, wantPlain) {
-		t.Fatal("test payload does not distinguish the two codeword packings")
-	}
-
-	var got audiostream.Frame
-	pkt := rtp.Packet{Header: rtp.Header{Timestamp: 160}, Payload: payload}
-	tr.deliver(pkt, rtp.Update{Timestamp: 160}, time.Unix(1, 0), func(f audiostream.Frame) { got = f })
-	if !bytes.Equal(got.Data, wantAAL2) {
-		t.Errorf("Data = % x, want AAL2-decoded % x", got.Data, wantAAL2)
-	}
-}
-
 // TestNewTrackG726PackingOverride covers SetupOptions.G726Packing: the caller's
 // override must decide the codeword bit order the track's decoder uses,
 // overruling whatever the rtpmap encoding name resolved to, and the zero value
@@ -1573,7 +1538,7 @@ func TestNewTrackG726PackingOverride(t *testing.T) {
 
 			var got audiostream.Frame
 			pkt := rtp.Packet{Header: rtp.Header{Timestamp: 160}, Payload: payload}
-			tr.deliver(pkt, rtp.Update{Timestamp: 160}, time.Unix(1, 0), func(f audiostream.Frame) { got = f })
+			tr.deliver(pkt, rtp.Update{Timestamp: 160}, time.Unix(1, 0), func(f audiostream.Frame) { got = copyFrame(&f) })
 			if !bytes.Equal(got.Data, tc.want) {
 				t.Errorf("Data = % x, want % x", got.Data, tc.want)
 			}
@@ -1590,17 +1555,19 @@ func TestG726PackingOverrideResolution(t *testing.T) {
 		override G726PackingOverride
 		fromSDP  audiostream.G726Packing
 		want     audiostream.G726Packing
+		wantOK   bool
 	}{
-		{"fromSDP keeps plain", G726PackingFromSDP, audiostream.G726PackingRFC3551, audiostream.G726PackingRFC3551},
-		{"fromSDP keeps aal2", G726PackingFromSDP, audiostream.G726PackingAAL2, audiostream.G726PackingAAL2},
-		{"force plain over aal2", G726PackingForceRFC3551, audiostream.G726PackingAAL2, audiostream.G726PackingRFC3551},
-		{"force aal2 over plain", G726PackingForceAAL2, audiostream.G726PackingRFC3551, audiostream.G726PackingAAL2},
-		{"unknown falls back", G726PackingOverride(200), audiostream.G726PackingAAL2, audiostream.G726PackingAAL2},
+		{"fromSDP keeps plain", G726PackingFromSDP, audiostream.G726PackingRFC3551, audiostream.G726PackingRFC3551, true},
+		{"fromSDP keeps aal2", G726PackingFromSDP, audiostream.G726PackingAAL2, audiostream.G726PackingAAL2, true},
+		{"force plain over aal2", G726PackingForceRFC3551, audiostream.G726PackingAAL2, audiostream.G726PackingRFC3551, true},
+		{"force aal2 over plain", G726PackingForceAAL2, audiostream.G726PackingRFC3551, audiostream.G726PackingAAL2, true},
+		{"unknown falls back and reports not ok", G726PackingOverride(200), audiostream.G726PackingAAL2, audiostream.G726PackingAAL2, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			if got := tc.override.packing(tc.fromSDP); got != tc.want {
-				t.Errorf("packing(%v) = %v, want %v", tc.fromSDP, got, tc.want)
+			got, ok := tc.override.resolve(tc.fromSDP)
+			if got != tc.want || ok != tc.wantOK {
+				t.Errorf("resolve(%v) = (%v, %t), want (%v, %t)", tc.fromSDP, got, ok, tc.want, tc.wantOK)
 			}
 		})
 	}
@@ -1644,7 +1611,7 @@ func TestConfigureG726OutOfRangeWarns(t *testing.T) {
 	tr.baseSet.Store(true)
 	var got audiostream.Frame
 	pkt := rtp.Packet{Header: rtp.Header{Timestamp: 160}, Payload: payload}
-	tr.deliver(pkt, rtp.Update{Timestamp: 160}, time.Unix(1, 0), func(f audiostream.Frame) { got = f })
+	tr.deliver(pkt, rtp.Update{Timestamp: 160}, time.Unix(1, 0), func(f audiostream.Frame) { got = copyFrame(&f) })
 
 	ref, err := g726.New(audiostream.G726Rate32, audiostream.G726PackingAAL2)
 	if err != nil {

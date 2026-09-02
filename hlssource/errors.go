@@ -66,6 +66,34 @@ var (
 	ErrSegmentTooLarge = errors.New("hlssource: segment exceeds size limit")
 )
 
+// Permanent causes and supervisor retry policy.
+//
+// ErrUnsupportedPlaylist, ErrUnsupportedCodec and ErrPlaylistTooLarge report
+// conditions a retry cannot fix: an encrypted, container-switching, or over-cap
+// playlist, or non-AAC audio, is exactly as unsatisfiable on the next attempt.
+//
+// ErrMalformedPlaylist is deliberately NOT in this permanent set. It often
+// signals genuine garbage, but openHandshake also returns it for a well-formed
+// live playlist whose segments are all currently EXT-X-GAP ("no playable
+// segment"), which RFC 8216 permits and which a later reload can recover, so
+// treating every ErrMalformedPlaylist as terminal would abandon a recoverable
+// source. The segment-level causes ErrMalformedSegment and ErrSegmentTooLarge are
+// excluded for the same reason: a single malformed or oversized segment can be a
+// transient origin hiccup a reconnect and fresh playlist recover from.
+//
+// supervisor.DefaultRetryable does not recognize these package-typed causes (its
+// terminal set is the root sentinels context.Canceled, context.DeadlineExceeded,
+// audiostream.ErrClosed and audiostream.ErrRedirect), so a Client wrapped in a
+// supervisor under the default policy reconnects forever on a permanently broken
+// origin, one capped-backoff attempt after another, rather than settling into
+// StateFailed. A consumer that supervises this source and wants a permanent
+// failure to be terminal should supply its own supervisor Config.Retryable
+// returning false for the three permanent causes above, composed with the
+// default's root sentinels. The policy is left to the consumer rather than pushed
+// into supervisor on purpose: supervisor depends only on the root audiostream
+// package, not on any concrete source, so it cannot import these sentinels
+// without inverting that dependency.
+
 // StatusError reports a non-success HTTP status. It matches errors.Is against
 // ErrBadStatus; use errors.As to recover the Code and Status.
 type StatusError struct {
