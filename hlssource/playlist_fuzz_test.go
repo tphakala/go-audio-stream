@@ -33,8 +33,9 @@ func FuzzParsePlaylist(f *testing.F) {
 			// A well-formed media playlist must satisfy the invariants the parser
 			// promises, not merely not panic. seq is mediaSequence + index and the
 			// segments run consecutively; the consecutive check is written as
-			// seq[i] == seq[i-1]+1 (both modular) so it also holds at the uint64
-			// wraparound a hostile EXT-X-MEDIA-SEQUENCE near MaxUint64 can force.
+			// seq[i] == seq[i-1]+1 (both modular) so it stays correct arithmetic even
+			// though the parse-time EXT-X-MEDIA-SEQUENCE guard now rejects a value
+			// near MaxUint64 before any segment seq could wrap.
 			if media.targetDuration <= 0 {
 				t.Fatalf("media playlist has non-positive targetDuration %v", media.targetDuration)
 			}

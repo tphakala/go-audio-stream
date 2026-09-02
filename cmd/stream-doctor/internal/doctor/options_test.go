@@ -10,10 +10,11 @@ import (
 const testStreamURL = "rtsp://cam/stream"
 
 const (
-	durationFlag  = "--duration"
-	timeoutFlag   = "--timeout"
-	readIdleFlag  = "--read-idle"
-	transportFlag = "--transport"
+	durationFlag    = "--duration"
+	timeoutFlag     = "--timeout"
+	readIdleFlag    = "--read-idle"
+	transportFlag   = "--transport"
+	g726PackingFlag = "--g726-packing"
 )
 
 func TestParseArgsDefaults(t *testing.T) {
@@ -57,6 +58,7 @@ func TestParseArgsAllFlags(t *testing.T) {
 		"--insecure-auth",
 		"--full-stream",
 		transportFlag, transportUDP,
+		g726PackingFlag, g726PackingAAL2,
 		"--user", "u",
 		"--password", "p",
 		testStreamURL,
@@ -76,6 +78,7 @@ func TestParseArgsAllFlags(t *testing.T) {
 		InsecureAuth: true,
 		FullStream:   true,
 		Transport:    transportUDP,
+		G726Packing:  g726PackingAAL2,
 		Username:     "u",
 		Password:     "p",
 	}
@@ -199,5 +202,26 @@ func TestParseArgsTransport(t *testing.T) {
 	// An unrecognized transport is a usage error, not a silent fallback to TCP.
 	if _, err := parseArgs([]string{transportFlag, "tls", testStreamURL}); !errors.Is(err, ErrUsage) {
 		t.Errorf("parseArgs(--transport tls) error = %v, want ErrUsage", err)
+	}
+}
+
+// TestParseArgsG726Packing covers the -g726-packing flag: the accepted values
+// round-trip into Options, and an unrecognized value is a usage error rather than
+// a silent fallback to the SDP packing.
+func TestParseArgsG726Packing(t *testing.T) {
+	t.Parallel()
+	for _, want := range []string{g726PackingSDP, g726PackingRFC3551, g726PackingAAL2} {
+		opts, err := parseArgs([]string{g726PackingFlag, want, testStreamURL})
+		if err != nil {
+			t.Errorf("parseArgs(--g726-packing %s) error = %v, want nil", want, err)
+			continue
+		}
+		if opts.G726Packing != want {
+			t.Errorf("G726Packing = %q, want %q", opts.G726Packing, want)
+		}
+	}
+	// An unrecognized packing is a usage error, not a silent fallback to the SDP.
+	if _, err := parseArgs([]string{g726PackingFlag, "msb", testStreamURL}); !errors.Is(err, ErrUsage) {
+		t.Errorf("parseArgs(--g726-packing msb) error = %v, want ErrUsage", err)
 	}
 }

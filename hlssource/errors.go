@@ -66,6 +66,27 @@ var (
 	ErrSegmentTooLarge = errors.New("hlssource: segment exceeds size limit")
 )
 
+// Permanent causes and supervisor retry policy.
+//
+// ErrMalformedPlaylist, ErrUnsupportedPlaylist, ErrUnsupportedCodec and
+// ErrPlaylistTooLarge report conditions a retry cannot fix: an encrypted or
+// over-cap playlist, or non-AAC audio, is exactly as unsatisfiable on the next
+// attempt. The segment-level causes ErrMalformedSegment and ErrSegmentTooLarge
+// are deliberately not in this set: a single malformed or oversized segment can
+// be a transient origin hiccup that a reconnect and fresh playlist recover from,
+// unlike these four stream-structural causes. supervisor.DefaultRetryable does not recognize these package-typed
+// causes (its terminal set is the root sentinels context.Canceled,
+// context.DeadlineExceeded, audiostream.ErrClosed and audiostream.ErrRedirect),
+// so a Client wrapped in a supervisor under the default policy reconnects forever
+// on a permanently broken origin, one capped-backoff attempt after another,
+// rather than settling into StateFailed. A consumer that supervises this source
+// and wants a permanent failure to be terminal should supply its own supervisor
+// Config.Retryable returning false for these causes, composed with the default's
+// root sentinels. The policy is left to the consumer rather than pushed into
+// supervisor on purpose: supervisor depends only on the root audiostream package,
+// not on any concrete source, so it cannot import these sentinels without
+// inverting that dependency.
+
 // StatusError reports a non-success HTTP status. It matches errors.Is against
 // ErrBadStatus; use errors.As to recover the Code and Status.
 type StatusError struct {

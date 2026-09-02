@@ -24,8 +24,9 @@ type fakeProber struct {
 
 // setupCall records one Setup invocation for assertion.
 type setupCall struct {
-	TrackID int
-	Discard bool
+	TrackID     int
+	Discard     bool
+	G726Packing rtsp.G726PackingOverride
 }
 
 // compile-time: fakeProber implements RTSPProber (and thus the narrower
@@ -44,7 +45,7 @@ func (f *fakeProber) Describe(_ context.Context) ([]rtsp.Track, error) {
 
 func (f *fakeProber) Setup(_ context.Context, track rtsp.Track, opts rtsp.SetupOptions) error {
 	f.calls = append(f.calls, "Setup")
-	f.setups = append(f.setups, setupCall{TrackID: track.ID, Discard: opts.Discard})
+	f.setups = append(f.setups, setupCall{TrackID: track.ID, Discard: opts.Discard, G726Packing: opts.G726Packing})
 	return f.setupErr
 }
 

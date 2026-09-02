@@ -66,12 +66,23 @@ const MaxSegmentsPerPlaylist = 131072
 // declared duration, its absolute media sequence number, and the boundary flags
 // the reload state machine and the demuxer key off.
 type mediaSegment struct {
+	// The two string fields lead so the pointer-bearing prefix the GC must scan
+	// covers only these 32 bytes; the scalar and bool fields that follow hold no
+	// pointers. The fields are otherwise independent, so the order is layout, not
+	// meaning.
+
+	// uri is the segment's absolute URL, resolved against the playlist URL.
+	uri string
+	// initURI is the absolute URL of the EXT-X-MAP initialization segment in
+	// effect for this segment, or "" for a plain MPEG-TS segment. A non-empty
+	// value marks the segment as fMP4 (CMAF): the client fetches this init
+	// segment once to build the fMP4 demuxer. The map is sticky, so every segment
+	// after an EXT-X-MAP carries it until another EXT-X-MAP changes it.
+	initURI string
 	// seq is the absolute media sequence number: EXT-X-MEDIA-SEQUENCE plus the
 	// segment's index in the playlist. It identifies a segment across reloads so
 	// an already-delivered one is not fetched twice.
 	seq uint64
-	// uri is the segment's absolute URL, resolved against the playlist URL.
-	uri string
 	// duration is the EXTINF duration, used to advance the media clock across a
 	// skipped (gap) or missed segment.
 	duration time.Duration
@@ -82,12 +93,6 @@ type mediaSegment struct {
 	// and must not be fetched. The media clock advances by duration and the loss
 	// is signalled to the consumer.
 	gap bool
-	// initURI is the absolute URL of the EXT-X-MAP initialization segment in
-	// effect for this segment, or "" for a plain MPEG-TS segment. A non-empty
-	// value marks the segment as fMP4 (CMAF): the client fetches this init
-	// segment once to build the fMP4 demuxer. The map is sticky, so every segment
-	// after an EXT-X-MAP carries it until another EXT-X-MAP changes it.
-	initURI string
 }
 
 // mediaPlaylist is a parsed media playlist (a list of segments).
@@ -225,12 +230,19 @@ func (p *playlistParser) handleTag(tag, attr string) error {
 		p.media.targetDuration = time.Duration(secs) * time.Second
 		p.haveTgt = true
 	case "#EXT-X-MEDIA-SEQUENCE":
-		// A discarded ParseUint error would leave mediaSequence at MaxUint64 for an
-		// out-of-range value, wrapping segment sequence numbers and corrupting the
-		// dedup and window arithmetic across reloads. Reject it.
 		seq, err := strconv.ParseUint(strings.TrimSpace(attr), 10, 64)
 		if err != nil {
 			return fmt.Errorf("%w: bad EXT-X-MEDIA-SEQUENCE %q", ErrMalformedPlaylist, attr)
+		}
+		// ParseUint accepts any value up to MaxUint64, but each segment's absolute
+		// number is mediaSequence plus its index in the playlist (handleURI), and
+		// the index runs up to MaxSegmentsPerPlaylist-1. A mediaSequence within that
+		// distance of MaxUint64 would wrap a later segment's seq back through 0,
+		// breaking the seq-based reload dedup and window arithmetic. Reject any value
+		// too large to add the whole segment cap without wrapping; the margin is the
+		// cap because that bounds how many indices can be added.
+		if seq > math.MaxUint64-MaxSegmentsPerPlaylist {
+			return fmt.Errorf("%w: EXT-X-MEDIA-SEQUENCE %q too large (would wrap segment numbering)", ErrMalformedPlaylist, attr)
 		}
 		p.media.mediaSequence = seq
 	case "#EXT-X-DISCONTINUITY-SEQUENCE":
@@ -264,10 +276,11 @@ func (p *playlistParser) handleTag(tag, attr string) error {
 		// segment is out of scope (byte-range fetching is not implemented); a map
 		// with no URI is malformed.
 		p.isMedia = true
-		if attrValue(attr, "BYTERANGE") != "" {
+		pairs := splitAttrs(attr)
+		if lookupAttr(pairs, "BYTERANGE") != "" {
 			return fmt.Errorf("%w: EXT-X-MAP BYTERANGE is not supported", ErrUnsupportedPlaylist)
 		}
-		uri := attrValue(attr, "URI")
+		uri := lookupAttr(pairs, "URI")
 		if uri == "" {
 			return fmt.Errorf("%w: EXT-X-MAP has no URI", ErrMalformedPlaylist)
 		}
@@ -276,19 +289,21 @@ func (p *playlistParser) handleTag(tag, attr string) error {
 		return fmt.Errorf("%w: EXT-X-BYTERANGE segments are not supported", ErrUnsupportedPlaylist)
 	case "#EXT-X-STREAM-INF":
 		p.isMaster = true
-		bw, _ := strconv.Atoi(attrValue(attr, "BANDWIDTH"))
-		p.pendVariant = &variant{bandwidth: bw, audioGroup: attrValue(attr, "AUDIO")}
+		pairs := splitAttrs(attr)
+		bw, _ := strconv.Atoi(lookupAttr(pairs, "BANDWIDTH"))
+		p.pendVariant = &variant{bandwidth: bw, audioGroup: lookupAttr(pairs, "AUDIO")}
 	case "#EXT-X-MEDIA":
 		p.isMaster = true
-		if strings.EqualFold(attrValue(attr, "TYPE"), "AUDIO") {
-			uri := attrValue(attr, "URI")
+		pairs := splitAttrs(attr)
+		if strings.EqualFold(lookupAttr(pairs, "TYPE"), "AUDIO") {
+			uri := lookupAttr(pairs, "URI")
 			if uri != "" {
 				uri = resolveURI(p.base, uri)
 			}
 			p.master.audio = append(p.master.audio, rendition{
 				uri:       uri,
-				groupID:   attrValue(attr, "GROUP-ID"),
-				isDefault: strings.EqualFold(attrValue(attr, "DEFAULT"), "YES"),
+				groupID:   lookupAttr(pairs, "GROUP-ID"),
+				isDefault: strings.EqualFold(lookupAttr(pairs, "DEFAULT"), "YES"),
 			})
 		}
 	default:
@@ -387,7 +402,12 @@ func parseExtinf(attr string) (time.Duration, error) {
 }
 
 // splitLines splits an m3u8 body into lines, tolerating both LF and CRLF and a
-// leading UTF-8 BOM.
+// leading UTF-8 BOM. It splits the body string directly: strings.Split returns
+// substrings that alias the one body string rather than copying per line, so this
+// is two allocations regardless of line count. A byte-scan that stringifies each
+// line individually was measured slower and higher-allocation on every playlist
+// size (the substring aliasing is the cheaper design), so it is deliberately not
+// used here.
 func splitLines(s string) []string {
 	s = strings.TrimPrefix(s, "\ufeff")
 	s = strings.ReplaceAll(s, "\r\n", "\n")
@@ -412,7 +432,17 @@ func resolveURI(base *url.URL, ref string) string {
 // attrValue returns the value of key in an attribute list, unquoting a quoted
 // value. Keys are matched case-insensitively; a missing key yields "".
 func attrValue(attrs, key string) string {
-	for _, kv := range splitAttrs(attrs) {
+	return lookupAttr(splitAttrs(attrs), key)
+}
+
+// lookupAttr returns the value of key in a pre-split attribute list (from
+// splitAttrs), matched case-insensitively with surrounding whitespace and the
+// enclosing quotes stripped, or "" if absent. A caller reading more than one key
+// from the same tag splits once with splitAttrs and queries the result
+// repeatedly, rather than re-splitting the whole list on every lookup the way
+// attrValue does; #EXT-X-MEDIA alone read four keys per line.
+func lookupAttr(pairs []string, key string) string {
+	for _, kv := range pairs {
 		k, v, ok := strings.Cut(kv, "=")
 		if ok && strings.EqualFold(strings.TrimSpace(k), key) {
 			return strings.Trim(strings.TrimSpace(v), "\"")

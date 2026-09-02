@@ -200,6 +200,42 @@ func transportPreference(s string) (pref rtsp.TransportPreference, ok bool) {
 	}
 }
 
+// g726PackingOverride maps the -g726-packing flag value to the library's
+// G726PackingOverride. ok is false for an unrecognized value, which parseArgs
+// turns into a usage error; an empty string maps to the default (defer to the
+// SDP) so a zero Options is valid.
+func g726PackingOverride(s string) (rtsp.G726PackingOverride, bool) {
+	switch s {
+	case "", g726PackingSDP:
+		return rtsp.G726PackingFromSDP, true
+	case g726PackingRFC3551:
+		return rtsp.G726PackingForceRFC3551, true
+	case g726PackingAAL2:
+		return rtsp.G726PackingForceAAL2, true
+	default:
+		return rtsp.G726PackingFromSDP, false
+	}
+}
+
+// effectiveG726Packing resolves a validated override against the packing Describe
+// reported from the rtpmap, returning the packing the decoder will actually use.
+// It mirrors the library's own resolution (a forced value wins; the SDP default
+// and any unrecognized value defer to the SDP), so the report cannot name a
+// different packing from the one the decoder used. ok is false for an
+// unrecognized override, matching g726PackingOverride's contract.
+func effectiveG726Packing(override rtsp.G726PackingOverride, fromSDP audiostream.G726Packing) (audiostream.G726Packing, bool) {
+	switch override {
+	case rtsp.G726PackingFromSDP:
+		return fromSDP, true
+	case rtsp.G726PackingForceRFC3551:
+		return audiostream.G726PackingRFC3551, true
+	case rtsp.G726PackingForceAAL2:
+		return audiostream.G726PackingAAL2, true
+	default:
+		return fromSDP, false
+	}
+}
+
 // dialConfig builds the rtsp.Config Dial hands to rtsp.Dial: a pure mapping
 // from p.opts plus the prober's OnFrame sink, kept as its own method so the
 // -transport binding is assertable without a live dial.

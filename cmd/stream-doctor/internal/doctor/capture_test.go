@@ -67,6 +67,115 @@ func TestTransportPreference(t *testing.T) {
 	}
 }
 
+// TestG726PackingOverride covers the mapping from the -g726-packing flag value to
+// the library override: the three accepted values map through, an empty string
+// defers to the SDP, and anything else is rejected (ok false) so parseArgs turns
+// it into a usage error.
+func TestG726PackingOverride(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		in     string
+		want   rtsp.G726PackingOverride
+		wantOK bool
+	}{
+		{"", rtsp.G726PackingFromSDP, true},
+		{g726PackingSDP, rtsp.G726PackingFromSDP, true},
+		{g726PackingRFC3551, rtsp.G726PackingForceRFC3551, true},
+		{g726PackingAAL2, rtsp.G726PackingForceAAL2, true},
+		{"msb", rtsp.G726PackingFromSDP, false},
+		{"AAL2", rtsp.G726PackingFromSDP, false},
+	} {
+		got, ok := g726PackingOverride(tc.in)
+		if ok != tc.wantOK || got != tc.want {
+			t.Errorf("g726PackingOverride(%q) = (%v, %v), want (%v, %v)", tc.in, got, ok, tc.want, tc.wantOK)
+		}
+	}
+}
+
+// TestEffectiveG726Packing covers resolving a validated override against the
+// SDP-reported packing into the packing the decoder will actually use: a forced
+// value wins, the SDP default and an unrecognized value defer to the SDP, and the
+// mapping matches the library's own resolution so the report cannot name a
+// different packing from the one the decoder used.
+func TestEffectiveG726Packing(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		override rtsp.G726PackingOverride
+		fromSDP  audiostream.G726Packing
+		want     audiostream.G726Packing
+		wantOK   bool
+	}{
+		{rtsp.G726PackingFromSDP, audiostream.G726PackingRFC3551, audiostream.G726PackingRFC3551, true},
+		{rtsp.G726PackingFromSDP, audiostream.G726PackingAAL2, audiostream.G726PackingAAL2, true},
+		{rtsp.G726PackingForceRFC3551, audiostream.G726PackingAAL2, audiostream.G726PackingRFC3551, true},
+		{rtsp.G726PackingForceAAL2, audiostream.G726PackingRFC3551, audiostream.G726PackingAAL2, true},
+		{rtsp.G726PackingOverride(99), audiostream.G726PackingAAL2, audiostream.G726PackingAAL2, false},
+	} {
+		got, ok := effectiveG726Packing(tc.override, tc.fromSDP)
+		if ok != tc.wantOK || got != tc.want {
+			t.Errorf("effectiveG726Packing(%v, %v) = (%v, %v), want (%v, %v)", tc.override, tc.fromSDP, got, ok, tc.want, tc.wantOK)
+		}
+	}
+}
+
+// TestApplyEffectiveG726Packing pins the report side of the -g726-packing story:
+// after Setup applies an override to the decoder, the report must name the
+// EFFECTIVE packing (what the decoder used), not the one Describe resolved from
+// the rtpmap, across every projection of the audio track. Otherwise the report
+// would tell the operator one packing while the audio was decoded with the other,
+// which is worse than having no flag. wantEff is the packing the report must end
+// up naming; comparing rendered names avoids hard-coding the bit-rate string.
+func TestApplyEffectiveG726Packing(t *testing.T) {
+	t.Parallel()
+	mkG726 := func(p audiostream.G726Packing) audiostream.CodecG726 {
+		return audiostream.CodecG726{BitRate: audiostream.G726Rate32, Packing: p, ClockRate: 8000, Channels: 1}
+	}
+	for _, tc := range []struct {
+		name     string
+		sdp      audiostream.G726Packing
+		override rtsp.G726PackingOverride
+		wantEff  audiostream.G726Packing
+	}{
+		{"force aal2 over rfc3551 sdp", audiostream.G726PackingRFC3551, rtsp.G726PackingForceAAL2, audiostream.G726PackingAAL2},
+		{"force rfc3551 over aal2 sdp", audiostream.G726PackingAAL2, rtsp.G726PackingForceRFC3551, audiostream.G726PackingRFC3551},
+		{"sdp default keeps aal2", audiostream.G726PackingAAL2, rtsp.G726PackingFromSDP, audiostream.G726PackingAAL2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			track := rtsp.Track{ID: 0, Media: audiostream.MediaAudio, Codec: mkG726(tc.sdp), ClockRate: 8000, Channels: 1}
+			r := &runner{
+				audio:  track,
+				report: Report{AudioTrack: track, Tracks: []rtsp.Track{track}},
+			}
+			r.applyEffectiveG726Packing(tc.override)
+
+			want := codecName(mkG726(tc.wantEff))
+			if got := codecName(r.report.AudioTrack.Codec); got != want {
+				t.Errorf("report.AudioTrack codec name = %q, want %q", got, want)
+			}
+			if got := codecName(r.audio.Codec); got != want {
+				t.Errorf("r.audio codec name = %q, want %q", got, want)
+			}
+			if got := codecName(r.report.Tracks[0].Codec); got != want {
+				t.Errorf("report.Tracks[0] codec name = %q, want %q", got, want)
+			}
+		})
+	}
+}
+
+// TestApplyEffectiveG726PackingNonG726NoOp guards that the overlay never relabels
+// a non-G.726 audio track: a forced override on, say, an Opus track must leave the
+// reported codec untouched.
+func TestApplyEffectiveG726PackingNonG726NoOp(t *testing.T) {
+	t.Parallel()
+	track := rtsp.Track{ID: 0, Media: audiostream.MediaAudio, Codec: audiostream.CodecOpus{}, ClockRate: 48000, Channels: 2}
+	r := &runner{audio: track, report: Report{AudioTrack: track, Tracks: []rtsp.Track{track}}}
+	r.applyEffectiveG726Packing(rtsp.G726PackingForceAAL2)
+	if _, ok := r.report.AudioTrack.Codec.(audiostream.CodecOpus); !ok {
+		t.Errorf("AudioTrack codec = %T, want it left as CodecOpus", r.report.AudioTrack.Codec)
+	}
+}
+
 // TestRTSPProberDialConfig covers dialConfig's mapping from Options to
 // rtsp.Config, across every accepted -transport flag value: every field
 // passes through unchanged except Transport, which maps through

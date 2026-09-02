@@ -238,8 +238,13 @@ func (r *runner) selectAudio() bool {
 // one timed step.
 func (r *runner) setup() bool {
 	audio := r.audio
+	// opts.G726Packing was validated by parseArgs, so ok is always true here; the
+	// zero-value FromSDP is a safe fallback for a caller that bypassed it. The
+	// override is inert on a discarded track (a discarded track is never
+	// depacketized) but is threaded into both Setup calls for consistency.
+	override, _ := g726PackingOverride(r.opts.G726Packing)
 	elapsed, err := timed(r.now, func() error {
-		if e := r.rtsp.Setup(r.ctx, audio, rtsp.SetupOptions{}); e != nil {
+		if e := r.rtsp.Setup(r.ctx, audio, rtsp.SetupOptions{G726Packing: override}); e != nil {
 			return e
 		}
 		if !r.opts.FullStream {
@@ -250,7 +255,7 @@ func (r *runner) setup() bool {
 			if t.ID == audio.ID {
 				continue
 			}
-			if e := r.rtsp.Setup(r.ctx, t, rtsp.SetupOptions{Discard: true}); e != nil {
+			if e := r.rtsp.Setup(r.ctx, t, rtsp.SetupOptions{Discard: true, G726Packing: override}); e != nil {
 				return e
 			}
 			r.discarded++
@@ -261,8 +266,16 @@ func (r *runner) setup() bool {
 		r.failStep(stepSetup, elapsed, PhaseSetup, "setup failed", err)
 		return false
 	}
+	// The audio Setup applied the override to the decoder only; reflect the
+	// effective packing in the report so it names what the decoder used rather than
+	// the SDP packing, which would otherwise disagree once the override forces the
+	// other order.
+	r.applyEffectiveG726Packing(override)
 	r.refreshSession()
-	r.okStep(stepSetup, elapsed, setupDetail(&r.report.Session, audio, r.discarded))
+	// Report from r.audio, not the local audio snapshot taken before the overlay,
+	// so the effective G.726 packing is reflected (setupDetail reads only the ID
+	// today, but the snapshot is otherwise stale after applyEffectiveG726Packing).
+	r.okStep(stepSetup, elapsed, setupDetail(&r.report.Session, r.audio, r.discarded))
 	return true
 }
 
@@ -343,6 +356,34 @@ func (r *runner) applyLearnedCodec(learned audiostream.Codec) {
 		return
 	}
 	cur.AudioSpecificConfig = lat.AudioSpecificConfig
+	r.audio.Codec = cur
+	r.report.AudioTrack.Codec = cur
+	for i := range r.report.Tracks {
+		if r.report.Tracks[i].ID == r.audio.ID {
+			r.report.Tracks[i].Codec = cur
+			break
+		}
+	}
+}
+
+// applyEffectiveG726Packing overlays the packing the decoder will actually use
+// onto the audio track's reported codec, so the report names the effective
+// packing rather than the one Describe resolved from the rtpmap. It mirrors
+// applyLearnedCodec: rtsp.Setup applies SetupOptions.G726Packing to the decoder
+// only and leaves Track.Codec reporting the SDP packing, so without this overlay
+// the report and the decoder would disagree the moment -g726-packing forces the
+// other order. It is a no-op unless the audio codec is CodecG726 and the override
+// resolves to a packing different from the one Describe reported.
+func (r *runner) applyEffectiveG726Packing(override rtsp.G726PackingOverride) {
+	cur, ok := r.audio.Codec.(audiostream.CodecG726)
+	if !ok {
+		return
+	}
+	eff, ok := effectiveG726Packing(override, cur.Packing)
+	if !ok || eff == cur.Packing {
+		return
+	}
+	cur.Packing = eff
 	r.audio.Codec = cur
 	r.report.AudioTrack.Codec = cur
 	for i := range r.report.Tracks {

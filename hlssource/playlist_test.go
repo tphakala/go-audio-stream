@@ -3,7 +3,9 @@ package hlssource
 import (
 	"errors"
 	"fmt"
+	"math"
 	"net/url"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -237,6 +239,37 @@ func TestParseRejectsOutOfRangeSequence(t *testing.T) {
 		if _, _, err := parsePlaylist([]byte(body), mustURL(t, "https://h/x.m3u8")); !errors.Is(err, ErrMalformedPlaylist) {
 			t.Errorf("out-of-range %s = %v, want ErrMalformedPlaylist", tag, err)
 		}
+	}
+}
+
+// TestParseMediaSequenceWrapGuard covers the valid-but-maximal
+// EXT-X-MEDIA-SEQUENCE that ParseUint accepts, unlike the out-of-range value in
+// TestParseRejectsOutOfRangeSequence which fails to parse. math.MaxUint64 parses
+// fine, but seq = mediaSequence + segment index would then wrap past MaxUint64 on
+// a later segment and break the seq-based reload dedup. The parser rejects any
+// mediaSequence too large to add the whole segment cap without wrapping; a value
+// with room for the cap must still parse.
+func TestParseMediaSequenceWrapGuard(t *testing.T) {
+	segCap := uint64(MaxSegmentsPerPlaylist)
+	for _, tc := range []struct {
+		name    string
+		seq     string
+		wantErr bool
+	}{
+		{"maxuint64 wraps", strconv.FormatUint(math.MaxUint64, 10), true},
+		{"one below max still within margin", strconv.FormatUint(math.MaxUint64-1, 10), true},
+		{"largest safe value parses", strconv.FormatUint(math.MaxUint64-segCap, 10), false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			body := "#EXTM3U\n#EXT-X-TARGETDURATION:6\n#EXT-X-MEDIA-SEQUENCE:" + tc.seq + "\n#EXTINF:6,\na.ts\n"
+			_, _, err := parsePlaylist([]byte(body), mustURL(t, "https://h/x.m3u8"))
+			switch {
+			case tc.wantErr && !errors.Is(err, ErrMalformedPlaylist):
+				t.Errorf("MEDIA-SEQUENCE %s = %v, want ErrMalformedPlaylist", tc.seq, err)
+			case !tc.wantErr && err != nil:
+				t.Errorf("MEDIA-SEQUENCE %s = %v, want nil (value has room for the segment cap)", tc.seq, err)
+			}
+		})
 	}
 }
 
