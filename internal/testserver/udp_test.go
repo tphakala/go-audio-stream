@@ -2,6 +2,7 @@ package testserver
 
 import (
 	"bytes"
+	"fmt"
 	"net"
 	"net/http"
 	"strings"
@@ -77,7 +78,9 @@ func bindFakeClientUDPPair(t *testing.T) (rtpConn, rtcpConn *net.UDPConn) {
 func clientPort(conn *net.UDPConn) int {
 	addr, ok := conn.LocalAddr().(*net.UDPAddr)
 	if !ok {
-		return 0
+		// LocalAddr on a *net.UDPConn is always *net.UDPAddr; fail loudly if
+		// that ever changes rather than returning a misleading port 0.
+		panic(fmt.Sprintf("clientPort: LocalAddr is %T, want *net.UDPAddr", conn.LocalAddr()))
 	}
 	return addr.Port
 }
