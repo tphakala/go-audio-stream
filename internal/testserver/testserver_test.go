@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/http"
 	"net/url"
 	"strings"
 	"testing"
@@ -46,7 +47,7 @@ type testClient struct {
 // dialPlain connects a raw TCP client to a non-TLS server.
 func dialPlain(t *testing.T, s *Server, path string) *testClient {
 	t.Helper()
-	conn, err := net.Dial("tcp", hostPort(t, s.URL(path)))
+	conn, err := (&net.Dialer{}).DialContext(t.Context(), "tcp", hostPort(t, s.URL(path)))
 	if err != nil {
 		t.Fatalf("dial: %v", err)
 	}
@@ -62,11 +63,11 @@ func dialTLS(t *testing.T, s *Server, path string) *testClient {
 	if !pool.AppendCertsFromPEM(s.CertPEM()) {
 		t.Fatal("AppendCertsFromPEM: no cert added")
 	}
-	conn, err := tls.Dial("tcp", hostPort(t, s.URL(path)), &tls.Config{
+	conn, err := (&tls.Dialer{Config: &tls.Config{
 		RootCAs:    pool,
 		ServerName: "127.0.0.1",
 		MinVersion: tls.VersionTLS12,
-	})
+	}}).DialContext(t.Context(), "tcp", hostPort(t, s.URL(path)))
 	if err != nil {
 		t.Fatalf("tls dial: %v", err)
 	}
@@ -188,7 +189,7 @@ func (c *testClient) readInterleaved() (rtsp.InterleavedFrame, error) {
 			if err != nil {
 				return rtsp.InterleavedFrame{}, err
 			}
-			payload := append([]byte(nil), f.Payload...)
+			payload := bytes.Clone(f.Payload)
 			c.off += n
 			return rtsp.InterleavedFrame{Channel: f.Channel, Payload: payload}, nil
 		case rtsp.FrameNeedMore:
@@ -244,7 +245,7 @@ func clientOptionsDescribe(t *testing.T, c *testClient, base string) {
 	if err != nil {
 		t.Fatalf("read OPTIONS response: %v", err)
 	}
-	if resp.StatusCode != 200 || resp.CSeq != optCSeq {
+	if resp.StatusCode != http.StatusOK || resp.CSeq != optCSeq {
 		t.Fatalf("OPTIONS: got %d cseq %d, want 200 cseq %d", resp.StatusCode, resp.CSeq, optCSeq)
 	}
 
@@ -253,7 +254,7 @@ func clientOptionsDescribe(t *testing.T, c *testClient, base string) {
 	if err != nil {
 		t.Fatalf("read DESCRIBE response: %v", err)
 	}
-	if resp.StatusCode != 200 {
+	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("DESCRIBE: got %d, want 200", resp.StatusCode)
 	}
 }
@@ -268,7 +269,7 @@ func clientHandshake(t *testing.T, c *testClient, base string, nTracks int) []Ch
 	var err error
 
 	pairs := make([]ChannelPair, 0, nTracks)
-	for i := 0; i < nTracks; i++ {
+	for i := range nTracks {
 		h := rtsp.Header{}
 		h.Set("Transport", rtsp.BuildTransport(2*i, 2*i+1))
 		c.send("SETUP", base, h, nil)
@@ -276,7 +277,7 @@ func clientHandshake(t *testing.T, c *testClient, base string, nTracks int) []Ch
 		if err != nil {
 			t.Fatalf("read SETUP response: %v", err)
 		}
-		if resp.StatusCode != 200 {
+		if resp.StatusCode != http.StatusOK {
 			t.Fatalf("SETUP %d: got %d, want 200", i, resp.StatusCode)
 		}
 		tr, err := rtsp.ParseTransport(resp.Header.Get("Transport"))
@@ -296,7 +297,7 @@ func clientHandshake(t *testing.T, c *testClient, base string, nTracks int) []Ch
 	if err != nil {
 		t.Fatalf("read PLAY response: %v", err)
 	}
-	if resp.StatusCode != 200 {
+	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("PLAY: got %d, want 200", resp.StatusCode)
 	}
 	return pairs
@@ -324,7 +325,7 @@ func TestServerRespondsToRequest(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read response: %v", err)
 	}
-	if resp.StatusCode != 200 {
+	if resp.StatusCode != http.StatusOK {
 		t.Errorf("status: got %d, want 200", resp.StatusCode)
 	}
 	if resp.CSeq != cseq {
@@ -429,7 +430,7 @@ func TestServerSendServerRequestRoundTrip(t *testing.T) {
 	if got.resp == nil {
 		t.Fatal("ReadResponse returned nil response")
 	}
-	if got.resp.StatusCode != 200 {
+	if got.resp.StatusCode != http.StatusOK {
 		t.Errorf("status: got %d, want 200", got.resp.StatusCode)
 	}
 	if got.resp.CSeq != got.cseq {
@@ -528,7 +529,7 @@ func TestServerTLS(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read response: %v", err)
 	}
-	if resp.StatusCode != 200 || resp.CSeq != cseq {
+	if resp.StatusCode != http.StatusOK || resp.CSeq != cseq {
 		t.Errorf("got %d cseq %d, want 200 cseq %d", resp.StatusCode, resp.CSeq, cseq)
 	}
 }

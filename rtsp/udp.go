@@ -55,7 +55,7 @@ type mediaSockets struct {
 // SETUP returns.
 func openMediaSockets() (*mediaSockets, error) {
 	var lastErr error
-	for attempt := 0; attempt < maxSocketBindRetries; attempt++ {
+	for range maxSocketBindRetries {
 		rtpConn, err := net.ListenUDP("udp", nil)
 		if err != nil {
 			lastErr = err
@@ -152,7 +152,7 @@ func (m *mediaSockets) endpoint(trackID int) UDPEndpoint {
 // cannot punch, must not fail Setup over it. It is called after
 // resolveServerPeers and before Play.
 func (m *mediaSockets) holePunch(rr []byte, logger *slog.Logger) {
-	for i := 0; i < natPunchCount; i++ {
+	for range natPunchCount {
 		if _, err := m.rtpConn.WriteToUDP(nil, m.rtpPeer); err != nil {
 			logWarn(logger, "UDP hole punch: RTP datagram failed", "error", err)
 		}

@@ -2,7 +2,6 @@ package hlssource
 
 import (
 	"bytes"
-	"context"
 	"errors"
 	"net/http"
 	"testing"
@@ -38,7 +37,7 @@ func TestFMP4VODDeliversAllSamplesThenEnds(t *testing.T) {
 	h := &hlsServer{segments: segs, playlist: func(int) (string, int) { return body, http.StatusOK }}
 	srv := h.start(t)
 	col := &collector{}
-	c, err := Open(context.Background(), Config{URL: srv.URL + "/vod.m3u8", OnFrame: col.onFrame})
+	c, err := Open(t.Context(), Config{URL: srv.URL + "/vod.m3u8", OnFrame: col.onFrame})
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
@@ -50,7 +49,7 @@ func TestFMP4VODDeliversAllSamplesThenEnds(t *testing.T) {
 	if !bytes.Equal(aac.AudioSpecificConfig, wantASC) {
 		t.Errorf("ASC = %x, want %x", aac.AudioSpecificConfig, wantASC)
 	}
-	if err := c.Wait(context.Background()); !errors.Is(err, ErrStreamEnded) {
+	if err := c.Wait(t.Context()); !errors.Is(err, ErrStreamEnded) {
 		t.Fatalf("Wait = %v, want ErrStreamEnded", err)
 	}
 	if col.count() != len(wantAUs) {
@@ -99,11 +98,11 @@ func TestFMP4LiveReloadDeliversNewSegments(t *testing.T) {
 	}
 	srv := h.start(t)
 	col := &collector{}
-	c, err := Open(context.Background(), Config{URL: srv.URL + "/live.m3u8", OnFrame: col.onFrame})
+	c, err := Open(t.Context(), Config{URL: srv.URL + "/live.m3u8", OnFrame: col.onFrame})
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
-	if err := c.Wait(context.Background()); !errors.Is(err, ErrStreamEnded) {
+	if err := c.Wait(t.Context()); !errors.Is(err, ErrStreamEnded) {
 		t.Fatalf("Wait = %v, want ErrStreamEnded", err)
 	}
 	if want := len(s0) + len(s1); col.count() != want {
@@ -128,11 +127,11 @@ func TestFMP4MasterSelectsMediaPlaylist(t *testing.T) {
 	}
 	srv := h.start(t)
 	col := &collector{}
-	c, err := Open(context.Background(), Config{URL: srv.URL + "/master.m3u8", OnFrame: col.onFrame})
+	c, err := Open(t.Context(), Config{URL: srv.URL + "/master.m3u8", OnFrame: col.onFrame})
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
-	if err := c.Wait(context.Background()); !errors.Is(err, ErrStreamEnded) {
+	if err := c.Wait(t.Context()); !errors.Is(err, ErrStreamEnded) {
 		t.Fatalf("Wait = %v, want ErrStreamEnded", err)
 	}
 	if col.count() != len(s0) {
@@ -154,11 +153,11 @@ func TestFMP4MultiplexedFragmentPicksAudio(t *testing.T) {
 	h := &hlsServer{segments: segs, playlist: func(int) (string, int) { return body, http.StatusOK }}
 	srv := h.start(t)
 	col := &collector{}
-	c, err := Open(context.Background(), Config{URL: srv.URL + "/vod.m3u8", OnFrame: col.onFrame})
+	c, err := Open(t.Context(), Config{URL: srv.URL + "/vod.m3u8", OnFrame: col.onFrame})
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
-	if err := c.Wait(context.Background()); !errors.Is(err, ErrStreamEnded) {
+	if err := c.Wait(t.Context()); !errors.Is(err, ErrStreamEnded) {
 		t.Fatalf("Wait = %v, want ErrStreamEnded", err)
 	}
 	if col.count() != len(audio) {

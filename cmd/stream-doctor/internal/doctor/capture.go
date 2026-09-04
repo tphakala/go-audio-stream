@@ -1,8 +1,10 @@
 package doctor
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -105,7 +107,7 @@ func (s *frameSink) onFrame(f audiostream.Frame) {
 	// slip in past the cap and leave a discontiguous gap in the capture.
 	if !s.truncated && len(s.frames) < s.maxFrames && s.bytes+len(f.Data) <= s.maxBytes {
 		s.frames = append(s.frames, CapturedFrame{
-			Data:       append([]byte(nil), f.Data...),
+			Data:       bytes.Clone(f.Data),
 			RTPTime:    f.RTPTime,
 			PTS:        f.PTS,
 			ReceivedAt: f.ReceivedAt,
@@ -131,7 +133,7 @@ func (s *frameSink) count() int {
 func (s *frameSink) snapshot() (frames []CapturedFrame, truncated bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	frames = append([]CapturedFrame(nil), s.frames...)
+	frames = slices.Clone(s.frames)
 	truncated = s.truncated
 	return frames, truncated
 }
@@ -367,8 +369,8 @@ func (p *rtspProber) onCodecUpdate(u audiostream.CodecUpdate) {
 	// later reader. append([]byte(nil), nil...) stays nil, so this preserves an
 	// absent StreamMuxConfig.
 	if lat, ok := codec.(audiostream.CodecMP4ALATM); ok {
-		lat.AudioSpecificConfig = append([]byte(nil), lat.AudioSpecificConfig...)
-		lat.StreamMuxConfig = append([]byte(nil), lat.StreamMuxConfig...)
+		lat.AudioSpecificConfig = bytes.Clone(lat.AudioSpecificConfig)
+		lat.StreamMuxConfig = bytes.Clone(lat.StreamMuxConfig)
 		codec = lat
 	}
 	p.codecMu.Lock()

@@ -41,7 +41,7 @@ func TestResyncRecoversFromGarbage(t *testing.T) {
 		drainRequests(sc)
 	}})
 
-	ctx := context.Background()
+	ctx := t.Context()
 	c, err := rtsp.Dial(ctx, rtsp.Config{URL: s.URL("/stream"), Timeout: testTimeout})
 	if err != nil {
 		t.Fatalf("Dial: %v", err)
@@ -77,7 +77,7 @@ func TestResyncBudgetIsBoundedDespiteInterleavedLatch(t *testing.T) {
 		drainRequests(sc)
 	}})
 
-	ctx := context.Background()
+	ctx := t.Context()
 	c, err := rtsp.Dial(ctx, rtsp.Config{URL: s.URL("/stream"), Timeout: testTimeout})
 	if err != nil {
 		t.Fatalf("Dial: %v", err)
@@ -118,7 +118,7 @@ func TestMidStreamServerOptions(t *testing.T) {
 		drainRequests(sc)
 	}})
 
-	ctx := context.Background()
+	ctx := t.Context()
 	c, err := rtsp.Dial(ctx, rtsp.Config{URL: s.URL("/stream"), Timeout: testTimeout})
 	if err != nil {
 		t.Fatalf("Dial: %v", err)
@@ -151,7 +151,7 @@ func TestUnknownCSeqResponseDropped(t *testing.T) {
 		drainRequests(sc)
 	}})
 
-	ctx := context.Background()
+	ctx := t.Context()
 	c, err := rtsp.Dial(ctx, rtsp.Config{URL: s.URL("/stream"), Timeout: testTimeout})
 	if err != nil {
 		t.Fatalf("Dial: %v", err)
@@ -174,7 +174,7 @@ func TestReadIdleWatchdogDisabledPrePlay(t *testing.T) {
 		drainRequests(sc)
 	}})
 
-	ctx := context.Background()
+	ctx := t.Context()
 	c, err := rtsp.Dial(ctx, rtsp.Config{URL: s.URL("/stream"), Timeout: testTimeout, ReadIdle: 50 * time.Millisecond})
 	if err != nil {
 		t.Fatalf("Dial: %v", err)
@@ -225,7 +225,7 @@ func TestDialSucceedsWhenResponseAndTeardownShareASegment(t *testing.T) {
 			drainRequests(sc)
 		}})
 
-		ctx := context.Background()
+		ctx := t.Context()
 		c, err := rtsp.Dial(ctx, rtsp.Config{URL: s.URL("/stream"), Timeout: testTimeout})
 		if err != nil {
 			t.Fatalf("iteration %d: Dial = %v, want success (the server answered 200)", i, err)
@@ -255,7 +255,7 @@ func TestBlockedWriteShutdownIsPrompt(t *testing.T) {
 			}
 		}
 	}})
-	c, err := rtsp.Dial(context.Background(), rtsp.Config{
+	c, err := rtsp.Dial(t.Context(), rtsp.Config{
 		URL: s.URL("/stream"),
 		// A large Timeout is the whole point: if the deadlineMu/shuttingDown
 		// write gate failed, a blocked write would park teardown for this long.
@@ -272,7 +272,7 @@ func TestBlockedWriteShutdownIsPrompt(t *testing.T) {
 
 	start := time.Now()
 	_ = c.Close()
-	waitErr := c.Wait(context.Background())
+	waitErr := c.Wait(t.Context())
 	elapsed := time.Since(start)
 	if !errors.Is(waitErr, audiostream.ErrClosed) {
 		t.Errorf("Wait = %v, want ErrClosed", waitErr)

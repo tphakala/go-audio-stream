@@ -52,8 +52,7 @@ func ParseURL(raw string) (*url.URL, error) {
 	}
 	u, err := url.Parse(raw)
 	if err != nil {
-		var uerr *url.Error
-		if errors.As(err, &uerr) {
+		if uerr, ok := errors.AsType[*url.Error](err); ok {
 			return nil, fmt.Errorf("malformed URL: %w", uerr.Err)
 		}
 		return nil, errors.New("malformed URL")

@@ -2,7 +2,9 @@ package testserver
 
 import (
 	"bytes"
+	"fmt"
 	"net"
+	"net/http"
 	"strings"
 	"sync"
 	"testing"
@@ -48,7 +50,11 @@ func bindFakeClientUDPPair(t *testing.T) (rtpConn, rtcpConn *net.UDPConn) {
 		if err != nil {
 			t.Fatalf("ListenUDP client RTP: %v", err)
 		}
-		rtpPort := rtp.LocalAddr().(*net.UDPAddr).Port
+		rtpAddr, ok := rtp.LocalAddr().(*net.UDPAddr)
+		if !ok {
+			t.Fatalf("RTP LocalAddr is %T, want *net.UDPAddr", rtp.LocalAddr())
+		}
+		rtpPort := rtpAddr.Port
 		rtcp, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: rtpPort + 1})
 		if err != nil {
 			// P+1 is already bound (or out of range at the top of the ephemeral
@@ -70,7 +76,13 @@ func bindFakeClientUDPPair(t *testing.T) (rtpConn, rtcpConn *net.UDPConn) {
 
 // clientPort returns conn's bound local UDP port.
 func clientPort(conn *net.UDPConn) int {
-	return conn.LocalAddr().(*net.UDPAddr).Port
+	addr, ok := conn.LocalAddr().(*net.UDPAddr)
+	if !ok {
+		// LocalAddr on a *net.UDPConn is always *net.UDPAddr; fail loudly if
+		// that ever changes rather than returning a misleading port 0.
+		panic(fmt.Sprintf("clientPort: LocalAddr is %T, want *net.UDPAddr", conn.LocalAddr()))
+	}
+	return addr.Port
 }
 
 // readUDPWithDeadline reads one datagram off conn within timeout, failing
@@ -134,7 +146,7 @@ func TestServerHandshakeUDP(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read SETUP response: %v", err)
 	}
-	if resp.StatusCode != 200 {
+	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("SETUP: got %d, want 200", resp.StatusCode)
 	}
 	th, terr := rtsp.ParseTransport(resp.Header.Get("Transport"))
@@ -156,7 +168,7 @@ func TestServerHandshakeUDP(t *testing.T) {
 
 	c.send("PLAY", base, nil, nil)
 	resp, err = c.readResponse()
-	if err != nil || resp.StatusCode != 200 {
+	if err != nil || resp.StatusCode != http.StatusOK {
 		t.Fatalf("PLAY: resp=%+v err=%v", resp, err)
 	}
 
@@ -260,7 +272,7 @@ func TestServerHandshakeUDPRejects(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read fallback SETUP response: %v", err)
 	}
-	if resp.StatusCode != 200 {
+	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("fallback SETUP: got %d, want 200", resp.StatusCode)
 	}
 	tr, terr := rtsp.ParseTransport(resp.Header.Get("Transport"))
@@ -270,7 +282,7 @@ func TestServerHandshakeUDPRejects(t *testing.T) {
 
 	c.send("PLAY", base, nil, nil)
 	resp, err = c.readResponse()
-	if err != nil || resp.StatusCode != 200 {
+	if err != nil || resp.StatusCode != http.StatusOK {
 		t.Fatalf("PLAY: resp=%+v err=%v", resp, err)
 	}
 
@@ -323,7 +335,7 @@ func TestServerHandshakeUDPNonProposalFallsThrough(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read SETUP response: %v", err)
 	}
-	if resp.StatusCode != 200 {
+	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("SETUP: got %d, want 200", resp.StatusCode)
 	}
 	tr, terr := rtsp.ParseTransport(resp.Header.Get("Transport"))
@@ -333,7 +345,7 @@ func TestServerHandshakeUDPNonProposalFallsThrough(t *testing.T) {
 
 	c.send("PLAY", base, nil, nil)
 	resp, err = c.readResponse()
-	if err != nil || resp.StatusCode != 200 {
+	if err != nil || resp.StatusCode != http.StatusOK {
 		t.Fatalf("PLAY: resp=%+v err=%v", resp, err)
 	}
 

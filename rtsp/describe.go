@@ -1,6 +1,7 @@
 package rtsp
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -244,6 +245,6 @@ func resolveLATMASC(codec audiostream.Codec, logger *slog.Logger) (audiostream.C
 		logWarn(logger, "latm out-of-band StreamMuxConfig invalid; AudioSpecificConfig unavailable at Describe", "error", err)
 		return codec, nil, true
 	}
-	lc.AudioSpecificConfig = append([]byte(nil), dp.AudioSpecificConfig()...)
+	lc.AudioSpecificConfig = bytes.Clone(dp.AudioSpecificConfig())
 	return lc, dp, true
 }

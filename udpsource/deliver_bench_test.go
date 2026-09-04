@@ -100,7 +100,7 @@ func BenchmarkDeliverRTP(b *testing.B) {
 	for _, tc := range deliverBenchCases(b) {
 		b.Run(tc.name, func(b *testing.B) {
 			b.ReportAllocs()
-			for i := 0; i < b.N; i++ {
+			for b.Loop() {
 				tc.c.deliverRTP(tc.pkt, tc.up, now)
 			}
 		})

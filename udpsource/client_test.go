@@ -80,7 +80,7 @@ func openOK(t *testing.T, cfg Config) *Client {
 	if cfg.ListenAddr == "" {
 		cfg.ListenAddr = loopbackAddr
 	}
-	c, err := Open(context.Background(), cfg)
+	c, err := Open(t.Context(), cfg)
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
@@ -142,7 +142,7 @@ func waitCount(t *testing.T, col *collector, n int, within time.Duration) {
 func waitResult(t *testing.T, c *Client, within time.Duration) error {
 	t.Helper()
 	done := make(chan error, 1)
-	go func() { done <- c.Wait(context.Background()) }()
+	go func() { done <- c.Wait(t.Context()) }()
 	select {
 	case err := <-done:
 		return err
@@ -463,7 +463,7 @@ func TestWaitContextCancel(t *testing.T) {
 		Mode: ModeRTP, PayloadType: 111, Codec: audiostream.CodecOpus{}, ClockRate: 48000,
 	})
 	defer func() { _ = c.Close() }()
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
 	if err := c.Wait(ctx); !errors.Is(err, context.Canceled) {
 		t.Fatalf("Wait = %v, want context.Canceled", err)
@@ -503,7 +503,7 @@ func TestOpenInvalidConfig(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			_, err := Open(context.Background(), tc.cfg)
+			_, err := Open(t.Context(), tc.cfg)
 			if !errors.Is(err, tc.want) {
 				t.Fatalf("Open = %v, want %v", err, tc.want)
 			}
@@ -650,7 +650,7 @@ func TestOpenErrBind(t *testing.T) {
 	})
 	defer func() { _ = c.Close() }()
 	addr := strings.TrimPrefix(c.Info().URL, "udp://")
-	_, err := Open(context.Background(), Config{
+	_, err := Open(t.Context(), Config{
 		ListenAddr: addr, Mode: ModeRTP, PayloadType: 111, Codec: audiostream.CodecOpus{}, ClockRate: 48000,
 	})
 	if !errors.Is(err, ErrBind) {

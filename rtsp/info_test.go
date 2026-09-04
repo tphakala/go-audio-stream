@@ -1,7 +1,6 @@
 package rtsp_test
 
 import (
-	"context"
 	"strings"
 	"testing"
 
@@ -23,7 +22,7 @@ func TestInfo(t *testing.T) {
 	wantURL := s.URL("/stream")
 	withCreds := strings.Replace(wantURL, "rtsp://", "rtsp://user:pass@", 1)
 
-	c, err := rtsp.Dial(context.Background(), rtsp.Config{URL: withCreds, Timeout: testTimeout})
+	c, err := rtsp.Dial(t.Context(), rtsp.Config{URL: withCreds, Timeout: testTimeout})
 	if err != nil {
 		t.Fatalf("Dial: %v", err)
 	}
@@ -60,7 +59,7 @@ func TestInfoStableAcrossDescribe(t *testing.T) {
 	c := dialIdle(t, s.URL("/stream"))
 	defer closeAndWait(t, c)
 
-	if _, err := c.Describe(context.Background()); err != nil {
+	if _, err := c.Describe(t.Context()); err != nil {
 		t.Fatalf("Describe: %v", err)
 	}
 

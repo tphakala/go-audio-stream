@@ -238,14 +238,14 @@ func (d *Decoder) Decode(dst, payload []byte) (int, error) {
 	// dispatch it replaces was not the cost worth avoiding.
 	pos := 0
 	if d.msbFirst {
-		for k := 0; k < nsamp; k++ {
+		for k := range nsamp {
 			code := readCodewordMSB(payload, pos, d.rt.bits)
 			pos += d.rt.bits
 			binary.LittleEndian.PutUint16(dst[2*k:], uint16(d.decodeSample(code)))
 		}
 		return need, nil
 	}
-	for k := 0; k < nsamp; k++ {
+	for k := range nsamp {
 		code := readCodewordLSB(payload, pos, d.rt.bits)
 		pos += d.rt.bits
 		binary.LittleEndian.PutUint16(dst[2*k:], uint16(d.decodeSample(code)))
@@ -300,7 +300,7 @@ func (d *Decoder) OutputLen(payload []byte) int {
 // and octet bit 0 is transmitted before octet bit 7.
 func readCodewordLSB(payload []byte, pos, width int) int32 {
 	var v int32
-	for i := 0; i < width; i++ {
+	for i := range width {
 		g := pos + i
 		bit := (payload[g>>3] >> uint(g&7)) & 1
 		v |= int32(bit) << uint(i)
@@ -317,7 +317,7 @@ func readCodewordLSB(payload []byte, pos, width int) int32 {
 // packed either way yields the same codewords through the matching reader.
 func readCodewordMSB(payload []byte, pos, width int) int32 {
 	var v int32
-	for i := 0; i < width; i++ {
+	for i := range width {
 		g := pos + i
 		bit := (payload[g>>3] >> uint(7-(g&7))) & 1
 		v = v<<1 | int32(bit)
@@ -369,7 +369,7 @@ func (d *Decoder) decodeSample(code int32) int16 {
 		d.a[0] += 64*3*pk0*d.pk[0] - (d.a[0] >> 8)
 		lim := 15360 - d.a[1]
 		d.a[0] = clip(d.a[0], -lim, lim)
-		for i := 0; i < 6; i++ {
+		for i := range 6 {
 			d.b[i] += 128*dq0*sgn(-d.dq[i].sign) - (d.b[i] >> 8)
 		}
 	}
@@ -417,11 +417,11 @@ func (d *Decoder) decodeSample(code int32) int16 {
 
 	// Predictor estimate for the next sample.
 	d.se = 0
-	for i := 0; i < 6; i++ {
+	for i := range 6 {
 		d.se += mult(i2f(d.b[i]>>2), d.dq[i])
 	}
 	d.sez = d.se >> 1
-	for i := 0; i < 2; i++ {
+	for i := range 2 {
 		d.se += mult(i2f(d.a[i]>>2), d.sr[i])
 	}
 	d.se >>= 1

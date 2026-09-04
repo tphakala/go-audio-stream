@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -239,7 +240,7 @@ func (c *Client) openHandshake(ctx context.Context) error {
 		return err
 	}
 	if derr := d.demux(body, false, func(au []byte, dur time.Duration) {
-		c.pending = append(c.pending, pendingAU{data: append([]byte(nil), au...), dur: dur})
+		c.pending = append(c.pending, pendingAU{data: bytes.Clone(au), dur: dur})
 	}); derr != nil {
 		return derr
 	}
@@ -254,8 +255,8 @@ func (c *Client) openHandshake(ctx context.Context) error {
 	// configuration. c.asc is the change-comparison snapshot; its copy is
 	// defensive at the segmentDemuxer boundary rather than against any current
 	// implementation, since neither demuxer mutates its ASC after resolving it.
-	c.codec = audiostream.CodecAAC{AudioSpecificConfig: append([]byte(nil), asc...)}
-	c.asc = append([]byte(nil), asc...)
+	c.codec = audiostream.CodecAAC{AudioSpecificConfig: bytes.Clone(asc)}
+	c.asc = bytes.Clone(asc)
 	c.demux = d
 	c.initURI = seg.initURI
 	c.media = media
@@ -806,14 +807,14 @@ func (c *Client) reinitFMP4(initURI string) error {
 	// each new config into the one it is about to promote. Dropping rtsp's
 	// snapshot there silences real mid-stream config changes; see the comment on
 	// that block before applying this one by analogy.
-	c.asc = append([]byte(nil), asc...)
+	c.asc = bytes.Clone(asc)
 	if c.cfg.Logger != nil {
 		c.cfg.Logger.Info("hlssource: initialization segment changed; audio configuration updated",
-			"url", c.url, "asc", fmt.Sprintf("%x", asc))
+			"url", c.url, "asc", hex.EncodeToString(asc))
 	}
 	c.cfg.OnCodecUpdate(audiostream.CodecUpdate{
 		TrackID: 0,
-		Codec:   audiostream.CodecAAC{AudioSpecificConfig: append([]byte(nil), asc...)},
+		Codec:   audiostream.CodecAAC{AudioSpecificConfig: bytes.Clone(asc)},
 	})
 	return nil
 }

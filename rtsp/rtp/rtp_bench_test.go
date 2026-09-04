@@ -29,7 +29,7 @@ func BenchmarkParsePacket(b *testing.B) {
 		b.ReportAllocs()
 		b.SetBytes(int64(len(pkt)))
 		b.ResetTimer()
-		for i := 0; i < b.N; i++ {
+		for b.Loop() {
 			if _, err := rtp.ParsePacket(pkt); err != nil {
 				b.Fatal(err)
 			}
@@ -43,7 +43,7 @@ func BenchmarkParsePacket(b *testing.B) {
 		b.ReportAllocs()
 		b.SetBytes(int64(len(pkt)))
 		b.ResetTimer()
-		for i := 0; i < b.N; i++ {
+		for b.Loop() {
 			if _, err := rtp.ParsePacket(pkt); err != nil {
 				b.Fatal(err)
 			}
@@ -61,7 +61,7 @@ func BenchmarkStreamObserve(b *testing.B) {
 
 	b.ReportAllocs()
 	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		h.SequenceNumber++
 		h.Timestamp += 160
 		s.Observe(h)
@@ -75,7 +75,7 @@ func BenchmarkParseCompound(b *testing.B) {
 	b.ReportAllocs()
 	b.SetBytes(int64(len(srBytes)))
 	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		if _, err := rtp.ParseCompound(srBytes); err != nil {
 			b.Fatal(err)
 		}
@@ -104,7 +104,7 @@ func BenchmarkReceiverReportMarshal(b *testing.B) {
 	b.ReportAllocs()
 	b.SetBytes(int64(len(out)))
 	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		_ = rr.Marshal()
 	}
 }

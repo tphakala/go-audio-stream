@@ -2,7 +2,6 @@ package rtsp_test
 
 import (
 	"bytes"
-	"context"
 	"strings"
 	"testing"
 
@@ -39,16 +38,16 @@ var latmV2Payload = []byte{0x03, 0xAA, 0xBB, 0xCC}
 func latmDeliverClient(t *testing.T, url string, pref rtsp.TransportPreference) (client *rtsp.Client, events chan latmEvent) {
 	t.Helper()
 	events = make(chan latmEvent, 16)
-	c, err := rtsp.Dial(context.Background(), rtsp.Config{
+	c, err := rtsp.Dial(t.Context(), rtsp.Config{
 		URL:       url,
 		Timeout:   testTimeout,
 		Transport: pref,
 		OnFrame: func(f audiostream.Frame) {
-			events <- latmEvent{kind: eventFrame, data: append([]byte(nil), f.Data...), seqGap: f.SeqGap}
+			events <- latmEvent{kind: eventFrame, data: bytes.Clone(f.Data), seqGap: f.SeqGap}
 		},
 		OnCodecUpdate: func(u audiostream.CodecUpdate) {
 			latm, _ := u.Codec.(audiostream.CodecMP4ALATM)
-			events <- latmEvent{kind: eventUpdate, data: append([]byte(nil), latm.AudioSpecificConfig...)}
+			events <- latmEvent{kind: eventUpdate, data: bytes.Clone(latm.AudioSpecificConfig)}
 		},
 	})
 	if err != nil {
@@ -241,7 +240,7 @@ func assertOutOfBandLATMWarnsOnce(t *testing.T, sdp string) {
 		drainRequests(sc)
 	}})
 
-	c, err := rtsp.Dial(context.Background(), rtsp.Config{
+	c, err := rtsp.Dial(t.Context(), rtsp.Config{
 		URL:     s.URL("/stream"),
 		Timeout: testTimeout,
 		Logger:  logger,

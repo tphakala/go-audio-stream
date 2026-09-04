@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"maps"
 	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -149,7 +150,7 @@ func (ff *fakeFactory) callCount() int { return int(ff.calls.Load()) }
 func (ff *fakeFactory) sources() []*fakeSource {
 	ff.mu.Lock()
 	defer ff.mu.Unlock()
-	return append([]*fakeSource(nil), ff.made...)
+	return slices.Clone(ff.made)
 }
 
 // fakeClock drives time deterministically. In auto mode (the default) sleep
@@ -208,7 +209,7 @@ func (c *fakeClock) rand() float64 {
 func (c *fakeClock) durations() []time.Duration {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return append([]time.Duration(nil), c.slept...)
+	return slices.Clone(c.slept)
 }
 
 // stateRecorder collects every StateChange delivered to OnState under a lock,
@@ -238,7 +239,7 @@ func (r *stateRecorder) states() []State {
 func (r *stateRecorder) snapshot() []StateChange {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return append([]StateChange(nil), r.changes...)
+	return slices.Clone(r.changes)
 }
 
 // --- test helpers ---
@@ -248,7 +249,7 @@ func (r *stateRecorder) snapshot() []StateChange {
 func mustWait(t *testing.T, s *Supervisor, want error) {
 	t.Helper()
 	done := make(chan error, 1)
-	go func() { done <- s.Wait(context.Background()) }()
+	go func() { done <- s.Wait(t.Context()) }()
 	select {
 	case err := <-done:
 		if want != nil && !errors.Is(err, want) {
@@ -293,7 +294,11 @@ func TestSupervisorImplementsSource(t *testing.T) {
 	if err := s.Close(); err != nil {
 		t.Errorf("Close = %v, want nil", err)
 	}
-	mustWait(t, s.(*Supervisor), audiostream.ErrClosed)
+	sup, ok := s.(*Supervisor)
+	if !ok {
+		t.Fatalf("s is %T, want *Supervisor", s)
+	}
+	mustWait(t, sup, audiostream.ErrClosed)
 }
 
 // TestNewNilFactoryPanics confirms a nil Factory is rejected loudly at
@@ -336,13 +341,13 @@ func TestDefaultRetryable(t *testing.T) {
 // the context cancels before the duration elapses.
 func TestRealClockSleepCancel(t *testing.T) {
 	t.Parallel()
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
 	if err := (realClock{}).sleep(ctx, time.Hour); !errors.Is(err, context.Canceled) {
 		t.Errorf("sleep on cancelled ctx = %v, want context.Canceled", err)
 	}
 	// A completed short sleep returns nil.
-	if err := (realClock{}).sleep(context.Background(), time.Millisecond); err != nil {
+	if err := (realClock{}).sleep(t.Context(), time.Millisecond); err != nil {
 		t.Errorf("completed sleep = %v, want nil", err)
 	}
 }
@@ -487,7 +492,7 @@ func TestWaitContextCancel(t *testing.T) {
 	s := newWithClock(Config{Factory: ff.make}, clk)
 	awaitClose(t, src.entered, "session live")
 
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
 	go func() {
 		time.Sleep(10 * time.Millisecond)
 		cancel()
@@ -695,7 +700,7 @@ func TestFactoryPanicBecomesFailed(t *testing.T) {
 	s := newWithClock(Config{Factory: factory}, clk)
 
 	done := make(chan error, 1)
-	go func() { done <- s.Wait(context.Background()) }()
+	go func() { done <- s.Wait(t.Context()) }()
 	select {
 	case err := <-done:
 		if err == nil {
@@ -727,7 +732,7 @@ func TestLiveSourcePanicClosesSource(t *testing.T) {
 	// The run goroutine must reach a terminal failure and Wait must unblock with
 	// a non-nil cause (mustWait fails on a hang, proving no goroutine leak).
 	done := make(chan error, 1)
-	go func() { done <- s.Wait(context.Background()) }()
+	go func() { done <- s.Wait(t.Context()) }()
 	select {
 	case err := <-done:
 		if err == nil {
@@ -850,7 +855,7 @@ func TestLoggerBranchesExercised(t *testing.T) {
 	// The recovered live-source panic ends the run at StateFailed; Wait must
 	// unblock with a non-nil cause.
 	done := make(chan error, 1)
-	go func() { done <- s.Wait(context.Background()) }()
+	go func() { done <- s.Wait(t.Context()) }()
 	select {
 	case err := <-done:
 		if err == nil {
@@ -902,7 +907,7 @@ func TestNoGoroutineLeak(t *testing.T) {
 	// Allow the supervising goroutine to unwind; poll rather than sleep a fixed
 	// amount so a fast machine does not wait needlessly.
 	settled := false
-	for i := 0; i < 100; i++ {
+	for range 100 {
 		if runtime.NumGoroutine() <= base+1 {
 			settled = true
 			break
@@ -935,10 +940,8 @@ func TestConcurrentAccessorsDuringReconnect(t *testing.T) {
 
 	stop := make(chan struct{})
 	var wg sync.WaitGroup
-	for i := 0; i < 8; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+	for range 8 {
+		wg.Go(func() {
 			for {
 				select {
 				case <-stop:
@@ -949,7 +952,7 @@ func TestConcurrentAccessorsDuringReconnect(t *testing.T) {
 				_ = s.Info()
 				_ = s.State()
 			}
-		}()
+		})
 	}
 
 	time.Sleep(50 * time.Millisecond)

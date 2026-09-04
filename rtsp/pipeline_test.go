@@ -1295,7 +1295,7 @@ func TestDiscardTrackDropsAllocationFree(t *testing.T) {
 // delivery callback, honoring the Frame.Data ownership contract.
 func copyFrame(f *audiostream.Frame) audiostream.Frame {
 	cp := *f
-	cp.Data = append([]byte(nil), f.Data...)
+	cp.Data = bytes.Clone(f.Data)
 	return cp
 }
 

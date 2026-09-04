@@ -2,7 +2,6 @@ package rtsp_test
 
 import (
 	"bytes"
-	"context"
 	"errors"
 	"strconv"
 	"strings"
@@ -136,7 +135,7 @@ func closeAndWait(t *testing.T, c *rtsp.Client) {
 	t.Helper()
 	_ = c.Close() // documented to always return nil
 	done := make(chan error, 1)
-	go func() { done <- c.Wait(context.Background()) }()
+	go func() { done <- c.Wait(t.Context()) }()
 	select {
 	case err := <-done:
 		if err != nil && !errors.Is(err, audiostream.ErrClosed) {
@@ -160,7 +159,7 @@ func keepaliveHeader() rtsp.Header {
 // dialIdle dials the server and returns a client in the idle state.
 func dialIdle(t *testing.T, url string) *rtsp.Client {
 	t.Helper()
-	c, err := rtsp.Dial(context.Background(), rtsp.Config{URL: url, Timeout: testTimeout})
+	c, err := rtsp.Dial(t.Context(), rtsp.Config{URL: url, Timeout: testTimeout})
 	if err != nil {
 		t.Fatalf("Dial: %v", err)
 	}
@@ -183,7 +182,7 @@ func TestDescribeWrongContentType(t *testing.T) {
 			}})
 			c := dialIdle(t, s.URL("/stream"))
 			defer closeAndWait(t, c)
-			if _, err := c.Describe(context.Background()); !errors.Is(err, rtsp.ErrNotSDP) {
+			if _, err := c.Describe(t.Context()); !errors.Is(err, rtsp.ErrNotSDP) {
 				t.Errorf("Describe with Content-Type %q = %v, want ErrNotSDP", ct, err)
 			}
 		})
@@ -200,7 +199,7 @@ func TestDescribeHappyPath(t *testing.T) {
 	c := dialIdle(t, s.URL("/stream"))
 	defer closeAndWait(t, c)
 
-	tracks, err := c.Describe(context.Background())
+	tracks, err := c.Describe(t.Context())
 	if err != nil {
 		t.Fatalf("Describe: %v", err)
 	}
@@ -246,7 +245,7 @@ func TestDescribeMultiTrack(t *testing.T) {
 	c := dialIdle(t, s.URL("/stream"))
 	defer closeAndWait(t, c)
 
-	tracks, err := c.Describe(context.Background())
+	tracks, err := c.Describe(t.Context())
 	if err != nil {
 		t.Fatalf("Describe: %v", err)
 	}
@@ -288,7 +287,7 @@ func TestDescribeContentTypeCharset(t *testing.T) {
 	c := dialIdle(t, s.URL("/stream"))
 	defer closeAndWait(t, c)
 
-	tracks, err := c.Describe(context.Background())
+	tracks, err := c.Describe(t.Context())
 	if err != nil {
 		t.Fatalf("Describe with charset Content-Type: %v", err)
 	}
@@ -308,7 +307,7 @@ func TestDescribeNotSDP(t *testing.T) {
 	c := dialIdle(t, s.URL("/stream"))
 	defer closeAndWait(t, c)
 
-	_, err := c.Describe(context.Background())
+	_, err := c.Describe(t.Context())
 	if !errors.Is(err, rtsp.ErrNotSDP) {
 		t.Fatalf("Describe = %v, want ErrNotSDP", err)
 	}
@@ -327,7 +326,7 @@ func TestDescribeRedirect(t *testing.T) {
 	c := dialIdle(t, s.URL("/stream"))
 	defer closeAndWait(t, c)
 
-	_, err := c.Describe(context.Background())
+	_, err := c.Describe(t.Context())
 	var re *audiostream.RedirectError
 	if !errors.As(err, &re) {
 		t.Fatalf("Describe = %v, want *audiostream.RedirectError", err)
@@ -347,12 +346,11 @@ func TestDescribeTwiceRejected(t *testing.T) {
 	c := dialIdle(t, s.URL("/stream"))
 	defer closeAndWait(t, c)
 
-	if _, err := c.Describe(context.Background()); err != nil {
+	if _, err := c.Describe(t.Context()); err != nil {
 		t.Fatalf("first Describe: %v", err)
 	}
-	_, err := c.Describe(context.Background())
-	var se *rtsp.StateError
-	if !errors.As(err, &se) {
+	_, err := c.Describe(t.Context())
+	if _, ok := errors.AsType[*rtsp.StateError](err); !ok {
 		t.Fatalf("second Describe = %v, want *StateError", err)
 	}
 	if !errors.Is(err, rtsp.ErrInvalidState) {
@@ -408,11 +406,11 @@ func TestControlURLVariants(t *testing.T) {
 
 			c := dialIdle(t, s.URL("/stream"))
 			defer closeAndWait(t, c)
-			tracks, err := c.Describe(context.Background())
+			tracks, err := c.Describe(t.Context())
 			if err != nil {
 				t.Fatalf("Describe: %v", err)
 			}
-			if err := c.Setup(context.Background(), tracks[0], rtsp.SetupOptions{}); err != nil {
+			if err := c.Setup(t.Context(), tracks[0], rtsp.SetupOptions{}); err != nil {
 				t.Fatalf("Setup: %v", err)
 			}
 			if got := <-gotCh; got != want {

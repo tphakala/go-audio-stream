@@ -1,7 +1,6 @@
 package doctor
 
 import (
-	"context"
 	"io"
 	"strings"
 	"testing"
@@ -155,7 +154,7 @@ func TestRunHappyPathWalkthrough(t *testing.T) {
 	opts := Options{URL: testTargetURL, Duration: 10 * time.Second}
 
 	var out, errOut strings.Builder
-	res, err := Run(context.Background(), opts, f, &out, &errOut, testEnv(), happyClock())
+	res, err := Run(t.Context(), opts, f, &out, &errOut, testEnv(), happyClock())
 	if err != nil {
 		t.Fatalf("Run() error = %v, want nil", err)
 	}
@@ -180,7 +179,7 @@ func TestRunNoAudioTrack(t *testing.T) {
 	opts := Options{URL: testTargetURL, Duration: 10 * time.Second}
 
 	var out strings.Builder
-	res, err := Run(context.Background(), opts, f, &out, io.Discard, testEnv(), fixedClock(5*time.Millisecond))
+	res, err := Run(t.Context(), opts, f, &out, io.Discard, testEnv(), fixedClock(5*time.Millisecond))
 	if err != nil {
 		t.Fatalf("Run() error = %v, want nil", err)
 	}
@@ -204,7 +203,7 @@ func TestRunDescribeAuthFails(t *testing.T) {
 	opts := Options{URL: testTargetURL, Duration: 10 * time.Second, Report: true}
 
 	var out strings.Builder
-	res, err := Run(context.Background(), opts, f, &out, io.Discard, testEnv(), fixedClock(5*time.Millisecond))
+	res, err := Run(t.Context(), opts, f, &out, io.Discard, testEnv(), fixedClock(5*time.Millisecond))
 	if err == nil {
 		t.Fatal("Run() error = nil, want auth error")
 	}
@@ -239,7 +238,7 @@ func TestRunCaptureSilent(t *testing.T) {
 	opts := Options{URL: testTargetURL, Duration: 10 * time.Second}
 
 	var out strings.Builder
-	res, err := Run(context.Background(), opts, f, &out, io.Discard, testEnv(), fixedClock(5*time.Millisecond))
+	res, err := Run(t.Context(), opts, f, &out, io.Discard, testEnv(), fixedClock(5*time.Millisecond))
 	if err != nil {
 		t.Fatalf("Run() error = %v, want nil", err)
 	}
@@ -275,7 +274,7 @@ func TestRunUnsupportedCodec(t *testing.T) {
 	opts := Options{URL: testTargetURL, Duration: 10 * time.Second}
 
 	var out strings.Builder
-	res, err := Run(context.Background(), opts, f, &out, io.Discard, testEnv(), fixedClock(5*time.Millisecond))
+	res, err := Run(t.Context(), opts, f, &out, io.Discard, testEnv(), fixedClock(5*time.Millisecond))
 	if err != nil {
 		t.Fatalf("Run() error = %v, want nil", err)
 	}
@@ -304,7 +303,7 @@ func TestRunSetupAudioOnly(t *testing.T) {
 	}
 	opts := Options{URL: testTargetURL, Duration: 10 * time.Second, FullStream: false}
 
-	res, err := Run(context.Background(), opts, f, io.Discard, io.Discard, testEnv(), fixedClock(5*time.Millisecond))
+	res, err := Run(t.Context(), opts, f, io.Discard, io.Discard, testEnv(), fixedClock(5*time.Millisecond))
 	if err != nil {
 		t.Fatalf("Run() error = %v, want nil", err)
 	}
@@ -337,7 +336,7 @@ func TestRunThreadsG726Packing(t *testing.T) {
 	opts := Options{URL: testTargetURL, Duration: 10 * time.Second, FullStream: true, G726Packing: g726PackingAAL2}
 
 	var out strings.Builder
-	res, err := Run(context.Background(), opts, f, &out, io.Discard, testEnv(), fixedClock(5*time.Millisecond))
+	res, err := Run(t.Context(), opts, f, &out, io.Discard, testEnv(), fixedClock(5*time.Millisecond))
 	if err != nil {
 		t.Fatalf("Run() error = %v, want nil", err)
 	}
@@ -373,7 +372,7 @@ func TestRunSetupFullStream(t *testing.T) {
 	opts := Options{URL: testTargetURL, Duration: 10 * time.Second, FullStream: true}
 
 	var out strings.Builder
-	res, err := Run(context.Background(), opts, f, &out, io.Discard, testEnv(), fixedClock(5*time.Millisecond))
+	res, err := Run(t.Context(), opts, f, &out, io.Discard, testEnv(), fixedClock(5*time.Millisecond))
 	if err != nil {
 		t.Fatalf("Run() error = %v, want nil", err)
 	}
@@ -405,7 +404,7 @@ func TestRunSetupFullStreamTwoNonAudio(t *testing.T) {
 	opts := Options{URL: testTargetURL, Duration: 10 * time.Second, FullStream: true}
 
 	var out strings.Builder
-	_, err := Run(context.Background(), opts, f, &out, io.Discard, testEnv(), fixedClock(5*time.Millisecond))
+	_, err := Run(t.Context(), opts, f, &out, io.Discard, testEnv(), fixedClock(5*time.Millisecond))
 	if err != nil {
 		t.Fatalf("Run() error = %v, want nil", err)
 	}

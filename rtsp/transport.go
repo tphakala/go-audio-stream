@@ -275,7 +275,7 @@ func ParseSession(value string) SessionHeader {
 // tokens it advertises (uppercased, in order). It never panics.
 func ParsePublic(value string) []string {
 	var methods []string
-	for _, tok := range strings.Split(value, ",") {
+	for tok := range strings.SplitSeq(value, ",") {
 		tok = strings.ToUpper(strings.TrimSpace(tok))
 		if tok == "" {
 			continue

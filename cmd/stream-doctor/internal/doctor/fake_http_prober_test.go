@@ -77,7 +77,7 @@ func TestRunUnsupportedProberKind(t *testing.T) {
 	opts := Options{URL: "rtsp://cam/stream", Duration: time.Second}
 
 	var out strings.Builder
-	res, err := Run(context.Background(), opts, bareProber{}, &out, io.Discard, testEnv(), fixedClock(time.Millisecond))
+	res, err := Run(t.Context(), opts, bareProber{}, &out, io.Discard, testEnv(), fixedClock(time.Millisecond))
 	if err == nil {
 		t.Fatal("Run() error = nil, want a usage error for a bare prober")
 	}
@@ -139,7 +139,7 @@ func TestRunHTTPDispatchAndOpen(t *testing.T) {
 	opts := Options{URL: testHTTPURL, Duration: 10 * time.Second}
 
 	var out strings.Builder
-	res, err := Run(context.Background(), opts, f, &out, io.Discard, testEnv(), fixedClock(5*time.Millisecond))
+	res, err := Run(t.Context(), opts, f, &out, io.Discard, testEnv(), fixedClock(5*time.Millisecond))
 	if err != nil {
 		t.Fatalf("Run() error = %v, want nil", err)
 	}
@@ -199,7 +199,7 @@ func TestRunHTTPReportSession(t *testing.T) {
 	opts := Options{URL: "http://user:pass@mic.local/stream.wav", Duration: 10 * time.Second, Report: true}
 
 	var out, errOut strings.Builder
-	if _, err := Run(context.Background(), opts, f, &out, &errOut, testEnv(), fixedClock(5*time.Millisecond)); err != nil {
+	if _, err := Run(t.Context(), opts, f, &out, &errOut, testEnv(), fixedClock(5*time.Millisecond)); err != nil {
 		t.Fatalf("Run() error = %v, want nil", err)
 	}
 	got := out.String()
@@ -250,7 +250,7 @@ func TestRunHTTPOpenFailures(t *testing.T) {
 			opts := Options{URL: testHTTPURL, Duration: 10 * time.Second, Report: true}
 
 			var out, errOut strings.Builder
-			res, err := Run(context.Background(), opts, f, &out, &errOut, testEnv(), fixedClock(5*time.Millisecond))
+			res, err := Run(t.Context(), opts, f, &out, &errOut, testEnv(), fixedClock(5*time.Millisecond))
 			if err == nil {
 				t.Fatal("Run() error = nil, want the open error")
 			}

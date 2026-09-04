@@ -2,7 +2,6 @@ package rtsp_test
 
 import (
 	"bytes"
-	"context"
 	"errors"
 	"strings"
 	"testing"
@@ -64,11 +63,11 @@ func dialTransport(t *testing.T, url string, pref rtsp.TransportPreference, fram
 	if frames != nil {
 		cfg.OnFrame = func(f audiostream.Frame) {
 			cp := f
-			cp.Data = append([]byte(nil), f.Data...)
+			cp.Data = bytes.Clone(f.Data)
 			frames <- cp
 		}
 	}
-	c, err := rtsp.Dial(context.Background(), cfg)
+	c, err := rtsp.Dial(t.Context(), cfg)
 	if err != nil {
 		t.Fatalf("Dial: %v", err)
 	}
@@ -122,14 +121,14 @@ func TestFallbackPreferUDPThenTCPFallsBackOn461(t *testing.T) {
 	c := dialTransport(t, s.URL("/stream"), rtsp.PreferUDPThenTCP, frames)
 	defer closeAndWait(t, c)
 
-	tracks, err := c.Describe(context.Background())
+	tracks, err := c.Describe(t.Context())
 	if err != nil {
 		t.Fatalf("Describe: %v", err)
 	}
-	if err := c.Setup(context.Background(), tracks[0], rtsp.SetupOptions{}); err != nil {
+	if err := c.Setup(t.Context(), tracks[0], rtsp.SetupOptions{}); err != nil {
 		t.Fatalf("Setup: %v", err)
 	}
-	if err := c.Play(context.Background()); err != nil {
+	if err := c.Play(t.Context()); err != nil {
 		t.Fatalf("Play: %v", err)
 	}
 
@@ -194,11 +193,11 @@ func TestFallback2xxUnusableServerPortDoesNotFallBack(t *testing.T) {
 			c := dialTransport(t, s.URL("/stream"), pref.pref, nil)
 			defer closeAndWait(t, c)
 
-			tracks, err := c.Describe(context.Background())
+			tracks, err := c.Describe(t.Context())
 			if err != nil {
 				t.Fatalf("Describe: %v", err)
 			}
-			serr := c.Setup(context.Background(), tracks[0], rtsp.SetupOptions{})
+			serr := c.Setup(t.Context(), tracks[0], rtsp.SetupOptions{})
 			if !errors.Is(serr, rtsp.ErrUDPSetupRejected) {
 				t.Fatalf("Setup = %v, want ErrUDPSetupRejected", serr)
 			}
@@ -241,11 +240,11 @@ func TestFallbackPreferUDPNoFallbackOn461(t *testing.T) {
 
 	c := dialTransport(t, s.URL("/stream"), rtsp.PreferUDP, nil)
 
-	tracks, err := c.Describe(context.Background())
+	tracks, err := c.Describe(t.Context())
 	if err != nil {
 		t.Fatalf("Describe: %v", err)
 	}
-	serr := c.Setup(context.Background(), tracks[0], rtsp.SetupOptions{})
+	serr := c.Setup(t.Context(), tracks[0], rtsp.SetupOptions{})
 	if !errors.Is(serr, rtsp.ErrUDPSetupRejected) {
 		t.Fatalf("Setup = %v, want ErrUDPSetupRejected", serr)
 	}
@@ -286,14 +285,14 @@ func TestFallbackPreferTCPIgnoresUDP(t *testing.T) {
 	c := dialTransport(t, s.URL("/stream"), rtsp.PreferTCP, nil)
 	defer closeAndWait(t, c)
 
-	tracks, err := c.Describe(context.Background())
+	tracks, err := c.Describe(t.Context())
 	if err != nil {
 		t.Fatalf("Describe: %v", err)
 	}
-	if err := c.Setup(context.Background(), tracks[0], rtsp.SetupOptions{}); err != nil {
+	if err := c.Setup(t.Context(), tracks[0], rtsp.SetupOptions{}); err != nil {
 		t.Fatalf("Setup: %v", err)
 	}
-	if err := c.Play(context.Background()); err != nil {
+	if err := c.Play(t.Context()); err != nil {
 		t.Fatalf("Play: %v", err)
 	}
 	if got := c.SessionInfo().Transport; got != wantTransportTCP {
@@ -349,7 +348,7 @@ func TestFallbackSessionWidePin(t *testing.T) {
 	c := dialTransport(t, s.URL("/stream"), rtsp.PreferUDPThenTCP, nil)
 	defer closeAndWait(t, c)
 
-	tracks, err := c.Describe(context.Background())
+	tracks, err := c.Describe(t.Context())
 	if err != nil {
 		t.Fatalf("Describe: %v", err)
 	}
@@ -357,11 +356,11 @@ func TestFallbackSessionWidePin(t *testing.T) {
 		t.Fatalf("track count = %d, want 2", len(tracks))
 	}
 	for i, tr := range tracks {
-		if err := c.Setup(context.Background(), tr, rtsp.SetupOptions{}); err != nil {
+		if err := c.Setup(t.Context(), tr, rtsp.SetupOptions{}); err != nil {
 			t.Fatalf("Setup track %d: %v", i, err)
 		}
 	}
-	if err := c.Play(context.Background()); err != nil {
+	if err := c.Play(t.Context()); err != nil {
 		t.Fatalf("Play: %v", err)
 	}
 

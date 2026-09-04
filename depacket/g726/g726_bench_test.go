@@ -39,7 +39,7 @@ func BenchmarkDecodeDst(b *testing.B) {
 				dst := make([]byte, 2*(len(payload)*8/rc.bits))
 				b.ReportAllocs()
 				b.ResetTimer()
-				for i := 0; i < b.N; i++ {
+				for b.Loop() {
 					if _, err := d.Decode(dst, payload); err != nil {
 						b.Fatalf("Decode: %v", err)
 					}
@@ -57,7 +57,7 @@ func BenchmarkDecodeAlloc(b *testing.B) {
 	payload := benchPayload(160)
 	b.ReportAllocs()
 	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		if _, err := d.DecodeAlloc(payload); err != nil {
 			b.Fatalf("DecodeAlloc: %v", err)
 		}

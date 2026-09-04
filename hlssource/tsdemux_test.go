@@ -3,6 +3,7 @@ package hlssource
 import (
 	"bytes"
 	"errors"
+	"slices"
 	"testing"
 	"time"
 )
@@ -12,7 +13,7 @@ func collectAUs(t *testing.T, d *tsDemux, seg []byte, discontinuity bool) [][]by
 	t.Helper()
 	var got [][]byte
 	if err := d.demux(seg, discontinuity, func(au []byte, _ time.Duration) {
-		got = append(got, append([]byte(nil), au...))
+		got = append(got, bytes.Clone(au))
 	}); err != nil {
 		t.Fatalf("demux: %v", err)
 	}
@@ -25,7 +26,7 @@ func TestTSDemuxDeliversAccessUnitsAndASC(t *testing.T) {
 	d := newTSDemux()
 	got := collectAUs(t, d, seg, false)
 	d.end(func(au []byte, _ time.Duration) {
-		got = append(got, append([]byte(nil), au...))
+		got = append(got, bytes.Clone(au))
 	})
 	if len(got) != len(aus) {
 		t.Fatalf("delivered %d AUs, want %d", len(got), len(aus))
@@ -70,7 +71,7 @@ func TestTSDemuxSplitAcrossSegments(t *testing.T) {
 	d := newTSDemux()
 	got := collectAUs(t, d, full[:half], false)
 	got = append(got, collectAUs(t, d, full[half:], false)...)
-	d.end(func(au []byte, _ time.Duration) { got = append(got, append([]byte(nil), au...)) })
+	d.end(func(au []byte, _ time.Duration) { got = append(got, bytes.Clone(au)) })
 	if len(got) != len(aus) {
 		t.Fatalf("delivered %d AUs across the split, want %d", len(got), len(aus))
 	}
@@ -88,7 +89,7 @@ func TestTSDemuxAdaptationFieldSkipped(t *testing.T) {
 	seg := buildTSSegment(stream, 0x1000, 0x0100)
 	d := newTSDemux()
 	got := collectAUs(t, d, seg, false)
-	d.end(func(au []byte, _ time.Duration) { got = append(got, append([]byte(nil), au...)) })
+	d.end(func(au []byte, _ time.Duration) { got = append(got, bytes.Clone(au)) })
 	if len(got) != len(aus) {
 		t.Fatalf("delivered %d AUs, want %d", len(got), len(aus))
 	}
@@ -100,7 +101,7 @@ func TestTSDemuxResyncsPastLeadingGarbage(t *testing.T) {
 	garbled := append([]byte{0x00, 0x11, 0x22, 0x47, 0x99}, seg...)
 	d := newTSDemux()
 	got := collectAUs(t, d, garbled, false)
-	d.end(func(au []byte, _ time.Duration) { got = append(got, append([]byte(nil), au...)) })
+	d.end(func(au []byte, _ time.Duration) { got = append(got, bytes.Clone(au)) })
 	if len(got) != len(aus) {
 		t.Fatalf("delivered %d AUs after leading garbage, want %d", len(got), len(aus))
 	}
@@ -159,7 +160,7 @@ func TestTSDemuxPMTSpansPackets(t *testing.T) {
 	seg = append(seg, tsPESPackets(0x0100, buildPES(stream))...)
 	d := newTSDemux()
 	got := collectAUs(t, d, seg, false)
-	d.end(func(au []byte, _ time.Duration) { got = append(got, append([]byte(nil), au...)) })
+	d.end(func(au []byte, _ time.Duration) { got = append(got, bytes.Clone(au)) })
 	if len(got) != len(aus) {
 		t.Fatalf("delivered %d AUs with a multi-packet PMT, want %d", len(got), len(aus))
 	}
@@ -181,7 +182,7 @@ func TestTSDemuxPESHeaderSpansPackets(t *testing.T) {
 	seg = append(seg, tsPESPackets(0x0100, pes)...)
 	d := newTSDemux()
 	got := collectAUs(t, d, seg, false)
-	d.end(func(au []byte, _ time.Duration) { got = append(got, append([]byte(nil), au...)) })
+	d.end(func(au []byte, _ time.Duration) { got = append(got, bytes.Clone(au)) })
 	if len(got) != len(aus) {
 		t.Fatalf("delivered %d AUs with a spanning PES header, want %d", len(got), len(aus))
 	}
@@ -241,8 +242,8 @@ func TestTSDemuxDiscontinuityResetsAndFlushes(t *testing.T) {
 	d := newTSDemux()
 	got := collectAUs(t, d, seg1, false)
 	got = append(got, collectAUs(t, d, seg2, true)...) // discontinuity before seg2
-	d.end(func(au []byte, _ time.Duration) { got = append(got, append([]byte(nil), au...)) })
-	want := append(append([][]byte{}, au1...), au2...)
+	d.end(func(au []byte, _ time.Duration) { got = append(got, bytes.Clone(au)) })
+	want := append(slices.Clone(au1), au2...)
 	if len(got) != len(want) {
 		t.Fatalf("delivered %d AUs across a discontinuity, want %d", len(got), len(want))
 	}
@@ -297,7 +298,7 @@ func TestTSDemuxContinuityCounterGapCountsLoss(t *testing.T) {
 	clean := tsSegmentCC(stream, 0x1000, 0x0100, -1, -1)
 	dc := newTSDemux()
 	gotClean := collectAUs(t, dc, clean, false)
-	dc.end(func(au []byte, _ time.Duration) { gotClean = append(gotClean, append([]byte(nil), au...)) })
+	dc.end(func(au []byte, _ time.Duration) { gotClean = append(gotClean, bytes.Clone(au)) })
 	if len(gotClean) != len(aus) {
 		t.Fatalf("clean segment delivered %d AUs, want %d", len(gotClean), len(aus))
 	}
@@ -308,7 +309,7 @@ func TestTSDemuxContinuityCounterGapCountsLoss(t *testing.T) {
 	gapped := tsSegmentCC(stream, 0x1000, 0x0100, 2, -1)
 	dg := newTSDemux()
 	gotGapped := collectAUs(t, dg, gapped, false)
-	dg.end(func(au []byte, _ time.Duration) { gotGapped = append(gotGapped, append([]byte(nil), au...)) })
+	dg.end(func(au []byte, _ time.Duration) { gotGapped = append(gotGapped, bytes.Clone(au)) })
 	if len(gotGapped) == 0 {
 		t.Fatal("gapped segment delivered no AUs; the framer should resync and keep delivering")
 	}
@@ -354,14 +355,14 @@ func TestTSDemuxDuplicateContinuityCounterIsDropped(t *testing.T) {
 
 	dc := newTSDemux()
 	cleanAUs := collectAUs(t, dc, assemble(-1), false)
-	dc.end(func(au []byte, _ time.Duration) { cleanAUs = append(cleanAUs, append([]byte(nil), au...)) })
+	dc.end(func(au []byte, _ time.Duration) { cleanAUs = append(cleanAUs, bytes.Clone(au)) })
 	if dc.gapCount() != 0 {
 		t.Fatalf("clean segment gapCount = %d, want 0", dc.gapCount())
 	}
 
 	dd := newTSDemux()
 	dupAUs := collectAUs(t, dd, assemble(2), false)
-	dd.end(func(au []byte, _ time.Duration) { dupAUs = append(dupAUs, append([]byte(nil), au...)) })
+	dd.end(func(au []byte, _ time.Duration) { dupAUs = append(dupAUs, bytes.Clone(au)) })
 	if dd.gapCount() != 0 {
 		t.Errorf("duplicate-packet segment gapCount = %d, want 0 (a duplicate is not a loss)", dd.gapCount())
 	}

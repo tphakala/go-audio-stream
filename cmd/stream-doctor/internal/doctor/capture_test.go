@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"slices"
 	"testing"
 	"time"
 
@@ -25,7 +26,7 @@ func TestCollectCompleted(t *testing.T) {
 	}
 	fp := &fakeProber{result: want}
 
-	got, err := fp.Collect(context.Background(), rtsp.Track{}, time.Second)
+	got, err := fp.Collect(t.Context(), rtsp.Track{}, time.Second)
 	if err != nil {
 		t.Fatalf("Collect() error = %v, want nil", err)
 	}
@@ -306,7 +307,7 @@ func TestRTSPProberOnFrameCopies(t *testing.T) {
 	data[0] = 99 // mutate the caller's buffer after delivery
 
 	p.sink.mu.Lock()
-	got := append([]CapturedFrame(nil), p.sink.frames...)
+	got := slices.Clone(p.sink.frames)
 	p.sink.mu.Unlock()
 
 	if len(got) != 1 {
@@ -413,7 +414,7 @@ func TestClassifyEndReason(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			ctx := context.Background()
+			ctx := t.Context()
 			if tt.cancel {
 				var cancel context.CancelFunc
 				ctx, cancel = context.WithCancel(ctx)
@@ -435,7 +436,7 @@ func TestClassifyEndReasonParentContext(t *testing.T) {
 	t.Parallel()
 	expiredDeadline := func(t *testing.T) context.Context {
 		t.Helper()
-		ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Hour))
+		ctx, cancel := context.WithDeadline(t.Context(), time.Now().Add(-time.Hour))
 		t.Cleanup(cancel)
 		return ctx
 	}
@@ -448,7 +449,7 @@ func TestClassifyEndReasonParentContext(t *testing.T) {
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			t.Parallel()
-			cancelled, cancel := context.WithCancel(context.Background())
+			cancelled, cancel := context.WithCancel(t.Context())
 			cancel()
 			if got := c.classify(cancelled, context.Canceled, false, 10); got != EndCancelled {
 				t.Errorf("parent cancel = %v, want EndCancelled", got)

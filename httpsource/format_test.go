@@ -2,7 +2,6 @@ package httpsource
 
 import (
 	"bytes"
-	"context"
 	"errors"
 	"net/http/httptest"
 	"testing"
@@ -110,7 +109,7 @@ func TestFormatPrecedence(t *testing.T) {
 	t.Run("raw without a resolvable rate fails Open", func(t *testing.T) {
 		srv := httptest.NewServer(serveStatic("audio/pcm", pcmMono(100)))
 		defer srv.Close()
-		if _, err := Open(context.Background(), Config{URL: srv.URL}); !errors.Is(err, ErrFormatUnknown) {
+		if _, err := Open(t.Context(), Config{URL: srv.URL}); !errors.Is(err, ErrFormatUnknown) {
 			t.Fatalf("Open = %v, want ErrFormatUnknown", err)
 		}
 	})
@@ -121,7 +120,7 @@ func TestFormatPrecedence(t *testing.T) {
 		// bytes as PCM.
 		for _, ct := range []string{"audio/ogg", "audio/flac"} {
 			srv := httptest.NewServer(serveStatic(ct, []byte{0x00, 0x01, 0x02}))
-			if _, err := Open(context.Background(), Config{URL: srv.URL}); !errors.Is(err, ErrUnsupportedFormat) {
+			if _, err := Open(t.Context(), Config{URL: srv.URL}); !errors.Is(err, ErrUnsupportedFormat) {
 				t.Errorf("Open(%s) = %v, want ErrUnsupportedFormat", ct, err)
 			}
 			srv.Close()
@@ -142,7 +141,7 @@ func TestFormatSniffedRF64BW64Rejected(t *testing.T) {
 				body = append(body, make([]byte, 32)...) // enough for Peek(12)
 				srv := httptest.NewServer(serveStatic(ct, body))
 				defer srv.Close()
-				_, err := Open(context.Background(), Config{URL: srv.URL, Format: PCMFormat{SampleRate: 8000, Channels: 1}})
+				_, err := Open(t.Context(), Config{URL: srv.URL, Format: PCMFormat{SampleRate: 8000, Channels: 1}})
 				if !errors.Is(err, ErrUnsupportedFormat) {
 					t.Fatalf("Open = %v, want ErrUnsupportedFormat", err)
 				}
@@ -170,7 +169,7 @@ func TestFormatShortBodySniffFallthrough(t *testing.T) {
 	t.Run("short body without Config.Format fails cleanly", func(t *testing.T) {
 		srv := httptest.NewServer(serveStatic("application/octet-stream", []byte{0x01, 0x02}))
 		defer srv.Close()
-		if _, err := Open(context.Background(), Config{URL: srv.URL}); !errors.Is(err, ErrFormatUnknown) {
+		if _, err := Open(t.Context(), Config{URL: srv.URL}); !errors.Is(err, ErrFormatUnknown) {
 			t.Fatalf("Open = %v, want ErrFormatUnknown", err)
 		}
 	})
@@ -191,7 +190,7 @@ func TestFormatWAVErrorsViaOpen(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			srv := httptest.NewServer(serveStatic("audio/wav", tc.body))
 			defer srv.Close()
-			if _, err := Open(context.Background(), Config{URL: srv.URL}); !errors.Is(err, tc.want) {
+			if _, err := Open(t.Context(), Config{URL: srv.URL}); !errors.Is(err, tc.want) {
 				t.Fatalf("Open = %v, want %v", err, tc.want)
 			}
 		})
@@ -206,7 +205,7 @@ func TestFormatDataBeforeFmt(t *testing.T) {
 	body = le32(body, 0xFFFFFFFF)
 	srv := httptest.NewServer(serveStatic("audio/wav", body))
 	defer srv.Close()
-	if _, err := Open(context.Background(), Config{URL: srv.URL}); !errors.Is(err, ErrMalformedWAV) {
+	if _, err := Open(t.Context(), Config{URL: srv.URL}); !errors.Is(err, ErrMalformedWAV) {
 		t.Fatalf("Open = %v, want ErrMalformedWAV", err)
 	}
 }

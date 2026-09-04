@@ -140,7 +140,7 @@ func buildFrag(o fragOpts) []byte {
 		trunFlags |= 0x000100 | 0x000200 // sample duration + size
 	}
 	trun := func(off int32) []byte {
-		body := append([]byte{}, u32(uint32(len(o.samples)))...)
+		body := bytes.Clone(u32(uint32(len(o.samples))))
 		body = append(body, u32(uint32(off))...)
 		if o.perSample {
 			for _, s := range o.samples {
@@ -225,7 +225,7 @@ func TestParseFragmentDeliversSamples(t *testing.T) {
 	var got [][]byte
 	var durs []uint32
 	if err := ParseFragment(init, frag, func(s Sample) error {
-		got = append(got, append([]byte(nil), s.Data...))
+		got = append(got, bytes.Clone(s.Data))
 		durs = append(durs, s.Dur)
 		return nil
 	}); err != nil {
@@ -252,7 +252,7 @@ func TestParseFragmentUsesTrexDefaults(t *testing.T) {
 	init := AudioInit{TrackID: 1, Timescale: 48000, DefaultDur: 1024, DefaultSize: 50}
 	var got []Sample
 	if err := ParseFragment(init, frag, func(s Sample) error {
-		got = append(got, Sample{Data: append([]byte(nil), s.Data...), Dur: s.Dur})
+		got = append(got, Sample{Data: bytes.Clone(s.Data), Dur: s.Dur})
 		return nil
 	}); err != nil {
 		t.Fatalf("ParseFragment: %v", err)
@@ -278,7 +278,7 @@ func TestParseFragmentMultiplexedPicksAudioTrack(t *testing.T) {
 	init := AudioInit{TrackID: 2, Timescale: 44100}
 	var got [][]byte
 	if err := ParseFragment(init, frag, func(s Sample) error {
-		got = append(got, append([]byte(nil), s.Data...))
+		got = append(got, bytes.Clone(s.Data))
 		return nil
 	}); err != nil {
 		t.Fatalf("ParseFragment: %v", err)
@@ -318,7 +318,7 @@ func buildMuxFrag(videoID uint32, videoData []byte, audioID uint32, audioSamples
 	mfhd := fullBox("mfhd", 0, 0, u32(1))
 	vtfhd := fullBox("tfhd", 0, 0x020000, u32(videoID))
 	vtrun := func(off int32) []byte {
-		body := append([]byte{}, u32(1)...)
+		body := bytes.Clone(u32(1))
 		body = append(body, u32(uint32(off))...)
 		body = append(body, u32(dur)...)
 		body = append(body, u32(uint32(len(videoData)))...)
@@ -333,7 +333,7 @@ func buildMuxFrag(videoID uint32, videoData []byte, audioID uint32, audioSamples
 		aData = append(aData, s...)
 	}
 	atrun := func(off int32) []byte {
-		body := append([]byte{}, u32(uint32(len(audioSamples)))...)
+		body := bytes.Clone(u32(uint32(len(audioSamples))))
 		body = append(body, u32(uint32(off))...)
 		body = append(body, aRecords...)
 		return fullBox("trun", 0, 0x000301, body)
@@ -345,7 +345,7 @@ func buildMuxFrag(videoID uint32, videoData []byte, audioID uint32, audioSamples
 	vOff := int32(len(moof) + 8)
 	aOff := vOff + int32(len(videoData))
 	moof = build(vOff, aOff)
-	return append(moof, box("mdat", append(append([]byte{}, videoData...), aData...))...)
+	return append(moof, box("mdat", append(bytes.Clone(videoData), aData...))...)
 }
 
 // buildOversizeFrag builds a fragment whose single trun sample declares a size
@@ -354,7 +354,7 @@ func buildOversizeFrag(trackID uint32) []byte {
 	mfhd := fullBox("mfhd", 0, 0, u32(1))
 	tfhd := fullBox("tfhd", 0, 0x020000, u32(trackID))
 	trun := func(off int32) []byte {
-		body := append([]byte{}, u32(1)...)      // sample_count
+		body := bytes.Clone(u32(1))              // sample_count
 		body = append(body, u32(uint32(off))...) // data_offset
 		body = append(body, u32(1024)...)        // duration
 		body = append(body, u32(1_000_000)...)   // size, far past the mdat

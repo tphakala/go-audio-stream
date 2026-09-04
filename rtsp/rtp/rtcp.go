@@ -155,10 +155,7 @@ func (r ReceiverReport) Marshal() []byte {
 	// Clamp the block count into the 5-bit RC field first, then drive the
 	// RC field, the total size, the length word, and the block loop from
 	// this same n so they never disagree with the bytes written.
-	n := len(r.Blocks)
-	if n > maxReportBlocks {
-		n = maxReportBlocks
-	}
+	n := min(len(r.Blocks), maxReportBlocks)
 	size := rrHeaderSize + n*reportBlockSize
 	wordLen := size/4 - 1
 

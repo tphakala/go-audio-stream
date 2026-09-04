@@ -1,6 +1,9 @@
 package latm
 
-import "testing"
+import (
+	"bytes"
+	"testing"
+)
 
 // truncs returns buf itself followed by its prefixes at length 0, 1, half,
 // and len(buf)-1 (skipping any length that is not strictly smaller than
@@ -116,7 +119,7 @@ func FuzzDepacketizeOutOfBand(f *testing.F) {
 		f.Add(buf, true)
 	}
 	// Two concatenated AudioMuxElements: a multi-element payload seed.
-	f.Add(append(append([]byte{}, v2...), v2...), true)
+	f.Add(append(bytes.Clone(v2), v2...), true)
 	f.Fuzz(func(t *testing.T, payload []byte, marker bool) {
 		// A fresh depacketizer per input so each execution owns its buffers and
 		// cannot be influenced by state a prior input left behind.

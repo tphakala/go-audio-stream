@@ -3,6 +3,7 @@ package hlssource
 import (
 	"bytes"
 	"errors"
+	"slices"
 	"testing"
 	"time"
 
@@ -14,7 +15,7 @@ func collectFMP4(t *testing.T, d *fmp4Demux, frag []byte) [][]byte {
 	t.Helper()
 	var got [][]byte
 	if err := d.demux(frag, false, func(au []byte, _ time.Duration) {
-		got = append(got, append([]byte(nil), au...))
+		got = append(got, bytes.Clone(au))
 	}); err != nil {
 		t.Fatalf("demux: %v", err)
 	}
@@ -45,7 +46,7 @@ func TestFMP4DemuxDeliversSamplesAndDurations(t *testing.T) {
 	var durs []time.Duration
 	got := [][]byte{}
 	if err := d.demux(frag, false, func(au []byte, dur time.Duration) {
-		got = append(got, append([]byte(nil), au...))
+		got = append(got, bytes.Clone(au))
 		durs = append(durs, dur)
 	}); err != nil {
 		t.Fatalf("demux: %v", err)
@@ -83,7 +84,7 @@ func TestFMP4DemuxAcrossTwoFragments(t *testing.T) {
 	s1 := fmp4Samples(2, 55)
 	got := collectFMP4(t, d, buildFragment(2, s0, 1024))
 	got = append(got, collectFMP4(t, d, buildFragment(2, s1, 1024))...)
-	want := append(append([][]byte{}, s0...), s1...)
+	want := append(slices.Clone(s0), s1...)
 	if len(got) != len(want) {
 		t.Fatalf("delivered %d samples across two fragments, want %d", len(got), len(want))
 	}

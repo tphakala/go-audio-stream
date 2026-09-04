@@ -2,7 +2,6 @@ package rtsp_test
 
 import (
 	"bytes"
-	"context"
 	"testing"
 	"time"
 
@@ -71,7 +70,7 @@ func TestDescribeLATMOutOfBandExtractsASC(t *testing.T) {
 	c := dialIdle(t, s.URL("/stream"))
 	defer closeAndWait(t, c)
 
-	tracks, err := c.Describe(context.Background())
+	tracks, err := c.Describe(t.Context())
 	if err != nil {
 		t.Fatalf("Describe: %v", err)
 	}
@@ -104,7 +103,7 @@ func TestDescribeLATMInBandASCUnknownAtDescribe(t *testing.T) {
 	c := dialIdle(t, s.URL("/stream"))
 	defer closeAndWait(t, c)
 
-	tracks, err := c.Describe(context.Background())
+	tracks, err := c.Describe(t.Context())
 	if err != nil {
 		t.Fatalf("Describe: %v", err)
 	}
@@ -150,7 +149,7 @@ func TestDescribeLATMOutOfBandMalformedConfigASCNil(t *testing.T) {
 	c := dialIdle(t, s.URL("/stream"))
 	defer closeAndWait(t, c)
 
-	tracks, err := c.Describe(context.Background())
+	tracks, err := c.Describe(t.Context())
 	if err != nil {
 		t.Fatalf("Describe: %v", err)
 	}
@@ -204,7 +203,7 @@ func TestOnCodecUpdateEndToEnd(t *testing.T) {
 		drainRequests(sc)
 	}})
 
-	c, err := rtsp.Dial(context.Background(), rtsp.Config{
+	c, err := rtsp.Dial(t.Context(), rtsp.Config{
 		URL:     s.URL("/stream"),
 		Timeout: testTimeout,
 		OnFrame: func(f audiostream.Frame) {
@@ -212,7 +211,7 @@ func TestOnCodecUpdateEndToEnd(t *testing.T) {
 		},
 		OnCodecUpdate: func(u audiostream.CodecUpdate) {
 			latm, _ := u.Codec.(audiostream.CodecMP4ALATM)
-			events <- latmEvent{kind: eventUpdate, data: append([]byte(nil), latm.AudioSpecificConfig...)}
+			events <- latmEvent{kind: eventUpdate, data: bytes.Clone(latm.AudioSpecificConfig)}
 		},
 	})
 	if err != nil {

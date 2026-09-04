@@ -24,7 +24,7 @@ func u64(v uint64) []byte {
 // (when the data-offset flag is set) data_offset, followed by raw per-sample record
 // bytes. It lets a test drive parseTrun's flag-dependent layout directly.
 func trunBox(flags, sampleCount uint32, dataOffset int32, records []byte) []byte {
-	body := append([]byte{}, u32(sampleCount)...)
+	body := bytes.Clone(u32(sampleCount))
 	if flags&trunDataOffset != 0 {
 		body = append(body, u32(uint32(dataOffset))...)
 	}
@@ -60,7 +60,7 @@ func TestParseFragmentSampleBudget(t *testing.T) {
 	tfhd := fullBox("tfhd", 0, tfhdDefaultBaseIsMoof|tfhdDefaultSize, u32(1), u32(1))
 	truns := func(off int32) []byte {
 		out := make([]byte, 0, nTruns*24)
-		for i := 0; i < nTruns; i++ {
+		for range nTruns {
 			out = append(out, trunBox(trunDataOffset, samplesPerTrun, off, nil)...)
 		}
 		return out
@@ -241,12 +241,12 @@ func TestParseFragmentImplicitOffsetWithExplicitBase(t *testing.T) {
 	moof := buildMoof(0)
 	base := uint64(len(moof) + 8) // +8 skips the mdat box header
 	moof = buildMoof(base)
-	frag := append(append([]byte(nil), moof...), box("mdat", sampleBytes)...)
+	frag := append(bytes.Clone(moof), box("mdat", sampleBytes)...)
 
 	var got [][]byte
 	var durs []uint32
 	if err := ParseFragment(AudioInit{TrackID: trackID}, frag, func(s Sample) error {
-		got = append(got, append([]byte(nil), s.Data...))
+		got = append(got, bytes.Clone(s.Data))
 		durs = append(durs, s.Dur)
 		return nil
 	}); err != nil {

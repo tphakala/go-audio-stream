@@ -167,9 +167,9 @@ func TestParseRejects(t *testing.T) {
 	}{
 		{"too short", valid[:MinHeaderLen-1]},
 		{"empty", nil},
-		{"bad syncword high byte", func() []byte { b := append([]byte(nil), valid...); b[0] = 0xFE; return b }()},
-		{"bad syncword low nibble", func() []byte { b := append([]byte(nil), valid...); b[1] &^= 0xF0; return b }()},
-		{"layer not zero", func() []byte { b := append([]byte(nil), valid...); b[1] |= 0x02; return b }()},
+		{"bad syncword high byte", func() []byte { b := bytes.Clone(valid); b[0] = 0xFE; return b }()},
+		{"bad syncword low nibble", func() []byte { b := bytes.Clone(valid); b[1] &^= 0xF0; return b }()},
+		{"layer not zero", func() []byte { b := bytes.Clone(valid); b[1] |= 0x02; return b }()},
 		{"sampling index 13 reserved", buildADTS(adtsFields{profile: 1, srIdx: 13, chanCfg: 2, frameLen: 100})},
 		{"sampling index 14 reserved", buildADTS(adtsFields{profile: 1, srIdx: 14, chanCfg: 2, frameLen: 100})},
 		{"sampling index 15 escape", buildADTS(adtsFields{profile: 1, srIdx: 15, chanCfg: 2, frameLen: 100})},

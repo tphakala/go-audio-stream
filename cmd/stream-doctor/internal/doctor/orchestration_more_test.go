@@ -1,7 +1,6 @@
 package doctor
 
 import (
-	"context"
 	"errors"
 	"io"
 	"os"
@@ -35,7 +34,7 @@ func TestRunPreCaptureFailure(t *testing.T) {
 			t.Parallel()
 			opts := Options{URL: testTargetURL, Duration: 10 * time.Second}
 			var out strings.Builder
-			res, err := Run(context.Background(), opts, tt.prober, &out, io.Discard, testEnv(), fixedClock(5*time.Millisecond))
+			res, err := Run(t.Context(), opts, tt.prober, &out, io.Discard, testEnv(), fixedClock(5*time.Millisecond))
 			if err == nil {
 				t.Fatalf("Run() error = nil, want a %s error", tt.step)
 			}
@@ -62,7 +61,7 @@ func TestRunRedactsFailureDetail(t *testing.T) {
 	opts := Options{URL: "rtsp://admin:hunter2@cam.example:554/stream", Duration: 10 * time.Second}
 
 	var out strings.Builder
-	_, _ = Run(context.Background(), opts, f, &out, io.Discard, testEnv(), fixedClock(time.Millisecond))
+	_, _ = Run(t.Context(), opts, f, &out, io.Discard, testEnv(), fixedClock(time.Millisecond))
 	got := out.String()
 	for _, pii := range []string{"admin", "hunter2", "cam.example"} {
 		if strings.Contains(got, pii) {
@@ -89,7 +88,7 @@ func TestRunListenSkipLeavesNoFile(t *testing.T) {
 	opts := Options{URL: testTargetURL, Duration: time.Second, WAVPath: wavPath}
 
 	var out strings.Builder
-	_, _ = Run(context.Background(), opts, f, &out, io.Discard, testEnv(), fixedClock(time.Millisecond))
+	_, _ = Run(t.Context(), opts, f, &out, io.Discard, testEnv(), fixedClock(time.Millisecond))
 
 	if _, err := os.Stat(wavPath); !os.IsNotExist(err) {
 		t.Errorf("--wav file exists after a skipped listen check (stat err = %v); the atomic write must not create it", err)
@@ -111,7 +110,7 @@ func TestRunListenWritesWAV(t *testing.T) {
 	opts := Options{URL: testTargetURL, Duration: time.Second, WAVPath: wavPath, Report: true}
 
 	var out, errOut strings.Builder
-	_, _ = Run(context.Background(), opts, f, &out, &errOut, testEnv(), fixedClock(time.Millisecond))
+	_, _ = Run(t.Context(), opts, f, &out, &errOut, testEnv(), fixedClock(time.Millisecond))
 
 	info, err := os.Stat(wavPath)
 	if err != nil {
@@ -148,7 +147,7 @@ func TestRunListenSenderClockStart(t *testing.T) {
 	opts := Options{URL: testTargetURL, Duration: time.Second, WAVPath: wavPath, Report: true}
 
 	var out, errOut strings.Builder
-	_, _ = Run(context.Background(), opts, f, &out, &errOut, testEnv(), fixedClock(time.Millisecond))
+	_, _ = Run(t.Context(), opts, f, &out, &errOut, testEnv(), fixedClock(time.Millisecond))
 
 	if _, err := os.Stat(wavPath); err != nil {
 		t.Fatalf("--wav file not written: %v", err)
@@ -174,7 +173,7 @@ func TestRunListenRenameFailurePIIFree(t *testing.T) {
 	opts := Options{URL: testTargetURL, Duration: time.Second, WAVPath: wavPath, Report: true}
 
 	var out, errOut strings.Builder
-	_, _ = Run(context.Background(), opts, f, &out, &errOut, testEnv(), fixedClock(time.Millisecond))
+	_, _ = Run(t.Context(), opts, f, &out, &errOut, testEnv(), fixedClock(time.Millisecond))
 
 	report := out.String()
 	if strings.Contains(report, wavPath) || strings.Contains(report, ".stream-doctor-") {

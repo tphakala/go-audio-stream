@@ -18,7 +18,7 @@ func BenchmarkDepacketize(b *testing.B) {
 	b.ReportAllocs()
 	b.SetBytes(int64(len(pkt)))
 	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		if _, err := opus.Depacketize(pkt); err != nil {
 			b.Fatal(err)
 		}

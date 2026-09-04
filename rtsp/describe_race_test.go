@@ -1,7 +1,6 @@
 package rtsp
 
 import (
-	"context"
 	"errors"
 	"testing"
 	"time"
@@ -73,7 +72,7 @@ func TestDescribeObservesTerminalErrorMidShutdown(t *testing.T) {
 
 	go c.reader()
 
-	_, err := c.Describe(context.Background())
+	_, err := c.Describe(t.Context())
 	if !errors.Is(err, sentinel) {
 		t.Fatalf("Describe = %v, want the terminal error observed mid-shutdown", err)
 	}

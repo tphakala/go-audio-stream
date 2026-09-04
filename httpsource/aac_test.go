@@ -2,7 +2,6 @@ package httpsource
 
 import (
 	"bytes"
-	"context"
 	"errors"
 	"net/http/httptest"
 	"strings"
@@ -181,7 +180,7 @@ func TestAACResyncsPastLeadingGarbage(t *testing.T) {
 	if err := waitResult(t, c, 5*time.Second); !errors.Is(err, ErrStreamEnded) {
 		t.Fatalf("Wait = %v, want ErrStreamEnded", err)
 	}
-	want := append([]byte(nil), aus[0]...)
+	want := bytes.Clone(aus[0])
 	want = append(want, aus[1]...)
 	if !bytes.Equal(col.bytes(), want) {
 		t.Errorf("delivered access units = % x, want % x", col.bytes(), want)
@@ -198,7 +197,7 @@ func TestAACDropsMultiBlockFrame(t *testing.T) {
 	f1, au1 := adtsFrame(1, 40)
 	f2, _ := adtsFrameN(2, 40, 1)
 	f3, au3 := adtsFrame(3, 40)
-	body := append(append(append([]byte(nil), f1...), f2...), f3...)
+	body := append(append(bytes.Clone(f1), f2...), f3...)
 	srv := httptest.NewServer(serveStatic("audio/aac", body))
 	defer srv.Close()
 
@@ -207,7 +206,7 @@ func TestAACDropsMultiBlockFrame(t *testing.T) {
 	if err := waitResult(t, c, 5*time.Second); !errors.Is(err, ErrStreamEnded) {
 		t.Fatalf("Wait = %v, want ErrStreamEnded", err)
 	}
-	want := append(append([]byte(nil), au1...), au3...)
+	want := append(bytes.Clone(au1), au3...)
 	if !bytes.Equal(col.bytes(), want) {
 		t.Errorf("delivered = % x, want the two single-block AUs % x (multi-block dropped)", col.bytes(), want)
 	}
@@ -245,7 +244,7 @@ func TestAACNonADTSBodyFailsOpen(t *testing.T) {
 	// not deliver unframed bytes: the ASC cannot be resolved.
 	srv := httptest.NewServer(serveStatic("audio/aac", bytes.Repeat([]byte{0x00, 0x11, 0x22}, 20)))
 	defer srv.Close()
-	if _, err := Open(context.Background(), Config{URL: srv.URL}); !errors.Is(err, ErrFormatUnknown) {
+	if _, err := Open(t.Context(), Config{URL: srv.URL}); !errors.Is(err, ErrFormatUnknown) {
 		t.Errorf("Open(non-ADTS audio/aac) = %v, want ErrFormatUnknown", err)
 	}
 }
@@ -258,7 +257,7 @@ func TestAACProbeRejectsUnconfirmedLeadingSync(t *testing.T) {
 	body := append(append([]byte{0x00, 0x00, 0x00}, falseHdr...), 0x00, 0x00)
 	srv := httptest.NewServer(serveStatic("audio/aac", body))
 	defer srv.Close()
-	if _, err := Open(context.Background(), Config{URL: srv.URL}); !errors.Is(err, ErrFormatUnknown) {
+	if _, err := Open(t.Context(), Config{URL: srv.URL}); !errors.Is(err, ErrFormatUnknown) {
 		t.Errorf("Open with only an unconfirmable non-zero-offset sync = %v, want ErrFormatUnknown", err)
 	}
 }
@@ -372,7 +371,7 @@ func TestAACRejectsTruncatedID3v2(t *testing.T) {
 	srv := httptest.NewServer(serveStatic("audio/aac", body))
 	defer srv.Close()
 
-	_, err := Open(context.Background(), Config{URL: srv.URL})
+	_, err := Open(t.Context(), Config{URL: srv.URL})
 	if !errors.Is(err, ErrFormatUnknown) {
 		t.Fatalf("Open on a truncated ID3v2 tag = %v, want ErrFormatUnknown", err)
 	}
@@ -399,7 +398,7 @@ func TestAACRejectsOversizeID3v2(t *testing.T) {
 	srv := httptest.NewServer(serveStatic("audio/aac", body))
 	defer srv.Close()
 
-	_, err := Open(context.Background(), Config{URL: srv.URL})
+	_, err := Open(t.Context(), Config{URL: srv.URL})
 	if !errors.Is(err, ErrFormatUnknown) {
 		t.Fatalf("Open on an oversize ID3v2 tag = %v, want ErrFormatUnknown", err)
 	}

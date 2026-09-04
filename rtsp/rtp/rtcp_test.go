@@ -55,7 +55,7 @@ func TestParseCompoundSkipsOther(t *testing.T) {
 	// SR followed by a BYE (PT=203, SC=1): 80|1=0x81, C8+3=0xCB, len 1,
 	// then one SSRC. ParseCompound returns only the SR.
 	bye := []byte{0x81, 0xCB, 0x00, 0x01, 0x00, 0x00, 0x00, 0x2A}
-	compound := append(append([]byte{}, srBytes...), bye...)
+	compound := append(bytes.Clone(srBytes), bye...)
 	reports, err := rtp.ParseCompound(compound)
 	if err != nil {
 		t.Fatalf("ParseCompound: %v", err)

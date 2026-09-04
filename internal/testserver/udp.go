@@ -1,6 +1,7 @@
 package testserver
 
 import (
+	"bytes"
 	"fmt"
 	"net"
 	"slices"
@@ -57,7 +58,7 @@ func (e *udpEndpoint) readLoop() {
 		if err != nil {
 			return
 		}
-		payload := append([]byte(nil), buf[:n]...)
+		payload := bytes.Clone(buf[:n])
 		e.mu.Lock()
 		if e.peer == nil {
 			e.peer = addr
@@ -187,7 +188,7 @@ func (sc *ServerConn) acceptUDPSetup(cfg *HandshakeConfig, i int, req *rtsp.Requ
 	var rtpConn, rtcpConn *net.UDPConn
 	var serverRTP int
 	var lastErr error
-	for attempt := 0; attempt < maxServerUDPBindRetries; attempt++ {
+	for attempt := range maxServerUDPBindRetries {
 		port := base + 2*attempt
 		rc, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: port})
 		if err != nil {

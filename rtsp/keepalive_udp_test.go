@@ -16,7 +16,7 @@ func TestKeepaliveUDPReportIntervalWithinRFC3550Bounds(t *testing.T) {
 	const hi = rtcpReportInterval + rtcpReportInterval/2
 
 	seen := make(map[time.Duration]bool)
-	for i := 0; i < 200; i++ {
+	for range 200 {
 		got := rtcpReportIntervalUDP()
 		if got < lo || got > hi {
 			t.Fatalf("rtcpReportIntervalUDP() = %v, want within [%v, %v]", got, lo, hi)

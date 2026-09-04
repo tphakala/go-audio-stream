@@ -1,7 +1,6 @@
 package rtsp_test
 
 import (
-	"context"
 	"errors"
 	"testing"
 	"time"
@@ -28,7 +27,7 @@ func describeOne(t *testing.T, sdp string, setupFn func(sc *testserver.ServerCon
 	// goroutine and its connection for the rest of the binary, where
 	// assertNoGoroutineLeak would blame an unrelated test.
 	t.Cleanup(func() { _ = c.Close() })
-	tracks, err := c.Describe(context.Background())
+	tracks, err := c.Describe(t.Context())
 	if err != nil {
 		t.Fatalf("Describe: %v", err)
 	}
@@ -92,7 +91,7 @@ func TestSetupRenumberedChannels(t *testing.T) {
 	})
 	defer closeAndWait(t, c)
 
-	if err := c.Setup(context.Background(), tracks[0], rtsp.SetupOptions{}); err != nil {
+	if err := c.Setup(t.Context(), tracks[0], rtsp.SetupOptions{}); err != nil {
 		t.Fatalf("Setup: %v", err)
 	}
 	chans := c.SessionInfo().Channels
@@ -112,10 +111,10 @@ func TestSetupSecondTrackChannelClaim(t *testing.T) {
 	})
 	defer closeAndWait(t, c)
 
-	if err := c.Setup(context.Background(), tracks[0], rtsp.SetupOptions{}); err != nil {
+	if err := c.Setup(t.Context(), tracks[0], rtsp.SetupOptions{}); err != nil {
 		t.Fatalf("Setup track 0: %v", err)
 	}
-	if err := c.Setup(context.Background(), tracks[1], rtsp.SetupOptions{}); err != nil {
+	if err := c.Setup(t.Context(), tracks[1], rtsp.SetupOptions{}); err != nil {
 		t.Fatalf("Setup track 1: %v", err)
 	}
 	chans := c.SessionInfo().Channels
@@ -140,10 +139,10 @@ func TestSetupChannelConflict(t *testing.T) {
 	})
 	defer closeAndWait(t, c)
 
-	if err := c.Setup(context.Background(), tracks[0], rtsp.SetupOptions{}); err != nil {
+	if err := c.Setup(t.Context(), tracks[0], rtsp.SetupOptions{}); err != nil {
 		t.Fatalf("Setup track 0: %v", err)
 	}
-	err := c.Setup(context.Background(), tracks[1], rtsp.SetupOptions{})
+	err := c.Setup(t.Context(), tracks[1], rtsp.SetupOptions{})
 	if !errors.Is(err, rtsp.ErrChannelConflict) {
 		t.Fatalf("Setup track 1 = %v, want ErrChannelConflict", err)
 	}
@@ -177,7 +176,7 @@ func TestSetupBadTransport(t *testing.T) {
 	})
 	defer closeAndWait(t, c)
 
-	err := c.Setup(context.Background(), tracks[0], rtsp.SetupOptions{})
+	err := c.Setup(t.Context(), tracks[0], rtsp.SetupOptions{})
 	if !errors.Is(err, rtsp.ErrNoInterleaved) {
 		t.Fatalf("Setup = %v, want ErrNoInterleaved", err)
 	}
@@ -203,7 +202,7 @@ func TestSetupMalformedTransportTearsDown(t *testing.T) {
 	})
 	defer closeAndWait(t, c)
 
-	err := c.Setup(context.Background(), tracks[0], rtsp.SetupOptions{})
+	err := c.Setup(t.Context(), tracks[0], rtsp.SetupOptions{})
 	if !errors.Is(err, rtsp.ErrMalformedTransport) {
 		t.Fatalf("Setup = %v, want ErrMalformedTransport", err)
 	}
@@ -233,16 +232,16 @@ func TestSetupRejectionKeepsSessionUsable(t *testing.T) {
 	})
 	defer closeAndWait(t, c)
 
-	if err := c.Setup(context.Background(), tracks[0], rtsp.SetupOptions{}); err != nil {
+	if err := c.Setup(t.Context(), tracks[0], rtsp.SetupOptions{}); err != nil {
 		t.Fatalf("Setup track 0: %v", err)
 	}
-	if err := c.Setup(context.Background(), tracks[1], rtsp.SetupOptions{}); !errors.Is(err, rtsp.ErrChannelConflict) {
+	if err := c.Setup(t.Context(), tracks[1], rtsp.SetupOptions{}); !errors.Is(err, rtsp.ErrChannelConflict) {
 		t.Fatalf("Setup track 1 = %v, want ErrChannelConflict", err)
 	}
 	// The unanswered TEARDOWN must not have torn the session down: re-setting up
 	// the bound track reports it is already set up, which only the live SETUP
 	// state produces (a shut-down client returns ErrInvalidState instead).
-	if err := c.Setup(context.Background(), tracks[0], rtsp.SetupOptions{}); !errors.Is(err, rtsp.ErrTrackAlreadySetUp) {
+	if err := c.Setup(t.Context(), tracks[0], rtsp.SetupOptions{}); !errors.Is(err, rtsp.ErrTrackAlreadySetUp) {
 		t.Fatalf("re-Setup track 0 = %v, want ErrTrackAlreadySetUp (session alive)", err)
 	}
 }
@@ -254,7 +253,7 @@ func TestSetupStatusError(t *testing.T) {
 	})
 	defer closeAndWait(t, c)
 
-	err := c.Setup(context.Background(), tracks[0], rtsp.SetupOptions{})
+	err := c.Setup(t.Context(), tracks[0], rtsp.SetupOptions{})
 	var re *rtsp.ResponseError
 	if !errors.As(err, &re) {
 		t.Fatalf("Setup = %v, want *ResponseError", err)
@@ -269,9 +268,8 @@ func TestSetupBeforeDescribe(t *testing.T) {
 	c := dialIdle(t, s.URL("/stream"))
 	defer closeAndWait(t, c)
 
-	err := c.Setup(context.Background(), rtsp.Track{ID: 0, Control: "rtsp://x/track0"}, rtsp.SetupOptions{})
-	var se *rtsp.StateError
-	if !errors.As(err, &se) {
+	err := c.Setup(t.Context(), rtsp.Track{ID: 0, Control: "rtsp://x/track0"}, rtsp.SetupOptions{})
+	if _, ok := errors.AsType[*rtsp.StateError](err); !ok {
 		t.Fatalf("Setup before Describe = %v, want *StateError", err)
 	}
 	if !errors.Is(err, rtsp.ErrInvalidState) {
@@ -286,7 +284,7 @@ func TestSetupDiscardFlag(t *testing.T) {
 	})
 	defer closeAndWait(t, c)
 
-	if err := c.Setup(context.Background(), tracks[0], rtsp.SetupOptions{Discard: true}); err != nil {
+	if err := c.Setup(t.Context(), tracks[0], rtsp.SetupOptions{Discard: true}); err != nil {
 		t.Fatalf("Setup with Discard: %v", err)
 	}
 	if len(c.SessionInfo().Channels) != 1 {
@@ -302,10 +300,10 @@ func TestSessionInfoAfterSetup(t *testing.T) {
 	})
 	defer closeAndWait(t, c)
 
-	if err := c.Setup(context.Background(), tracks[0], rtsp.SetupOptions{}); err != nil {
+	if err := c.Setup(t.Context(), tracks[0], rtsp.SetupOptions{}); err != nil {
 		t.Fatalf("Setup track 0: %v", err)
 	}
-	if err := c.Setup(context.Background(), tracks[1], rtsp.SetupOptions{}); err != nil {
+	if err := c.Setup(t.Context(), tracks[1], rtsp.SetupOptions{}); err != nil {
 		t.Fatalf("Setup track 1: %v", err)
 	}
 
@@ -345,10 +343,10 @@ func TestSetupRejectsForeignTrack(t *testing.T) {
 	defer closeAndWait(t, c)
 
 	crossed := rtsp.Track{ID: tracks[0].ID, Control: tracks[1].Control}
-	if err := c.Setup(context.Background(), crossed, rtsp.SetupOptions{}); !errors.Is(err, rtsp.ErrUnknownTrack) {
+	if err := c.Setup(t.Context(), crossed, rtsp.SetupOptions{}); !errors.Is(err, rtsp.ErrUnknownTrack) {
 		t.Errorf("Setup with a crossed ID and Control = %v, want ErrUnknownTrack", err)
 	}
-	if err := c.Setup(context.Background(), rtsp.Track{ID: 99, Control: "rtsp://cam/s/x"}, rtsp.SetupOptions{}); !errors.Is(err, rtsp.ErrUnknownTrack) {
+	if err := c.Setup(t.Context(), rtsp.Track{ID: 99, Control: "rtsp://cam/s/x"}, rtsp.SetupOptions{}); !errors.Is(err, rtsp.ErrUnknownTrack) {
 		t.Errorf("Setup with an out-of-range id = %v, want ErrUnknownTrack", err)
 	}
 	if chans := c.SessionInfo().Channels; len(chans) != 0 {
@@ -366,10 +364,10 @@ func TestSetupRejectsRepeatedTrack(t *testing.T) {
 	})
 	defer closeAndWait(t, c)
 
-	if err := c.Setup(context.Background(), tracks[0], rtsp.SetupOptions{}); err != nil {
+	if err := c.Setup(t.Context(), tracks[0], rtsp.SetupOptions{}); err != nil {
 		t.Fatalf("Setup: %v", err)
 	}
-	if err := c.Setup(context.Background(), tracks[0], rtsp.SetupOptions{}); !errors.Is(err, rtsp.ErrTrackAlreadySetUp) {
+	if err := c.Setup(t.Context(), tracks[0], rtsp.SetupOptions{}); !errors.Is(err, rtsp.ErrTrackAlreadySetUp) {
 		t.Errorf("second Setup for the same track = %v, want ErrTrackAlreadySetUp", err)
 	}
 	if chans := c.SessionInfo().Channels; len(chans) != 1 {

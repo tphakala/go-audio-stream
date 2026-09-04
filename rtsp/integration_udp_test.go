@@ -2,8 +2,8 @@ package rtsp_test
 
 import (
 	"bytes"
-	"context"
 	"runtime"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -135,7 +135,7 @@ func TestIntegrationUDPHappyPathAAC(t *testing.T) {
 	}
 
 	var lastPTS time.Duration
-	for i := 0; i < n; i++ {
+	for i := range n {
 		f := recvFrame(t, frames)
 		if want := aacAU(i); !bytes.Equal(f.Data, want) {
 			t.Errorf("frame %d Data = % x, want % x", i, f.Data, want)
@@ -183,7 +183,7 @@ func TestIntegrationUDPDuplicates(t *testing.T) {
 	}
 
 	// Exactly three distinct packets are released, in ascending sequence order.
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		f := recvFrame(t, frames)
 		if want := aacAU(i); !bytes.Equal(f.Data, want) {
 			t.Errorf("frame %d Data = % x, want % x", i, f.Data, want)
@@ -226,7 +226,7 @@ func TestIntegrationUDPReordering(t *testing.T) {
 	// Scramble the wire order; the packets themselves still carry ascending
 	// sequence numbers, so a correct client resequences them regardless of
 	// arrival order.
-	sent := append([][]byte(nil), datagrams...)
+	sent := slices.Clone(datagrams)
 	sent[2], sent[3] = sent[3], sent[2]
 
 	c, frames, tracksCh := playAndInjectUDP(t,
@@ -239,7 +239,7 @@ func TestIntegrationUDPReordering(t *testing.T) {
 		t.Fatalf("InjectRTPSequence: %v", err)
 	}
 
-	for i := 0; i < n; i++ {
+	for i := range n {
 		f := recvFrame(t, frames)
 		if want := aacAU(i); !bytes.Equal(f.Data, want) {
 			t.Errorf("frame %d Data = % x, want % x (sequence order, not send order)", i, f.Data, want)
@@ -435,20 +435,20 @@ func TestIntegrationUDPCleanShutdownNoLeak(t *testing.T) {
 	}})
 
 	c := dialTransport(t, s.URL("/stream"), rtsp.PreferUDP, frames)
-	tracks, err := c.Describe(context.Background())
+	tracks, err := c.Describe(t.Context())
 	if err != nil {
 		t.Fatalf("Describe: %v", err)
 	}
 	if len(tracks) != 1 {
 		t.Fatalf("Describe: got %d tracks, want 1", len(tracks))
 	}
-	if err := c.Setup(context.Background(), tracks[0], rtsp.SetupOptions{}); err != nil {
+	if err := c.Setup(t.Context(), tracks[0], rtsp.SetupOptions{}); err != nil {
 		t.Fatalf("Setup: %v", err)
 	}
 
 	baseline := runtime.NumGoroutine()
 
-	if err := c.Play(context.Background()); err != nil {
+	if err := c.Play(t.Context()); err != nil {
 		t.Fatalf("Play: %v", err)
 	}
 
@@ -500,14 +500,14 @@ func TestIntegrationUDPControlWatchdogSurvivesIdleControl(t *testing.T) {
 	}})
 
 	// Dial directly so ReadIdle can be set (dialTransport does not expose it).
-	c, err := rtsp.Dial(context.Background(), rtsp.Config{
+	c, err := rtsp.Dial(t.Context(), rtsp.Config{
 		URL:       s.URL("/stream"),
 		Timeout:   testTimeout,
 		Transport: rtsp.PreferUDP,
 		ReadIdle:  readIdle,
 		OnFrame: func(f audiostream.Frame) {
 			cp := f
-			cp.Data = append([]byte(nil), f.Data...)
+			cp.Data = bytes.Clone(f.Data)
 			frames <- cp
 		},
 	})
@@ -523,14 +523,14 @@ func TestIntegrationUDPControlWatchdogSurvivesIdleControl(t *testing.T) {
 	// Background Wait so a spurious watchdog ErrReadTimeout surfaces the instant
 	// it funnels rather than being missed.
 	waitErr := make(chan error, 1)
-	go func() { waitErr <- c.Wait(context.Background()) }()
+	go func() { waitErr <- c.Wait(t.Context()) }()
 
 	// Inject datagrams one at a time with a real gap between them, so the stream
 	// spans several ReadIdle windows while the control connection stays quiet.
 	// Receiving every frame is the proof: with the control watchdog still active
 	// the session would have been torn down around the first ReadIdle window and
 	// the later frames would never arrive.
-	for i := 0; i < n; i++ {
+	for i := range n {
 		if err := track.InjectRTP(aacUDPDatagram(uint16(2000+i), i, ssrc)); err != nil { //nolint:gosec // i < n is tiny.
 			t.Fatalf("InjectRTP %d: %v", i, err)
 		}

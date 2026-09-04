@@ -77,7 +77,7 @@ func drainAll(s *Stream) [][]byte {
 		if !ok {
 			break
 		}
-		out = append(out, append([]byte(nil), data...))
+		out = append(out, bytes.Clone(data))
 	}
 	return out
 }
@@ -134,7 +134,7 @@ func TestStreamDropsMultiBlockFrame(t *testing.T) {
 	f2, _ := adtsFrameN(2, 20, 2) // 3 raw data blocks
 	f3, au3 := adtsFrame(3, 20)
 	s := NewStream(0)
-	s.Feed(append(append(append([]byte(nil), f1...), f2...), f3...))
+	s.Feed(append(append(bytes.Clone(f1), f2...), f3...))
 	s.SetEOF()
 	got := drainAll(s)
 	if len(got) != 2 || !bytes.Equal(got[0], au1) || !bytes.Equal(got[1], au3) {
@@ -149,7 +149,7 @@ func TestStreamStripsCRCHeader(t *testing.T) {
 	f1, au1 := adtsFrameCRC(1, 30)
 	f2, au2 := adtsFrameCRC(2, 30)
 	s := NewStream(0)
-	s.Feed(append(append([]byte(nil), f1...), f2...))
+	s.Feed(append(bytes.Clone(f1), f2...))
 	s.SetEOF()
 	got := drainAll(s)
 	if len(got) != 2 || !bytes.Equal(got[0], au1) || !bytes.Equal(got[1], au2) {
@@ -164,7 +164,7 @@ func TestStreamRejectsFalseSync(t *testing.T) {
 	decoy := adtsHeaderFull(aacProfile, aacSRIdx, aacChanCfg, 14, 0, false)
 	decoy = append(decoy, make([]byte, 14-adts.MinHeaderLen)...) // pad to the claimed 14 bytes
 	f, au := adtsFrame(3, 40)
-	body := append(append(append([]byte(nil), decoy...), make([]byte, 4)...), f...)
+	body := append(append(bytes.Clone(decoy), make([]byte, 4)...), f...)
 	s := NewStream(0)
 	s.Feed(body)
 	s.SetEOF()
@@ -216,7 +216,7 @@ func TestStreamRejectsEmptyFrame(t *testing.T) {
 	f1, _ := adtsFrame(1, 0) // frameLen == MinHeaderLen
 	f2, _ := adtsFrame(2, 0)
 	s := NewStream(0)
-	s.Feed(append(append([]byte(nil), f1...), f2...))
+	s.Feed(append(bytes.Clone(f1), f2...))
 	s.SetEOF()
 	if got := drainAll(s); len(got) != 0 {
 		t.Fatalf("delivered %d AUs from zero-length frames, want 0 (empty frames rejected)", len(got))
