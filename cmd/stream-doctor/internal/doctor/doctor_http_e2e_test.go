@@ -2,7 +2,6 @@ package doctor
 
 import (
 	"bytes"
-	"context"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -46,7 +45,7 @@ func runHTTP(t *testing.T, opts Options) (output string, code int) {
 	prober := newHTTPProber(opts)
 	t.Cleanup(func() { _ = prober.Close() })
 	var out, errOut strings.Builder
-	res, err := Run(context.Background(), opts, prober, &out, &errOut, testEnv(), time.Now)
+	res, err := Run(t.Context(), opts, prober, &out, &errOut, testEnv(), time.Now)
 	return out.String(), mapExit(err, res)
 }
 

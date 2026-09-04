@@ -153,7 +153,7 @@ func TestMP3SkipsLeadingID3v2(t *testing.T) {
 func TestMP3ResyncsPastLeadingGarbage(t *testing.T) {
 	stream, _ := mp3Frames(3)
 	garbage := bytes.Repeat([]byte("not audio"), 8) // 72 bytes, no 0xFF
-	body := append(append([]byte{}, garbage...), stream...)
+	body := append(bytes.Clone(garbage), stream...)
 	srv := httptest.NewServer(serveStatic("audio/mpeg", body))
 	defer srv.Close()
 
@@ -175,7 +175,7 @@ func TestMP3ResyncsPastLeadingGarbage(t *testing.T) {
 // the real frames, delivering only those.
 func TestMP3RejectsFalseSync(t *testing.T) {
 	_, genuine := mp3Frames(2)
-	genuineStream := append(append([]byte{}, genuine[0]...), genuine[1]...)
+	genuineStream := append(bytes.Clone(genuine[0]), genuine[1]...)
 
 	const decoyGap = 100
 	body := make([]byte, 0, len(mp3HeaderBytes)+decoyGap+len(genuineStream))

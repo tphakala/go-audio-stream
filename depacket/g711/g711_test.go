@@ -92,7 +92,7 @@ func TestALawAnchors(t *testing.T) {
 
 func TestFullTableCrosscheck(t *testing.T) {
 	t.Parallel()
-	for i := 0; i < 256; i++ {
+	for i := range 256 {
 		b := byte(i)
 		muOut, _ := g711.DepacketizeAlloc([]byte{b}, audiostream.MuLaw)
 		if got := int16(binary.LittleEndian.Uint16(muOut)); got != refMuLawTable[b] {
@@ -171,7 +171,7 @@ func TestDepacketizeShortBufferLeavesDstUntouched(t *testing.T) {
 	// write would leave a caller reusing the buffer with a mix of new and
 	// stale samples.
 	dst := []byte{0xAA, 0xBB, 0xCC, 0xDD}
-	before := append([]byte(nil), dst...)
+	before := bytes.Clone(dst)
 
 	n, err := g711.Depacketize(dst, []byte{0x01, 0x02, 0x03}, audiostream.MuLaw)
 	if !errors.Is(err, g711.ErrShortBuffer) {

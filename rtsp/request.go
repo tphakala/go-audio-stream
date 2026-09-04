@@ -238,8 +238,7 @@ func (c *Client) authenticate(ctx context.Context, req *Request, ue *Unauthorize
 		return nil, err
 	}
 	cerr = ClassifyStatus(resp)
-	var third *UnauthorizedError
-	if errors.As(cerr, &third) {
+	if third, ok := errors.AsType[*UnauthorizedError](cerr); ok {
 		return nil, authFailed(third, "credentials rejected after a nonce rotation")
 	}
 	return resp, cerr

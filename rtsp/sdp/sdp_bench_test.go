@@ -20,7 +20,7 @@ func BenchmarkParse(b *testing.B) {
 	b.ReportAllocs()
 	b.SetBytes(int64(len(body)))
 	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		if _, err := sdp.Parse(body); err != nil {
 			b.Fatal(err)
 		}

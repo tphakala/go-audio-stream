@@ -215,15 +215,15 @@ func parseAuthParam(current *Challenge, segment string) {
 	if current == nil {
 		return
 	}
-	eq := strings.IndexByte(segment, '=')
-	if eq < 0 {
+	before, after, ok := strings.Cut(segment, "=")
+	if !ok {
 		return
 	}
-	name := strings.ToLower(strings.TrimSpace(segment[:eq]))
+	name := strings.ToLower(strings.TrimSpace(before))
 	if name == "" {
 		return
 	}
-	value := parseAuthParamValue(segment[eq+1:])
+	value := parseAuthParamValue(after)
 	if current.Params == nil {
 		current.Params = map[string]string{}
 	}

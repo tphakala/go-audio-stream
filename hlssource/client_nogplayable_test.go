@@ -1,7 +1,6 @@
 package hlssource
 
 import (
-	"context"
 	"errors"
 	"net/http"
 	"testing"
@@ -17,7 +16,7 @@ func TestOpenLiveAllGapReturnsRetryable(t *testing.T) {
 	h := &hlsServer{playlist: func(int) (string, int) { return body, http.StatusOK }}
 	srv := h.start(t)
 
-	_, err := Open(context.Background(), Config{URL: srv.URL + "/live.m3u8"})
+	_, err := Open(t.Context(), Config{URL: srv.URL + "/live.m3u8"})
 	if !errors.Is(err, ErrNoPlayableSegment) {
 		t.Fatalf("Open err = %v, want ErrNoPlayableSegment", err)
 	}
@@ -37,7 +36,7 @@ func TestOpenVODAllGapReturnsMalformed(t *testing.T) {
 	h := &hlsServer{playlist: func(int) (string, int) { return body, http.StatusOK }}
 	srv := h.start(t)
 
-	_, err := Open(context.Background(), Config{URL: srv.URL + "/vod.m3u8"})
+	_, err := Open(t.Context(), Config{URL: srv.URL + "/vod.m3u8"})
 	if !errors.Is(err, ErrMalformedPlaylist) {
 		t.Fatalf("Open err = %v, want ErrMalformedPlaylist", err)
 	}
@@ -74,10 +73,10 @@ func TestOpenLiveAllGapRecoversOnReload(t *testing.T) {
 	srv := h.start(t)
 	url := srv.URL + "/live.m3u8"
 
-	if _, err := Open(context.Background(), Config{URL: url}); !errors.Is(err, ErrNoPlayableSegment) {
+	if _, err := Open(t.Context(), Config{URL: url}); !errors.Is(err, ErrNoPlayableSegment) {
 		t.Fatalf("first Open err = %v, want ErrNoPlayableSegment", err)
 	}
-	c, err := Open(context.Background(), Config{URL: url})
+	c, err := Open(t.Context(), Config{URL: url})
 	if err != nil {
 		t.Fatalf("second Open err = %v, want success after the playlist gained a playable segment", err)
 	}

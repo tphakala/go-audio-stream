@@ -1,6 +1,7 @@
 package hlssource
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"math"
@@ -346,7 +347,7 @@ func TestSegmentCountCap(t *testing.T) {
 	build := func(n int) []byte {
 		var b strings.Builder
 		b.WriteString("#EXTM3U\n#EXT-X-TARGETDURATION:4\n")
-		for i := 0; i < n; i++ {
+		for i := range n {
 			b.WriteString("#EXTINF:4.0,\n")
 			fmt.Fprintf(&b, "s%d.ts\n", i)
 		}
@@ -362,7 +363,7 @@ func TestSegmentCountCap(t *testing.T) {
 		t.Fatalf("playlist at the cap: parsed %d segments, want %d", got, MaxSegmentsPerPlaylist)
 	}
 
-	overCap := append(append([]byte(nil), atCap...), "#EXTINF:4.0,\nsX.ts\n"...)
+	overCap := append(bytes.Clone(atCap), "#EXTINF:4.0,\nsX.ts\n"...)
 	if _, _, err := parsePlaylist(overCap, mustURL(t, "https://h/x.m3u8")); !errors.Is(err, ErrUnsupportedPlaylist) {
 		t.Fatalf("playlist one past the cap: got %v, want ErrUnsupportedPlaylist", err)
 	}

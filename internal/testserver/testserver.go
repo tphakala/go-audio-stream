@@ -1,6 +1,7 @@
 package testserver
 
 import (
+	"bytes"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/md5" //nolint:gosec // reproduces the client's RFC 7616 Digest math in a test double, not a security primitive.
@@ -79,7 +80,7 @@ func New(t *testing.T, opts Options) *Server {
 	if opts.Handle == nil {
 		t.Fatal("testserver: Options.Handle is required")
 	}
-	base, err := net.Listen("tcp", "127.0.0.1:0")
+	base, err := (&net.ListenConfig{}).Listen(t.Context(), "tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("testserver: listen: %v", err)
 	}
@@ -291,7 +292,7 @@ func (sc *ServerConn) readNext() (req *rtsp.Request, resp *rtsp.Response, frame 
 			if e != nil {
 				return nil, nil, nil, e
 			}
-			payload := append([]byte(nil), f.Payload...)
+			payload := bytes.Clone(f.Payload)
 			sc.start += n
 			return nil, nil, &rtsp.InterleavedFrame{Channel: f.Channel, Payload: payload}, nil
 		case rtsp.FrameRequest:
@@ -874,7 +875,7 @@ func (sc *ServerConn) handshakeSetupUDP(cfg *HandshakeConfig, i int, req *rtsp.R
 func (sc *ServerConn) handshakeSetup(cfg *HandshakeConfig) ([]ChannelPair, error) {
 	n := countMediaSections(cfg.SDP)
 	pairs := make([]ChannelPair, 0, n)
-	for i := 0; i < n; i++ {
+	for i := range n {
 		req, err := sc.ReadRequest()
 		if err != nil {
 			return nil, err
@@ -957,7 +958,7 @@ func sessionHeader(cfg *HandshakeConfig) string {
 // CRLF line endings.
 func countMediaSections(sdp string) int {
 	count := 0
-	for _, line := range strings.Split(sdp, "\n") {
+	for line := range strings.SplitSeq(sdp, "\n") {
 		if strings.HasPrefix(strings.TrimSpace(line), "m=") {
 			count++
 		}

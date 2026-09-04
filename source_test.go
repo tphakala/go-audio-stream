@@ -57,7 +57,7 @@ func TestSourceContractImplementable(t *testing.T) {
 		info:    audiostream.SourceInfo{URL: "rtsp://host/stream", Server: "TestCam/1.0"},
 	}
 
-	if err := src.Wait(context.Background()); !errors.Is(err, audiostream.ErrClosed) {
+	if err := src.Wait(t.Context()); !errors.Is(err, audiostream.ErrClosed) {
 		t.Errorf("Wait = %v, want ErrClosed", err)
 	}
 	if err := src.Close(); err != nil {
@@ -86,7 +86,7 @@ func TestSourceContractImplementable(t *testing.T) {
 // the context error when the caller's context cancels first.
 func TestSourceWaitHonorsContext(t *testing.T) {
 	t.Parallel()
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
 	var src audiostream.Source = &fakeSource{waitErr: audiostream.ErrClosed}
 	if err := src.Wait(ctx); !errors.Is(err, context.Canceled) {

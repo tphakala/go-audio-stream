@@ -99,8 +99,7 @@ func classifyFailure(step string, err error, opts Options) (failureClass, bool) 
 	}
 
 	// DNS resolution.
-	var dnsErr *net.DNSError
-	if errors.As(err, &dnsErr) {
+	if dnsErr, ok := errors.AsType[*net.DNSError](err); ok {
 		switch {
 		case dnsErr.IsNotFound:
 			return failureClass{
@@ -173,8 +172,7 @@ func classifyFailure(step string, err error, opts Options) (failureClass, bool) 
 	}
 
 	// A non-success RTSP status the client did not special-case.
-	var respErr *rtsp.ResponseError
-	if errors.As(err, &respErr) {
+	if respErr, ok := errors.AsType[*rtsp.ResponseError](err); ok {
 		return classifyResponseStatus(respErr), true
 	}
 

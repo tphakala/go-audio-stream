@@ -154,8 +154,7 @@ func isAuthErr(err error) bool {
 	if errors.Is(err, rtsp.ErrAuthFailed) {
 		return true
 	}
-	var unauthorized *rtsp.UnauthorizedError
-	if errors.As(err, &unauthorized) {
+	if _, ok := errors.AsType[*rtsp.UnauthorizedError](err); ok {
 		return true
 	}
 	var status *httpsource.StatusError

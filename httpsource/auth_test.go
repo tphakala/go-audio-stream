@@ -2,7 +2,6 @@ package httpsource
 
 import (
 	"bytes"
-	"context"
 	"crypto/md5"
 	"crypto/sha256"
 	"encoding/hex"
@@ -239,7 +238,7 @@ func TestDigestPreferredOverBasic(t *testing.T) {
 	var col collector
 	// A non-root request target exercises the digest-uri = request-target rule
 	// (RFC 7616) against a real path and query, which the server pins.
-	c, err := Open(context.Background(), Config{URL: srv.URL + "/live?ch=1", Username: testUser, Password: testPass, OnFrame: col.onFrame})
+	c, err := Open(t.Context(), Config{URL: srv.URL + "/live?ch=1", Username: testUser, Password: testPass, OnFrame: col.onFrame})
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
@@ -293,7 +292,7 @@ func TestDigestBadCredentials(t *testing.T) {
 	srv := httptest.NewServer(h)
 	defer srv.Close()
 
-	_, err := Open(context.Background(), Config{URL: srv.URL, Username: testUser, Password: "wrong"})
+	_, err := Open(t.Context(), Config{URL: srv.URL, Username: testUser, Password: "wrong"})
 	if !errors.Is(err, ErrBadStatus) {
 		t.Fatalf("Open = %v, want ErrBadStatus", err)
 	}
@@ -340,7 +339,7 @@ func TestUnauthorizedWithoutCredentials(t *testing.T) {
 	srv := httptest.NewServer(h)
 	defer srv.Close()
 
-	_, err := Open(context.Background(), Config{URL: srv.URL})
+	_, err := Open(t.Context(), Config{URL: srv.URL})
 	if !errors.Is(err, ErrBadStatus) {
 		t.Fatalf("Open = %v, want ErrBadStatus", err)
 	}
@@ -360,7 +359,7 @@ func TestDigestUnanswerableChallengeSurfacesStatus(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	_, err := Open(context.Background(), Config{URL: srv.URL, Username: testUser, Password: testPass})
+	_, err := Open(t.Context(), Config{URL: srv.URL, Username: testUser, Password: testPass})
 	if !errors.Is(err, ErrBadStatus) {
 		t.Fatalf("Open = %v, want ErrBadStatus", err)
 	}
@@ -474,7 +473,7 @@ func TestDigestAlwaysStaleTerminates(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	_, err := Open(context.Background(), Config{URL: srv.URL, Username: testUser, Password: testPass})
+	_, err := Open(t.Context(), Config{URL: srv.URL, Username: testUser, Password: testPass})
 	if !errors.Is(err, ErrBadStatus) {
 		t.Fatalf("Open = %v, want ErrBadStatus", err)
 	}

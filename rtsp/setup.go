@@ -195,8 +195,7 @@ func (c *Client) setupUDP(ctx context.Context, trk Track, desc describedTrack, o
 	resp, derr := c.do(ctx, req)
 	if derr != nil {
 		_ = m.Close()
-		var respErr *ResponseError
-		if errors.As(derr, &respErr) {
+		if respErr, ok := errors.AsType[*ResponseError](derr); ok {
 			// A non-2xx SETUP response (for example 461 Unsupported Transport):
 			// the server declined and allocated nothing, no Session id and no
 			// server-side UDP port, so the sockets just closed are the only

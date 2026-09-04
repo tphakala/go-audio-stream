@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -104,7 +105,7 @@ type collector struct {
 func (c *collector) onFrame(f audiostream.Frame) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.datas = append(c.datas, append([]byte(nil), f.Data...))
+	c.datas = append(c.datas, bytes.Clone(f.Data))
 	c.frames = append(c.frames, f)
 }
 
@@ -134,7 +135,7 @@ func TestOpenResolvesASC(t *testing.T) {
 	stream, _ := adtsStream(3, 40)
 	seg := buildTSSegment(stream, 0x1000, 0x0100)
 	srv := vodServer(t, []string{tsSegURL0}, map[string][]byte{tsSegURL0: seg})
-	c, err := Open(context.Background(), Config{URL: srv.URL + "/vod.m3u8"})
+	c, err := Open(t.Context(), Config{URL: srv.URL + "/vod.m3u8"})
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
@@ -163,11 +164,11 @@ func TestVODDeliversAllSegmentsThenEnds(t *testing.T) {
 	}
 	srv := vodServer(t, order, segs)
 	col := &collector{}
-	c, err := Open(context.Background(), Config{URL: srv.URL + "/vod.m3u8", OnFrame: col.onFrame})
+	c, err := Open(t.Context(), Config{URL: srv.URL + "/vod.m3u8", OnFrame: col.onFrame})
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
-	if err := c.Wait(context.Background()); !errors.Is(err, ErrStreamEnded) {
+	if err := c.Wait(t.Context()); !errors.Is(err, ErrStreamEnded) {
 		t.Fatalf("Wait = %v, want ErrStreamEnded", err)
 	}
 	if col.count() != len(wantAUs) {
@@ -214,11 +215,11 @@ func TestMasterSelectsMediaPlaylist(t *testing.T) {
 	}
 	srv := h.start(t)
 	col := &collector{}
-	c, err := Open(context.Background(), Config{URL: srv.URL + "/master.m3u8", OnFrame: col.onFrame})
+	c, err := Open(t.Context(), Config{URL: srv.URL + "/master.m3u8", OnFrame: col.onFrame})
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
-	if err := c.Wait(context.Background()); !errors.Is(err, ErrStreamEnded) {
+	if err := c.Wait(t.Context()); !errors.Is(err, ErrStreamEnded) {
 		t.Fatalf("Wait = %v, want ErrStreamEnded", err)
 	}
 	if col.count() != len(aus) {
@@ -249,11 +250,11 @@ func TestLiveReloadDeliversNewSegments(t *testing.T) {
 	}
 	srv := h.start(t)
 	col := &collector{}
-	c, err := Open(context.Background(), Config{URL: srv.URL + "/live.m3u8", OnFrame: col.onFrame})
+	c, err := Open(t.Context(), Config{URL: srv.URL + "/live.m3u8", OnFrame: col.onFrame})
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
-	if err := c.Wait(context.Background()); !errors.Is(err, ErrStreamEnded) {
+	if err := c.Wait(t.Context()); !errors.Is(err, ErrStreamEnded) {
 		t.Fatalf("Wait = %v, want ErrStreamEnded", err)
 	}
 	want := len(au0) + len(au1)
@@ -277,11 +278,11 @@ func TestExtXGapAdvancesAndSignalsLoss(t *testing.T) {
 	h := &hlsServer{segments: segs, playlist: func(int) (string, int) { return body, http.StatusOK }}
 	srv := h.start(t)
 	col := &collector{}
-	c, err := Open(context.Background(), Config{URL: srv.URL + "/vod.m3u8", OnFrame: col.onFrame})
+	c, err := Open(t.Context(), Config{URL: srv.URL + "/vod.m3u8", OnFrame: col.onFrame})
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
-	if err := c.Wait(context.Background()); !errors.Is(err, ErrStreamEnded) {
+	if err := c.Wait(t.Context()); !errors.Is(err, ErrStreamEnded) {
 		t.Fatalf("Wait = %v, want ErrStreamEnded", err)
 	}
 	if col.count() != len(au0)+len(au2) {
@@ -298,11 +299,11 @@ func TestNilOnFrameStillCounts(t *testing.T) {
 	stream, aus := adtsStream(3, 40)
 	seg := buildTSSegment(stream, 0x1000, 0x0100)
 	srv := vodServer(t, []string{segURL}, map[string][]byte{segURL: seg})
-	c, err := Open(context.Background(), Config{URL: srv.URL + "/vod.m3u8"})
+	c, err := Open(t.Context(), Config{URL: srv.URL + "/vod.m3u8"})
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
-	_ = c.Wait(context.Background())
+	_ = c.Wait(t.Context())
 	if got := c.Stats().Tracks[0].Packets; got != uint64(len(aus)) {
 		t.Errorf("Stats packets with nil OnFrame = %d, want %d", got, len(aus))
 	}
@@ -323,13 +324,13 @@ func TestCloseFromInsideOnFrame(t *testing.T) {
 		once.Do(func() { _ = c.Close(); close(closed) })
 	}}
 	var err error
-	c, err = Open(context.Background(), cfg)
+	c, err = Open(t.Context(), cfg)
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
 	close(started)
 	<-closed
-	if werr := c.Wait(context.Background()); werr == nil {
+	if werr := c.Wait(t.Context()); werr == nil {
 		t.Error("Wait returned nil after Close from OnFrame")
 	}
 }
@@ -362,7 +363,7 @@ func TestWatchdogFiresOnStalledSegment(t *testing.T) {
 		}
 	}))
 	t.Cleanup(srv.Close)
-	c, err := Open(context.Background(), Config{
+	c, err := Open(t.Context(), Config{
 		URL:      srv.URL + "/vod.m3u8",
 		ReadIdle: 100 * time.Millisecond,
 		Timeout:  5 * time.Second,
@@ -370,7 +371,7 @@ func TestWatchdogFiresOnStalledSegment(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
-	if werr := c.Wait(context.Background()); !errors.Is(werr, audiostream.ErrReadTimeout) {
+	if werr := c.Wait(t.Context()); !errors.Is(werr, audiostream.ErrReadTimeout) {
 		t.Errorf("Wait = %v, want ErrReadTimeout", werr)
 	}
 }
@@ -405,11 +406,11 @@ func TestLiveWindowDropSignalsSeqGap(t *testing.T) {
 	}
 	srv := h.start(t)
 	col := &collector{}
-	c, err := Open(context.Background(), Config{URL: srv.URL + "/live.m3u8", OnFrame: col.onFrame})
+	c, err := Open(t.Context(), Config{URL: srv.URL + "/live.m3u8", OnFrame: col.onFrame})
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
-	if err := c.Wait(context.Background()); !errors.Is(err, ErrStreamEnded) {
+	if err := c.Wait(t.Context()); !errors.Is(err, ErrStreamEnded) {
 		t.Fatalf("Wait = %v, want ErrStreamEnded", err)
 	}
 	// The first frame of s5 (index after s0+s1's AUs) reports the 3 dropped
@@ -475,7 +476,7 @@ func TestCredentialsAttachedSameHostStrippedOnCrossHostRedirect(t *testing.T) {
 	}))
 	t.Cleanup(origin.Close)
 
-	c, err := Open(context.Background(), Config{
+	c, err := Open(t.Context(), Config{
 		URL:         origin.URL + "/vod.m3u8",
 		Username:    "u",
 		Password:    "p",
@@ -495,7 +496,7 @@ func TestCredentialsAttachedSameHostStrippedOnCrossHostRedirect(t *testing.T) {
 
 func TestOpenInvalidURL(t *testing.T) {
 	for _, u := range []string{"", "ftp://h/x.m3u8", "http://h:99999/x.m3u8"} {
-		if _, err := Open(context.Background(), Config{URL: u}); !errors.Is(err, ErrInvalidURL) {
+		if _, err := Open(t.Context(), Config{URL: u}); !errors.Is(err, ErrInvalidURL) {
 			t.Errorf("Open(%q) = %v, want ErrInvalidURL", u, err)
 		}
 	}
@@ -506,7 +507,7 @@ func TestOpenBadStatus(t *testing.T) {
 		w.WriteHeader(http.StatusNotFound)
 	}))
 	t.Cleanup(srv.Close)
-	_, err := Open(context.Background(), Config{URL: srv.URL + "/missing.m3u8"})
+	_, err := Open(t.Context(), Config{URL: srv.URL + "/missing.m3u8"})
 	var se *StatusError
 	if !errors.As(err, &se) || se.Code != http.StatusNotFound {
 		t.Errorf("Open = %v, want *StatusError 404", err)
@@ -521,7 +522,7 @@ func TestOpenMalformedPlaylist(t *testing.T) {
 		_, _ = w.Write([]byte("this is not a playlist"))
 	}))
 	t.Cleanup(srv.Close)
-	if _, err := Open(context.Background(), Config{URL: srv.URL + "/x.m3u8"}); !errors.Is(err, ErrMalformedPlaylist) {
+	if _, err := Open(t.Context(), Config{URL: srv.URL + "/x.m3u8"}); !errors.Is(err, ErrMalformedPlaylist) {
 		t.Errorf("Open = %v, want ErrMalformedPlaylist", err)
 	}
 }
@@ -535,7 +536,7 @@ func TestOpenPlaylistTooLarge(t *testing.T) {
 		_, _ = w.Write(big)
 	}))
 	t.Cleanup(srv.Close)
-	_, err := Open(context.Background(), Config{URL: srv.URL + "/x.m3u8", MaxPlaylistBytes: 256})
+	_, err := Open(t.Context(), Config{URL: srv.URL + "/x.m3u8", MaxPlaylistBytes: 256})
 	if !errors.Is(err, ErrPlaylistTooLarge) {
 		t.Errorf("Open = %v, want ErrPlaylistTooLarge", err)
 	}
@@ -545,7 +546,7 @@ func TestOpenSegmentTooLarge(t *testing.T) {
 	stream, _ := adtsStream(3, 40)
 	seg := buildTSSegment(stream, 0x1000, 0x0100)
 	srv := vodServer(t, []string{segURL}, map[string][]byte{segURL: seg})
-	_, err := Open(context.Background(), Config{URL: srv.URL + "/vod.m3u8", MaxSegmentBytes: 100})
+	_, err := Open(t.Context(), Config{URL: srv.URL + "/vod.m3u8", MaxSegmentBytes: 100})
 	if !errors.Is(err, ErrSegmentTooLarge) {
 		t.Errorf("Open = %v, want ErrSegmentTooLarge", err)
 	}
@@ -555,7 +556,7 @@ func TestInfoStripsCredentials(t *testing.T) {
 	srv := vodServer(t, []string{segURL}, map[string][]byte{
 		segURL: buildTSSegment(func() []byte { s, _ := adtsStream(2, 40); return s }(), 0x1000, 0x0100),
 	})
-	c, err := Open(context.Background(), Config{URL: srv.URL + "/vod.m3u8", Username: "u", Password: "p"})
+	c, err := Open(t.Context(), Config{URL: srv.URL + "/vod.m3u8", Username: "u", Password: "p"})
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
@@ -566,7 +567,7 @@ func TestInfoStripsCredentials(t *testing.T) {
 }
 
 func TestOpenExpiredContext(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
 	if _, err := Open(ctx, Config{URL: "https://h/x.m3u8"}); !errors.Is(err, context.Canceled) {
 		t.Errorf("Open with cancelled ctx = %v, want context.Canceled", err)
@@ -590,7 +591,7 @@ func TestOpenUnsupportedCodecEndToEnd(t *testing.T) {
 			stream, _ := adtsStream(2, 40)
 			seg := buildTSSegmentType(stream, 0x1000, 0x0100, tc.streamType)
 			srv := vodServer(t, []string{segURL0}, map[string][]byte{segURL0: seg})
-			if _, err := Open(context.Background(), Config{URL: srv.URL + "/vod.m3u8"}); !errors.Is(err, ErrUnsupportedCodec) {
+			if _, err := Open(t.Context(), Config{URL: srv.URL + "/vod.m3u8"}); !errors.Is(err, ErrUnsupportedCodec) {
 				t.Fatalf("Open with stream_type %#x = %v, want ErrUnsupportedCodec", tc.streamType, err)
 			}
 		})
@@ -619,14 +620,14 @@ func TestDiscontinuityDrivesDemuxResetEndToEnd(t *testing.T) {
 	}
 	srv := h.start(t)
 	col := &collector{}
-	c, err := Open(context.Background(), Config{URL: srv.URL + "/vod.m3u8", OnFrame: col.onFrame})
+	c, err := Open(t.Context(), Config{URL: srv.URL + "/vod.m3u8", OnFrame: col.onFrame})
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
-	if err := c.Wait(context.Background()); !errors.Is(err, ErrStreamEnded) {
+	if err := c.Wait(t.Context()); !errors.Is(err, ErrStreamEnded) {
 		t.Fatalf("Wait = %v, want ErrStreamEnded", err)
 	}
-	want := append(append([][]byte{}, au0...), au1...)
+	want := append(slices.Clone(au0), au1...)
 	if col.count() != len(want) {
 		t.Fatalf("delivered %d AUs across the discontinuity, want %d", col.count(), len(want))
 	}

@@ -189,7 +189,7 @@ func serveStream(contentType string, header, frame []byte, interval time.Duratio
 func waitResult(t *testing.T, c *Client, within time.Duration) error {
 	t.Helper()
 	done := make(chan error, 1)
-	go func() { done <- c.Wait(context.Background()) }()
+	go func() { done <- c.Wait(t.Context()) }()
 	select {
 	case err := <-done:
 		return err
@@ -214,7 +214,7 @@ func wantPTS(cum uint64, rate int) time.Duration {
 func openOK(t *testing.T, srv *httptest.Server, cfg Config) *Client {
 	t.Helper()
 	cfg.URL = srv.URL
-	c, err := Open(context.Background(), cfg)
+	c, err := Open(t.Context(), cfg)
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
@@ -428,9 +428,9 @@ func TestCloseFromInsideOnFrame(t *testing.T) {
 		if cl := holder.Load(); cl != nil {
 			_ = cl.Close() // must not deadlock the reader it runs on
 		}
-	}}
-	cfg.URL = srv.URL
-	c, err := Open(context.Background(), cfg)
+	},
+		URL: srv.URL}
+	c, err := Open(t.Context(), cfg)
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
@@ -448,7 +448,7 @@ func TestWaitContextCancel(t *testing.T) {
 	defer srv.Close()
 
 	c := openOK(t, srv, Config{})
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
 	done := make(chan error, 1)
 	go func() { done <- c.Wait(ctx) }()
 	time.Sleep(30 * time.Millisecond)
@@ -470,7 +470,7 @@ func TestOpenCtxCancelAfterReturnKeepsStreaming(t *testing.T) {
 	srv := httptest.NewServer(serveStream("audio/wav", header, frame, 5*time.Millisecond))
 	defer srv.Close()
 
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
 	var col collector
 	cfg := Config{OnFrame: col.onFrame, URL: srv.URL}
 	c, err := Open(ctx, cfg)
@@ -496,7 +496,7 @@ func TestOpenExpiredContext(t *testing.T) {
 	srv := httptest.NewServer(serveStatic("audio/wav", stdWAVHeader(wavFormatPCM, 1, 8000, 16, wavUnbounded, wavUnbounded)))
 	defer srv.Close()
 
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
 	if _, err := Open(ctx, Config{URL: srv.URL}); !errors.Is(err, context.Canceled) {
 		t.Fatalf("Open = %v, want context.Canceled", err)
@@ -544,7 +544,7 @@ func TestRedirectStatusAuth(t *testing.T) {
 			w.WriteHeader(http.StatusFound)
 		}))
 		defer srv.Close()
-		_, err := Open(context.Background(), Config{URL: srv.URL})
+		_, err := Open(t.Context(), Config{URL: srv.URL})
 		if !errors.Is(err, audiostream.ErrRedirect) {
 			t.Fatalf("Open = %v, want ErrRedirect", err)
 		}
@@ -560,7 +560,7 @@ func TestRedirectStatusAuth(t *testing.T) {
 				w.WriteHeader(code)
 			}))
 			defer srv.Close()
-			_, err := Open(context.Background(), Config{URL: srv.URL})
+			_, err := Open(t.Context(), Config{URL: srv.URL})
 			if !errors.Is(err, ErrBadStatus) {
 				t.Fatalf("Open = %v, want ErrBadStatus", err)
 			}
@@ -592,7 +592,7 @@ func TestRedirectStatusAuth(t *testing.T) {
 
 		// URL userinfo overrides Config, and Info().URL is credential-free.
 		u := "http://bob:pw@" + srv.Listener.Addr().String() + "/s"
-		c2, err := Open(context.Background(), Config{URL: u, Username: testUser, Password: testPass, AllowInsecureAuth: true})
+		c2, err := Open(t.Context(), Config{URL: u, Username: testUser, Password: testPass, AllowInsecureAuth: true})
 		if err != nil {
 			t.Fatalf("Open with userinfo: %v", err)
 		}
@@ -625,7 +625,7 @@ func TestInfoServerHeader(t *testing.T) {
 
 func TestOpenInvalidURL(t *testing.T) {
 	for _, u := range []string{"", "://nope", "ftp://host/x", "http:///nohost"} {
-		if _, err := Open(context.Background(), Config{URL: u}); !errors.Is(err, ErrInvalidURL) {
+		if _, err := Open(t.Context(), Config{URL: u}); !errors.Is(err, ErrInvalidURL) {
 			t.Fatalf("Open(%q) = %v, want ErrInvalidURL", u, err)
 		}
 	}
@@ -651,7 +651,7 @@ func TestTLS(t *testing.T) {
 	t.Run("verify failure wraps ErrConnectionClosed", func(t *testing.T) {
 		// The httptest server uses a self-signed certificate the system pool
 		// does not trust, so verified TLS (no InsecureTLS) must fail Open.
-		if _, err := Open(context.Background(), Config{URL: srv.URL}); !errors.Is(err, ErrConnectionClosed) {
+		if _, err := Open(t.Context(), Config{URL: srv.URL}); !errors.Is(err, ErrConnectionClosed) {
 			t.Fatalf("Open = %v, want ErrConnectionClosed", err)
 		}
 	})
@@ -677,7 +677,7 @@ func TestInsecureAuthPolicy(t *testing.T) {
 	t.Run("http config creds refused by default", func(t *testing.T) {
 		srv := httptest.NewServer(http.HandlerFunc(basicChallenge))
 		defer srv.Close()
-		_, err := Open(context.Background(), Config{URL: srv.URL, Username: testUser, Password: testPass})
+		_, err := Open(t.Context(), Config{URL: srv.URL, Username: testUser, Password: testPass})
 		if !errors.Is(err, ErrInsecureAuth) {
 			t.Fatalf("Open = %v, want ErrInsecureAuth", err)
 		}
@@ -687,7 +687,7 @@ func TestInsecureAuthPolicy(t *testing.T) {
 		srv := httptest.NewServer(http.HandlerFunc(basicChallenge))
 		defer srv.Close()
 		u := "http://bob:pw@" + srv.Listener.Addr().String() + "/s"
-		if _, err := Open(context.Background(), Config{URL: u}); !errors.Is(err, ErrInsecureAuth) {
+		if _, err := Open(t.Context(), Config{URL: u}); !errors.Is(err, ErrInsecureAuth) {
 			t.Fatalf("Open = %v, want ErrInsecureAuth", err)
 		}
 	})

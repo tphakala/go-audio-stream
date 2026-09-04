@@ -284,7 +284,7 @@ func rtpmapString(encoding string, clock, channels int, hasRTPMap bool) string {
 // example "cpresent") splits to a single element and is skipped here, never
 // indexed at [1]. Centralizing the guard means every fmtp parser inherits it.
 func parseFmtpPairs(params string, fn func(key, value string)) {
-	for _, elem := range strings.Split(params, ";") {
+	for elem := range strings.SplitSeq(params, ";") {
 		kv := strings.SplitN(elem, "=", 2)
 		if len(kv) < 2 {
 			continue

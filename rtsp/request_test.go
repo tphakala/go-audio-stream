@@ -1,7 +1,6 @@
 package rtsp_test
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"strings"
@@ -55,7 +54,7 @@ func runAuthedPlayback(t *testing.T, spec *testserver.AuthSpec) *rtsp.Client {
 		}
 		drainRequests(sc)
 	}})
-	c, err := rtsp.Dial(context.Background(), rtsp.Config{
+	c, err := rtsp.Dial(t.Context(), rtsp.Config{
 		URL:      s.URL("/stream"),
 		Timeout:  testTimeout,
 		Username: spec.Username,
@@ -158,7 +157,7 @@ func TestAuthFailureExhausted(t *testing.T) {
 		_ = sc.Respond(req, 401, "Unauthorized", digestChallenge(false), nil)
 		drainRequests(sc)
 	}})
-	c, err := rtsp.Dial(context.Background(), rtsp.Config{
+	c, err := rtsp.Dial(t.Context(), rtsp.Config{
 		URL:      s.URL("/stream"),
 		Timeout:  testTimeout,
 		Username: authUser,
@@ -169,7 +168,7 @@ func TestAuthFailureExhausted(t *testing.T) {
 	}
 	defer closeAndWait(t, c)
 
-	_, err = c.Describe(context.Background())
+	_, err = c.Describe(t.Context())
 	if !errors.Is(err, rtsp.ErrAuthFailed) {
 		t.Fatalf("Describe = %v, want ErrAuthFailed", err)
 	}
@@ -216,7 +215,7 @@ func checkAuthorized(req *rtsp.Request, wantMethod string) authReq {
 // digestParam extracts one auth-param value from a Digest header value,
 // stripping any surrounding quotes.
 func digestParam(header, name string) string {
-	for _, part := range strings.Split(strings.TrimPrefix(header, "Digest "), ",") {
+	for part := range strings.SplitSeq(strings.TrimPrefix(header, "Digest "), ",") {
 		k, v, ok := strings.Cut(strings.TrimSpace(part), "=")
 		if ok && strings.EqualFold(strings.TrimSpace(k), name) {
 			return strings.Trim(strings.TrimSpace(v), `"`)
@@ -263,7 +262,7 @@ func TestAuthPreauthSubsequentRequests(t *testing.T) {
 		_ = sc.Respond(play, 200, "OK", h, nil)
 		drainRequests(sc)
 	}})
-	c, err := rtsp.Dial(context.Background(), rtsp.Config{
+	c, err := rtsp.Dial(t.Context(), rtsp.Config{
 		URL:      s.URL("/stream"),
 		Timeout:  testTimeout,
 		Username: authUser,
@@ -321,7 +320,7 @@ func TestKeepaliveAndTeardownCarryAuthorization(t *testing.T) {
 			_ = sc.Respond(req, 200, "OK", nil, nil)
 		}
 	}})
-	c, err := rtsp.Dial(context.Background(), rtsp.Config{
+	c, err := rtsp.Dial(t.Context(), rtsp.Config{
 		URL:      s.URL("/stream"),
 		Timeout:  testTimeout,
 		Username: spec.Username,
@@ -406,7 +405,7 @@ func TestStaleChallengeCannotDowngradeTheScheme(t *testing.T) {
 			_ = sc.Respond(req, 200, "OK", nil, nil)
 		}
 	}})
-	c, err := rtsp.Dial(context.Background(), rtsp.Config{
+	c, err := rtsp.Dial(t.Context(), rtsp.Config{
 		URL:      s.URL("/stream"),
 		Timeout:  testTimeout,
 		Username: authUser,
@@ -417,7 +416,7 @@ func TestStaleChallengeCannotDowngradeTheScheme(t *testing.T) {
 	}
 	defer closeAndWait(t, c)
 
-	_, err = c.Describe(context.Background())
+	_, err = c.Describe(t.Context())
 	if !errors.Is(err, rtsp.ErrAuthFailed) {
 		t.Fatalf("Describe = %v, want ErrAuthFailed rather than a scheme downgrade", err)
 	}

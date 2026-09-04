@@ -79,7 +79,7 @@ func TestOpenHeaderStallClassifiesAsTimeout(t *testing.T) {
 			srv := httptest.NewServer(serveThenPark(tc.contentType, tc.prefix, release))
 			defer srv.Close()
 
-			_, err := Open(context.Background(), Config{URL: srv.URL, Timeout: 200 * time.Millisecond, Format: tc.format})
+			_, err := Open(t.Context(), Config{URL: srv.URL, Timeout: 200 * time.Millisecond, Format: tc.format})
 			if !errors.Is(err, ErrRequestTimeout) {
 				t.Fatalf("Open on a stalled %s header = %v, want ErrRequestTimeout", tc.name, err)
 			}
@@ -102,7 +102,7 @@ func TestOpenHeaderCallerCancelClassifiesAsCanceled(t *testing.T) {
 			srv := httptest.NewServer(serveThenPark(tc.contentType, tc.prefix, release))
 			defer srv.Close()
 
-			ctx, cancel := context.WithCancel(context.Background())
+			ctx, cancel := context.WithCancel(t.Context())
 			defer cancel()
 			go func() {
 				time.Sleep(50 * time.Millisecond)
@@ -135,7 +135,7 @@ func (timeoutError) Temporary() bool { return false }
 // cancel takes precedence over an EOF-shaped read.
 func TestClassifyHeaderReadErr(t *testing.T) {
 	genericErr := errors.New("boom")
-	cancelled, cancel := context.WithCancel(context.Background())
+	cancelled, cancel := context.WithCancel(t.Context())
 	cancel()
 
 	timedOut := func() *atomic.Bool { b := &atomic.Bool{}; b.Store(true); return b }
@@ -148,14 +148,14 @@ func TestClassifyHeaderReadErr(t *testing.T) {
 		timedOut *atomic.Bool
 		want     error // matched with errors.Is; nil means the parser reports its own format error
 	}{
-		{"clean EOF is a format error", context.Background(), io.EOF, fresh(), nil},
-		{"clean unexpected EOF is a format error", context.Background(), io.ErrUnexpectedEOF, fresh(), nil},
-		{"open deadline fired", context.Background(), genericErr, timedOut(), ErrRequestTimeout},
-		{"open deadline beats an EOF-shaped read", context.Background(), io.ErrUnexpectedEOF, timedOut(), ErrRequestTimeout},
+		{"clean EOF is a format error", t.Context(), io.EOF, fresh(), nil},
+		{"clean unexpected EOF is a format error", t.Context(), io.ErrUnexpectedEOF, fresh(), nil},
+		{"open deadline fired", t.Context(), genericErr, timedOut(), ErrRequestTimeout},
+		{"open deadline beats an EOF-shaped read", t.Context(), io.ErrUnexpectedEOF, timedOut(), ErrRequestTimeout},
 		{"caller cancel", cancelled, genericErr, fresh(), context.Canceled},
 		{"caller cancel beats an EOF-shaped read", cancelled, io.EOF, fresh(), context.Canceled},
-		{"transport timeout", context.Background(), timeoutError{}, fresh(), ErrRequestTimeout},
-		{"other transport failure", context.Background(), genericErr, fresh(), ErrConnectionClosed},
+		{"transport timeout", t.Context(), timeoutError{}, fresh(), ErrRequestTimeout},
+		{"other transport failure", t.Context(), genericErr, fresh(), ErrConnectionClosed},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

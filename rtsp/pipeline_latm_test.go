@@ -272,7 +272,7 @@ type codecUpdateRecording struct {
 func (r *codecUpdateRecording) onCodecUpdate(u audiostream.CodecUpdate) {
 	r.events = append(r.events, latmEventUpdate)
 	c, _ := u.Codec.(audiostream.CodecMP4ALATM)
-	r.ascs = append(r.ascs, append([]byte(nil), c.AudioSpecificConfig...))
+	r.ascs = append(r.ascs, bytes.Clone(c.AudioSpecificConfig))
 }
 
 func (r *codecUpdateRecording) onFrame(audiostream.Frame) {

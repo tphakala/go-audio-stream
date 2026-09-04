@@ -1,7 +1,6 @@
 package udpsource
 
 import (
-	"context"
 	"encoding/binary"
 	"errors"
 	"net"
@@ -186,7 +185,7 @@ func TestOpenRTCPValidation(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg := base()
 			tc.mutate(&cfg)
-			c, err := Open(context.Background(), cfg)
+			c, err := Open(t.Context(), cfg)
 			if err == nil {
 				_ = c.Close()
 				t.Fatalf("Open accepted invalid RTCP config")
@@ -304,7 +303,7 @@ func TestRTCPMalformedNeverEndsSession(t *testing.T) {
 		_, _ = rtcp.Write([]byte("garbage rtcp payload"))
 	}
 	done := make(chan error, 1)
-	go func() { done <- c.Wait(context.Background()) }()
+	go func() { done <- c.Wait(t.Context()) }()
 	select {
 	case err := <-done:
 		t.Fatalf("session ended on malformed RTCP: %v", err)

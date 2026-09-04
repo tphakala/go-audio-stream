@@ -151,7 +151,7 @@ func TestParseCaps(t *testing.T) {
 
 	var sb strings.Builder
 	sb.WriteString("v=0\r\n")
-	for i := 0; i < sdp.MaxMediaSections+1; i++ {
+	for range sdp.MaxMediaSections + 1 {
 		sb.WriteString("m=audio 0 RTP/AVP 0\r\n")
 	}
 	if _, err := sdp.Parse([]byte(sb.String())); !errors.Is(err, sdp.ErrTooManyMedia) {
@@ -160,7 +160,7 @@ func TestParseCaps(t *testing.T) {
 
 	var ab strings.Builder
 	ab.WriteString("v=0\r\nm=audio 0 RTP/AVP 0\r\n")
-	for i := 0; i < sdp.MaxAttributesPerSection+1; i++ {
+	for range sdp.MaxAttributesPerSection + 1 {
 		ab.WriteString("a=recvonly\r\n")
 	}
 	if _, err := sdp.Parse([]byte(ab.String())); !errors.Is(err, sdp.ErrTooManyAttributes) {

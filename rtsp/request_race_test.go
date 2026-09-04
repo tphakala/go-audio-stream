@@ -1,11 +1,12 @@
 package rtsp
 
 import (
-	"context"
+	"bytes"
 	"errors"
 	"io"
 	"net"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -177,7 +178,7 @@ func TestRoundTripPrefersDeliveredResponseOverShutdown(t *testing.T) {
 
 		go c.reader()
 
-		ctx := context.Background()
+		ctx := t.Context()
 		resp, err := c.roundTrip(ctx, &Request{Method: methodOptions, URL: scriptedURL})
 		if err != nil {
 			t.Fatalf("iteration %d: roundTrip = %v, want the delivered 200 response", i, err)
@@ -238,7 +239,7 @@ func TestRoundTripPrefersDeliveredResponseOverTimeout(t *testing.T) {
 		}()
 		go c.reader()
 
-		resp, err := c.roundTrip(context.Background(), &Request{Method: methodOptions, URL: scriptedURL})
+		resp, err := c.roundTrip(t.Context(), &Request{Method: methodOptions, URL: scriptedURL})
 		if err != nil {
 			t.Fatalf("iteration %d: roundTrip = %v, want the delivered response", i, err)
 		}
@@ -259,7 +260,7 @@ func TestRoundTripTimeoutIsMatchable(t *testing.T) {
 	c := newClient(&cfg, conn, &target{requestURL: scriptedURL})
 	go c.reader()
 
-	_, err := c.roundTrip(context.Background(), &Request{Method: methodOptions, URL: scriptedURL})
+	_, err := c.roundTrip(t.Context(), &Request{Method: methodOptions, URL: scriptedURL})
 	if !errors.Is(err, ErrRequestTimeout) {
 		t.Fatalf("roundTrip = %v, want ErrRequestTimeout", err)
 	}
@@ -282,7 +283,7 @@ func TestTeardownIsActuallyWritten(t *testing.T) {
 	conn := newScriptedConn(nil)
 	conn.onWrite = func(_ *scriptedConn, p []byte) {
 		mu.Lock()
-		written = append(written, append([]byte(nil), p...))
+		written = append(written, bytes.Clone(p))
 		mu.Unlock()
 	}
 
@@ -324,11 +325,11 @@ func parseNonceCount(raw []byte) (uint64, bool) {
 		return 0, false
 	}
 	auth := req.Header.Get("Authorization")
-	i := strings.Index(auth, "nc=")
-	if i < 0 {
+	_, after, ok := strings.Cut(auth, "nc=")
+	if !ok {
 		return 0, false
 	}
-	rest := auth[i+len("nc="):]
+	rest := after
 	end := 0
 	for end < len(rest) && isHexDigit(rest[end]) {
 		end++
@@ -419,7 +420,7 @@ func TestConcurrentSendersPreserveNonceOrder(t *testing.T) {
 					c.sendKeepalive()
 					return
 				}
-				_, _ = c.roundTrip(context.Background(), &Request{Method: methodOptions, URL: scriptedURL})
+				_, _ = c.roundTrip(t.Context(), &Request{Method: methodOptions, URL: scriptedURL})
 			}(i)
 		}
 		wg.Wait()
@@ -427,7 +428,7 @@ func TestConcurrentSendersPreserveNonceOrder(t *testing.T) {
 		<-c.done
 
 		mu.Lock()
-		got := append([]uint64(nil), ncs...)
+		got := slices.Clone(ncs)
 		mu.Unlock()
 
 		if len(got) != senders {

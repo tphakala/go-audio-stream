@@ -2,7 +2,6 @@ package doctor
 
 import (
 	"bytes"
-	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -52,7 +51,7 @@ func aacListenFrames(t *testing.T, sampleRate, channels, numFrames int) (frames 
 		}
 		d := time.Duration(i) * frameDur
 		frames = append(frames, CapturedFrame{
-			Data:       append([]byte(nil), adtsFrame[7:]...),
+			Data:       bytes.Clone(adtsFrame[7:]),
 			PTS:        d,
 			ReceivedAt: base.Add(d),
 		})
@@ -103,7 +102,7 @@ func TestRunReportAndWAV(t *testing.T) {
 	opts := Options{URL: testTargetURL, Duration: 10 * time.Second, Report: true, WAVPath: wavPath}
 
 	var out, errOut strings.Builder
-	res, err := Run(context.Background(), opts, f, &out, &errOut, testEnv(), fixedClock(5*time.Millisecond))
+	res, err := Run(t.Context(), opts, f, &out, &errOut, testEnv(), fixedClock(5*time.Millisecond))
 	if err != nil {
 		t.Fatalf("Run() error = %v, want nil", err)
 	}
@@ -179,7 +178,7 @@ func TestRunListenCreateFailureRedactsPath(t *testing.T) {
 	opts := Options{URL: testTargetURL, Duration: 10 * time.Second, Report: true, WAVPath: wavPath}
 
 	var out, errOut strings.Builder
-	res, err := Run(context.Background(), opts, f, &out, &errOut, testEnv(), fixedClock(5*time.Millisecond))
+	res, err := Run(t.Context(), opts, f, &out, &errOut, testEnv(), fixedClock(5*time.Millisecond))
 	if err != nil {
 		t.Fatalf("Run() error = %v, want nil (a listen failure must not fail the run)", err)
 	}
@@ -233,7 +232,7 @@ func TestRunListenWriteFailureRedactsPath(t *testing.T) {
 	opts := Options{URL: testTargetURL, Duration: 10 * time.Second, Report: true, WAVPath: wavPath}
 
 	var out, errOut strings.Builder
-	res, err := Run(context.Background(), opts, f, &out, &errOut, testEnv(), fixedClock(5*time.Millisecond))
+	res, err := Run(t.Context(), opts, f, &out, &errOut, testEnv(), fixedClock(5*time.Millisecond))
 	if err != nil {
 		t.Fatalf("Run() error = %v, want nil (a listen failure must not fail the run)", err)
 	}
@@ -286,7 +285,7 @@ func TestRunReportModeSeparation(t *testing.T) {
 	opts := Options{URL: testTargetURL, Duration: 10 * time.Second, Report: true}
 
 	var out, errOut strings.Builder
-	res, err := Run(context.Background(), opts, f, &out, &errOut, testEnv(), fixedClock(5*time.Millisecond))
+	res, err := Run(t.Context(), opts, f, &out, &errOut, testEnv(), fixedClock(5*time.Millisecond))
 	if err != nil {
 		t.Fatalf("Run() error = %v, want nil", err)
 	}

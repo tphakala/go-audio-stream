@@ -295,7 +295,7 @@ func buildInBandLengthEscape(payloadLen int) []byte {
 		w.write(uint64(rem), 8)
 		break
 	}
-	for i := 0; i < payloadLen; i++ {
+	for i := range payloadLen {
 		w.write(uint64(i&0xFF), 8)
 	}
 	w.byteAlign()

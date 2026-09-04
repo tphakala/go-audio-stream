@@ -107,5 +107,5 @@ func (c *Client) digestRetry(ctx context.Context, do doFunc, prev *http.Response
 // strongest usable challenge (SHA-256 Digest > MD5 Digest > Basic), or false
 // when none is answerable.
 func selectChallenge(resp *http.Response) (httpauth.Challenge, bool) {
-	return httpauth.SelectChallenge(httpauth.ParseChallenges(resp.Header.Values("Www-Authenticate")))
+	return httpauth.SelectChallenge(httpauth.ParseChallenges(resp.Header.Values("WWW-Authenticate")))
 }

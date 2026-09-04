@@ -1,7 +1,6 @@
 package doctor
 
 import (
-	"context"
 	"encoding/hex"
 	"io"
 	"os"
@@ -102,7 +101,7 @@ func TestRunInBandLATMLearnedASC(t *testing.T) {
 			opts := Options{URL: testTargetURL, Duration: 10 * time.Second, WAVPath: wavPath}
 
 			var out strings.Builder
-			res, err := Run(context.Background(), opts, f, &out, io.Discard, testEnv(), fixedClock(5*time.Millisecond))
+			res, err := Run(t.Context(), opts, f, &out, io.Discard, testEnv(), fixedClock(5*time.Millisecond))
 			if err != nil {
 				t.Fatalf("Run() error = %v, want nil", err)
 			}

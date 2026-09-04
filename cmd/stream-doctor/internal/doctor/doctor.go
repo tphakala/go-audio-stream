@@ -490,8 +490,7 @@ func (r *runner) listen() {
 // os.Create branch above. No path fragment may reach the report, which
 // deliberately never shows the --wav path.
 func sanitizeWriteErr(err error) string {
-	var pathErr *os.PathError
-	if errors.As(err, &pathErr) {
+	if pathErr, ok := errors.AsType[*os.PathError](err); ok {
 		return "wav write failed: " + pathErr.Err.Error()
 	}
 	return "wav write failed: " + err.Error()

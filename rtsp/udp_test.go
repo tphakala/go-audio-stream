@@ -178,7 +178,7 @@ func TestUDPHolePunchSendsDatagramsToResolvedPeers(t *testing.T) {
 	m.holePunch(rr, nil)
 
 	buf := make([]byte, maxDatagramSize)
-	for i := 0; i < natPunchCount; i++ {
+	for i := range natPunchCount {
 		if err := rtpPeer.SetReadDeadline(time.Now().Add(2 * time.Second)); err != nil {
 			t.Fatalf("SetReadDeadline: %v", err)
 		}

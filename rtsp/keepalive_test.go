@@ -94,7 +94,7 @@ func TestKeepaliveFireAndForget(t *testing.T) {
 	// session had not already terminated on its own; a false timeout from the
 	// unanswered keepalives would surface a different error here. The cancel
 	// also funnels shutdown, so Close afterward is a no-op cleanup.
-	waitCtx, cancel := context.WithTimeout(context.Background(), 2500*time.Millisecond)
+	waitCtx, cancel := context.WithTimeout(t.Context(), 2500*time.Millisecond)
 	defer cancel()
 	if err := c.Wait(waitCtx); !errors.Is(err, context.DeadlineExceeded) {
 		t.Errorf("Wait = %v, want still-alive; unanswered keepalives must not end the session", err)
@@ -107,7 +107,7 @@ func TestKeepaliveFireAndForget(t *testing.T) {
 	if err := c.Close(); err != nil {
 		t.Errorf("Close = %v, want nil", err)
 	}
-	joinCtx, joinCancel := context.WithTimeout(context.Background(), testTimeout)
+	joinCtx, joinCancel := context.WithTimeout(t.Context(), testTimeout)
 	defer joinCancel()
 	if err := c.Wait(joinCtx); !errors.Is(err, context.DeadlineExceeded) {
 		t.Errorf("Wait after Close = %v, want the original DeadlineExceeded", err)
@@ -127,7 +127,7 @@ func parseReceiverReport(payload []byte) (rtp.ReceiverReport, error) {
 	rr := rtp.ReceiverReport{ReporterSSRC: binary.BigEndian.Uint32(payload[4:8])}
 	count := int(payload[0] & 0x1f)
 	off := 8
-	for i := 0; i < count; i++ {
+	for range count {
 		if off+24 > len(payload) {
 			return rtp.ReceiverReport{}, errors.New("receiver report block truncated")
 		}
@@ -235,7 +235,7 @@ func TestReadIdleWatchdog(t *testing.T) {
 	// Capture the baseline with the server's accept loop already running, so
 	// only the client's and one handler's goroutines are counted.
 	baseline := runtime.NumGoroutine()
-	c, err := rtsp.Dial(context.Background(), rtsp.Config{
+	c, err := rtsp.Dial(t.Context(), rtsp.Config{
 		URL:      s.URL("/stream"),
 		Timeout:  testTimeout,
 		ReadIdle: 300 * time.Millisecond,
@@ -245,7 +245,7 @@ func TestReadIdleWatchdog(t *testing.T) {
 	}
 	describeSetupPlay(t, c, nil)
 
-	if err := c.Wait(context.Background()); !errors.Is(err, audiostream.ErrReadTimeout) {
+	if err := c.Wait(t.Context()); !errors.Is(err, audiostream.ErrReadTimeout) {
 		t.Fatalf("Wait = %v, want ErrReadTimeout", err)
 	}
 	// Close after the watchdog already ended the session: the first cause wins,
@@ -253,7 +253,7 @@ func TestReadIdleWatchdog(t *testing.T) {
 	if err := c.Close(); err != nil {
 		t.Errorf("Close = %v, want nil", err)
 	}
-	if err := c.Wait(context.Background()); !errors.Is(err, audiostream.ErrReadTimeout) {
+	if err := c.Wait(t.Context()); !errors.Is(err, audiostream.ErrReadTimeout) {
 		t.Errorf("Wait after Close = %v, want the original ErrReadTimeout", err)
 	}
 	assertNoGoroutineLeak(t, baseline)
@@ -280,7 +280,7 @@ func TestWatchdogNotTrippedByKeepaliveReply(t *testing.T) {
 			}
 		}
 	}})
-	c, err := rtsp.Dial(context.Background(), rtsp.Config{
+	c, err := rtsp.Dial(t.Context(), rtsp.Config{
 		URL:      s.URL("/stream"),
 		Timeout:  testTimeout,
 		ReadIdle: 1500 * time.Millisecond,
@@ -290,7 +290,7 @@ func TestWatchdogNotTrippedByKeepaliveReply(t *testing.T) {
 	}
 	describeSetupPlay(t, c, nil)
 
-	if err := c.Wait(context.Background()); !errors.Is(err, audiostream.ErrReadTimeout) {
+	if err := c.Wait(t.Context()); !errors.Is(err, audiostream.ErrReadTimeout) {
 		t.Fatalf("Wait = %v, want ErrReadTimeout despite keepalive replies", err)
 	}
 	if err := c.Close(); err != nil {

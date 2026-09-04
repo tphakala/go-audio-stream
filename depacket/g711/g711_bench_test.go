@@ -29,7 +29,7 @@ func BenchmarkDepacketizeDst(b *testing.B) {
 	b.ReportAllocs()
 	b.SetBytes(int64(len(payload)))
 	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		if _, err := g711.Depacketize(dst, payload, audiostream.MuLaw); err != nil {
 			b.Fatal(err)
 		}
@@ -48,7 +48,7 @@ func BenchmarkDepacketizeAlloc(b *testing.B) {
 	b.ReportAllocs()
 	b.SetBytes(int64(len(payload)))
 	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		sinkPCM, _ = g711.DepacketizeAlloc(payload, audiostream.MuLaw)
 	}
 }

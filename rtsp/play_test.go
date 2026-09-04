@@ -93,12 +93,12 @@ func aacFragment(declaredSize int, data []byte) []byte {
 // (honoring the Data-valid-only-during-callback contract) onto frames.
 func dialWithFrames(t *testing.T, url string, frames chan<- audiostream.Frame) *rtsp.Client {
 	t.Helper()
-	c, err := rtsp.Dial(context.Background(), rtsp.Config{
+	c, err := rtsp.Dial(t.Context(), rtsp.Config{
 		URL:     url,
 		Timeout: testTimeout,
 		OnFrame: func(f audiostream.Frame) {
 			cp := f
-			cp.Data = append([]byte(nil), f.Data...)
+			cp.Data = bytes.Clone(f.Data)
 			frames <- cp
 		},
 	})
@@ -112,7 +112,7 @@ func dialWithFrames(t *testing.T, url string, frames chan<- audiostream.Frame) *
 // discovered track (Discard chosen by discard, which may be nil), and Play.
 func describeSetupPlay(t *testing.T, c *rtsp.Client, discard func(i int) bool) []rtsp.Track {
 	t.Helper()
-	tracks, err := c.Describe(context.Background())
+	tracks, err := c.Describe(t.Context())
 	if err != nil {
 		t.Fatalf("Describe: %v", err)
 	}
@@ -121,11 +121,11 @@ func describeSetupPlay(t *testing.T, c *rtsp.Client, discard func(i int) bool) [
 		if discard != nil {
 			opts.Discard = discard(i)
 		}
-		if err := c.Setup(context.Background(), tr, opts); err != nil {
+		if err := c.Setup(t.Context(), tr, opts); err != nil {
 			t.Fatalf("Setup track %d: %v", i, err)
 		}
 	}
-	if err := c.Play(context.Background()); err != nil {
+	if err := c.Play(t.Context()); err != nil {
 		t.Fatalf("Play: %v", err)
 	}
 	return tracks
@@ -409,14 +409,14 @@ func TestDataBeforePlayResponse(t *testing.T) {
 	c := dialWithFrames(t, s.URL("/stream"), frames)
 	defer closeAndWait(t, c)
 
-	tracks, err := c.Describe(context.Background())
+	tracks, err := c.Describe(t.Context())
 	if err != nil {
 		t.Fatalf("Describe: %v", err)
 	}
-	if err := c.Setup(context.Background(), tracks[0], rtsp.SetupOptions{}); err != nil {
+	if err := c.Setup(t.Context(), tracks[0], rtsp.SetupOptions{}); err != nil {
 		t.Fatalf("Setup: %v", err)
 	}
-	if err := c.Play(context.Background()); err != nil {
+	if err := c.Play(t.Context()); err != nil {
 		t.Fatalf("Play must return nil despite early data: %v", err)
 	}
 	f := recvFrame(t, frames)
@@ -592,14 +592,14 @@ func TestDataBeforeSetupResponseDropped(t *testing.T) {
 	c := dialWithFrames(t, s.URL("/stream"), frames)
 	defer closeAndWait(t, c)
 
-	tracks, err := c.Describe(context.Background())
+	tracks, err := c.Describe(t.Context())
 	if err != nil {
 		t.Fatalf("Describe: %v", err)
 	}
-	if err := c.Setup(context.Background(), tracks[0], rtsp.SetupOptions{}); err != nil {
+	if err := c.Setup(t.Context(), tracks[0], rtsp.SetupOptions{}); err != nil {
 		t.Fatalf("Setup: %v", err)
 	}
-	if err := c.Play(context.Background()); err != nil {
+	if err := c.Play(t.Context()); err != nil {
 		t.Fatalf("Play: %v", err)
 	}
 
@@ -751,7 +751,7 @@ func TestResyncBudgetStillBoundedByRTCPChannel(t *testing.T) {
 	describeSetupPlay(t, c, nil)
 	closeRelease()
 
-	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
+	ctx, cancel := context.WithTimeout(t.Context(), testTimeout)
 	defer cancel()
 	err := c.Wait(ctx)
 	if err == nil || !strings.Contains(err.Error(), "resync exceeded") {
@@ -797,7 +797,7 @@ func TestResyncBudgetStillBoundedWithADiscardedTrack(t *testing.T) {
 	describeSetupPlay(t, c, func(i int) bool { return i == 1 })
 	closeRelease()
 
-	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
+	ctx, cancel := context.WithTimeout(t.Context(), testTimeout)
 	defer cancel()
 	err := c.Wait(ctx)
 	if err == nil || !strings.Contains(err.Error(), "resync exceeded") {
@@ -842,12 +842,11 @@ func TestPlayWithoutSetup(t *testing.T) {
 
 	c := dialIdle(t, s.URL("/stream"))
 	defer closeAndWait(t, c)
-	if _, err := c.Describe(context.Background()); err != nil {
+	if _, err := c.Describe(t.Context()); err != nil {
 		t.Fatalf("Describe: %v", err)
 	}
-	err := c.Play(context.Background())
-	var se *rtsp.StateError
-	if !errors.As(err, &se) {
+	err := c.Play(t.Context())
+	if _, ok := errors.AsType[*rtsp.StateError](err); !ok {
 		t.Fatalf("Play without Setup = %v, want *StateError", err)
 	}
 	if !errors.Is(err, rtsp.ErrInvalidState) {
@@ -896,7 +895,7 @@ func TestResyncBudgetStillBoundedWithABoundChannel(t *testing.T) {
 	describeSetupPlay(t, c, nil)
 	closeRelease()
 
-	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
+	ctx, cancel := context.WithTimeout(t.Context(), testTimeout)
 	defer cancel()
 	err := c.Wait(ctx)
 	if err == nil || !strings.Contains(err.Error(), "resync exceeded") {

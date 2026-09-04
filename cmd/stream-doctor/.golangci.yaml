@@ -12,6 +12,7 @@ output:
 linters:
   enable:
     - bodyclose
+    - canonicalheader
     - copyloopvar
     - dupl
     - durationcheck
@@ -19,22 +20,31 @@ linters:
     - errorlint
     - exhaustive
     - fatcontext
+    - forcetypeassert
+    - gocheckcompilerdirectives
     - gocognit
     - goconst
     - gocritic
     - gocyclo
     - iface
     - ineffassign
+    - makezero
     - misspell
+    - modernize
     - nilerr
+    - nilnesserr
     - nilnil
+    - noctx
+    - perfsprint
     - predeclared
     - prealloc
+    - reassign
     - revive
     - staticcheck
     - testifylint
     - thelper
     - unconvert
+    - usestdlibvars
     - wastedassign
   disable:
     - unused

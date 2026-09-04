@@ -75,7 +75,7 @@ func TestCodewordReadersMatchModel(t *testing.T) {
 	}
 	for _, width := range codewordWidths {
 		nsamp := (len(payload) * 8) / width
-		for k := 0; k < nsamp; k++ {
+		for k := range nsamp {
 			pos := k * width
 			if got, want := readCodewordLSB(payload, pos, width), modelCodewordLSB(payload, pos, width); got != want {
 				t.Fatalf("readCodewordLSB(width=%d, pos=%d) = %d, want %d", width, pos, got, want)
@@ -227,9 +227,9 @@ func BenchmarkCodewordReader(b *testing.B) {
 				var sink int32
 				b.ReportAllocs()
 				b.ResetTimer()
-				for i := 0; i < b.N; i++ {
+				for b.Loop() {
 					pos := 0
-					for k := 0; k < benchCodewords; k++ {
+					for range benchCodewords {
 						sink ^= r.fn(payload, pos, width)
 						pos += width
 					}

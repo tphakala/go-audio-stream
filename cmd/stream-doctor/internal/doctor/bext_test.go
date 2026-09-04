@@ -1,7 +1,6 @@
 package doctor
 
 import (
-	"context"
 	"encoding/binary"
 	"os"
 	"path/filepath"
@@ -204,7 +203,7 @@ func TestRunListenBextWithValidSenderClock(t *testing.T) {
 	opts := Options{URL: testTargetURL, Duration: time.Second, WAVPath: wavPath}
 
 	var out strings.Builder
-	_, _ = Run(context.Background(), opts, f, &out, os.Stderr, testEnv(), fixedClock(time.Millisecond))
+	_, _ = Run(t.Context(), opts, f, &out, os.Stderr, testEnv(), fixedClock(time.Millisecond))
 
 	wavBytes, rerr := os.ReadFile(wavPath)
 	if rerr != nil {
@@ -269,7 +268,7 @@ func TestRunListenNoBextWithoutSenderClock(t *testing.T) {
 	opts := Options{URL: testTargetURL, Duration: time.Second, WAVPath: wavPath}
 
 	var out strings.Builder
-	_, _ = Run(context.Background(), opts, f, &out, os.Stderr, testEnv(), fixedClock(time.Millisecond))
+	_, _ = Run(t.Context(), opts, f, &out, os.Stderr, testEnv(), fixedClock(time.Millisecond))
 
 	wavBytes, rerr := os.ReadFile(wavPath)
 	if rerr != nil {

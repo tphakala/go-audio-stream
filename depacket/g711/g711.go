@@ -66,7 +66,7 @@ var (
 )
 
 func init() {
-	for i := 0; i < 256; i++ {
+	for i := range 256 {
 		muLawTable[i] = muLawExpand(byte(i))
 		aLawTable[i] = aLawExpand(byte(i))
 	}

@@ -3,6 +3,7 @@ package rtsp
 import (
 	"encoding/binary"
 	"errors"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -320,10 +321,8 @@ func headerHasCRLF(h Header) bool {
 		if hasCRLF(name) {
 			return true
 		}
-		for _, v := range vals {
-			if hasCRLF(v) {
-				return true
-			}
+		if slices.ContainsFunc(vals, hasCRLF) {
+			return true
 		}
 	}
 	return false
@@ -449,11 +448,8 @@ func parseHead(buf []byte) (firstLine string, header Header, bodyStart int, err 
 // most MaxHeaderBytes bytes: no terminator with buf under the cap is
 // ErrIncomplete; at or over the cap is ErrHeadersTooLarge.
 func findHead(buf []byte) (headEnd, bodyStart int, err error) {
-	limit := len(buf)
-	if limit > MaxHeaderBytes {
-		limit = MaxHeaderBytes
-	}
-	for i := 0; i < limit; i++ {
+	limit := min(len(buf), MaxHeaderBytes)
+	for i := range limit {
 		if buf[i] != '\n' {
 			continue
 		}
@@ -536,12 +532,12 @@ func parseHeaderLines(lines []string, h Header) error {
 		if line == "" || line[0] == ' ' || line[0] == '\t' {
 			return ErrMalformedHeader
 		}
-		colon := strings.IndexByte(line, ':')
-		if colon < 0 {
+		before, after, ok := strings.Cut(line, ":")
+		if !ok {
 			return ErrMalformedHeader
 		}
-		name := line[:colon]
-		value := strings.TrimPrefix(line[colon+1:], " ")
+		name := before
+		value := strings.TrimPrefix(after, " ")
 		if len(name) > MaxHeaderNameLen {
 			return ErrHeaderNameTooLong
 		}

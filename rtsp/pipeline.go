@@ -404,7 +404,7 @@ func (tr *track) configureLATM(codec audiostream.CodecMP4ALATM, resolved *latm.D
 	tr.kind = deliverLATM
 	tr.latm = dp
 	if asc := dp.AudioSpecificConfig(); asc != nil {
-		tr.latmASC = append([]byte(nil), asc...)
+		tr.latmASC = bytes.Clone(asc)
 	}
 }
 
@@ -592,13 +592,13 @@ func (tr *track) deliverLATM(pkt rtp.Packet, up rtp.Update, now time.Time,
 		// local. The two copies are not interchangeable: dropping the snapshot
 		// silences real config changes, dropping the callback copy exposes the
 		// depacketizer's buffer to a misbehaving consumer.
-		tr.latmASC = append([]byte(nil), asc...)
+		tr.latmASC = bytes.Clone(asc)
 		if onCodecUpdate != nil {
 			onCodecUpdate(audiostream.CodecUpdate{
 				TrackID: tr.id,
 				Codec: audiostream.CodecMP4ALATM{
 					MuxConfigPresent:    true,
-					AudioSpecificConfig: append([]byte(nil), asc...),
+					AudioSpecificConfig: bytes.Clone(asc),
 				},
 			})
 		}
@@ -898,7 +898,7 @@ func (tr *track) resetDepacketizer(onSSRCChange bool) {
 		tr.latm.Reset()
 		tr.latmASC = nil
 		if asc := tr.latm.AudioSpecificConfig(); asc != nil {
-			tr.latmASC = append([]byte(nil), asc...)
+			tr.latmASC = bytes.Clone(asc)
 		}
 	}
 }

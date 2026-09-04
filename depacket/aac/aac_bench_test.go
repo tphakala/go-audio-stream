@@ -40,7 +40,7 @@ func BenchmarkDepacketizeSingleAU(b *testing.B) {
 	b.ReportAllocs()
 	b.SetBytes(int64(len(pkt)))
 	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		if _, err := dp.Depacketize(pkt, true, 0); err != nil {
 			b.Fatal(err)
 		}
@@ -64,7 +64,7 @@ func BenchmarkDepacketizeMultiAU(b *testing.B) {
 	b.ReportAllocs()
 	b.SetBytes(int64(len(pkt)))
 	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		if _, err := dp.Depacketize(pkt, true, 0); err != nil {
 			b.Fatal(err)
 		}
@@ -88,7 +88,7 @@ func BenchmarkDepacketizeFragmented(b *testing.B) {
 	b.ReportAllocs()
 	b.SetBytes(int64(len(p1) + len(p2)))
 	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		if _, err := dp.Depacketize(p1, false, 0); err != nil {
 			b.Fatal(err)
 		}

@@ -1,7 +1,6 @@
 package hlssource
 
 import (
-	"context"
 	"errors"
 	"net"
 	"net/http"
@@ -53,11 +52,11 @@ func TestTeardownClosesIdleConnections(t *testing.T) {
 	srv.Start()
 	defer srv.Close()
 
-	c, err := Open(context.Background(), Config{URL: srv.URL + "/vod.m3u8"})
+	c, err := Open(t.Context(), Config{URL: srv.URL + "/vod.m3u8"})
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
-	if werr := c.Wait(context.Background()); !errors.Is(werr, ErrStreamEnded) {
+	if werr := c.Wait(t.Context()); !errors.Is(werr, ErrStreamEnded) {
 		t.Fatalf("Wait = %v, want ErrStreamEnded", werr)
 	}
 
@@ -112,7 +111,7 @@ func TestOpenFailureClosesIdleConnections(t *testing.T) {
 	srv.Start()
 	defer srv.Close()
 
-	if _, err := Open(context.Background(), Config{URL: srv.URL + "/vod.m3u8"}); err == nil {
+	if _, err := Open(t.Context(), Config{URL: srv.URL + "/vod.m3u8"}); err == nil {
 		t.Fatal("Open succeeded, want an error for a playlist with no playable segment")
 	}
 

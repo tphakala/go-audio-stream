@@ -108,8 +108,7 @@ func TestClassifyStatusResponseErrorMatchesSentinel(t *testing.T) {
 	}
 	// The struct is still recoverable, so a caller that wants the code and
 	// reason keeps using errors.As; the sentinel only adds category matching.
-	var respErr *rtsp.ResponseError
-	if !errors.As(err, &respErr) {
+	if _, ok := errors.AsType[*rtsp.ResponseError](err); !ok {
 		t.Fatalf("errors.As(err, &respErr) = false, want true (err = %v)", err)
 	}
 	// The two status sentinels stay distinct: a plain non-success is not a 401.
@@ -128,8 +127,7 @@ func TestClassifyStatusUnauthorizedMatchesSentinel(t *testing.T) {
 		t.Errorf("errors.Is(err, ErrUnauthorized) = false, want true (err = %v)", err)
 	}
 	// The challenge is still recoverable through errors.As for prompting.
-	var ue *rtsp.UnauthorizedError
-	if !errors.As(err, &ue) {
+	if _, ok := errors.AsType[*rtsp.UnauthorizedError](err); !ok {
 		t.Fatalf("errors.As(err, &ue) = false, want true (err = %v)", err)
 	}
 	if errors.Is(err, rtsp.ErrResponseStatus) {

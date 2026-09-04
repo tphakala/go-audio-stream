@@ -219,7 +219,7 @@ func buildWideHeader(t *testing.T, headerBits, size, index int, data []byte) []b
 	hb := make([]byte, headerBytes)
 	// Left-justify the headerBits into headerBytes*8 bits, MSB first.
 	acc <<= uint(headerBytes*8 - headerBits) // shift left by the pad bits
-	for i := 0; i < headerBytes; i++ {
+	for i := range headerBytes {
 		hb[headerBytes-1-i] = byte(acc >> (8 * uint(i)))
 	}
 	out := make([]byte, 0, 2+len(hb)+len(data))

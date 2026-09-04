@@ -106,7 +106,7 @@ func assertNoGoroutineLeak(t *testing.T, baseline int) {
 func TestDialOptions(t *testing.T) {
 	s := testserver.New(t, testserver.Options{Handle: serveOptionsThenIdle})
 
-	ctx := context.Background()
+	ctx := t.Context()
 	c, err := rtsp.Dial(ctx, rtsp.Config{URL: s.URL("/stream"), Timeout: testTimeout})
 	if err != nil {
 		t.Fatalf("Dial: %v", err)
@@ -154,7 +154,7 @@ func TestDialOptionsTolerated(t *testing.T) {
 		}
 	}})
 
-	ctx := context.Background()
+	ctx := t.Context()
 	c, err := rtsp.Dial(ctx, rtsp.Config{URL: s.URL("/stream"), Timeout: testTimeout})
 	if err != nil {
 		t.Fatalf("Dial with 501 OPTIONS: %v", err)
@@ -170,7 +170,7 @@ func TestDialOptionsTolerated(t *testing.T) {
 
 func TestDialConnectionRefused(t *testing.T) {
 	// Bind then release a port so the address is routable but refuses.
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	ln, err := (&net.ListenConfig{}).Listen(t.Context(), "tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
@@ -178,7 +178,7 @@ func TestDialConnectionRefused(t *testing.T) {
 	_ = ln.Close()
 
 	baseline := runtime.NumGoroutine()
-	ctx := context.Background()
+	ctx := t.Context()
 	_, derr := rtsp.Dial(ctx, rtsp.Config{URL: "rtsp://" + addr + "/x", Timeout: 500 * time.Millisecond})
 	if derr == nil {
 		t.Fatal("Dial to refused port = nil error, want error")
@@ -190,7 +190,7 @@ func TestCloseIdempotent(t *testing.T) {
 	s := testserver.New(t, testserver.Options{Handle: serveOptionsThenIdle})
 
 	baseline := runtime.NumGoroutine()
-	ctx := context.Background()
+	ctx := t.Context()
 	c, err := rtsp.Dial(ctx, rtsp.Config{URL: s.URL("/stream"), Timeout: testTimeout})
 	if err != nil {
 		t.Fatalf("Dial: %v", err)
@@ -211,12 +211,12 @@ func TestWaitContextCancel(t *testing.T) {
 	s := testserver.New(t, testserver.Options{Handle: serveOptionsThenIdle})
 
 	baseline := runtime.NumGoroutine()
-	c, err := rtsp.Dial(context.Background(), rtsp.Config{URL: s.URL("/stream"), Timeout: testTimeout})
+	c, err := rtsp.Dial(t.Context(), rtsp.Config{URL: s.URL("/stream"), Timeout: testTimeout})
 	if err != nil {
 		t.Fatalf("Dial: %v", err)
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
 	go func() {
 		time.Sleep(20 * time.Millisecond)
 		cancel()
@@ -247,7 +247,7 @@ func TestServerTeardownEndsWait(t *testing.T) {
 		}
 	}})
 
-	ctx := context.Background()
+	ctx := t.Context()
 	c, err := rtsp.Dial(ctx, rtsp.Config{URL: s.URL("/stream"), Timeout: testTimeout})
 	if err != nil {
 		t.Fatalf("Dial: %v", err)
@@ -269,7 +269,7 @@ func TestAbruptDisconnect(t *testing.T) {
 		_ = sc.Close()
 	}})
 
-	ctx := context.Background()
+	ctx := t.Context()
 	c, err := rtsp.Dial(ctx, rtsp.Config{URL: s.URL("/stream"), Timeout: testTimeout})
 	if err != nil {
 		t.Fatalf("Dial: %v", err)
@@ -282,7 +282,7 @@ func TestAbruptDisconnect(t *testing.T) {
 func TestStatsEmptyBeforeSetup(t *testing.T) {
 	s := testserver.New(t, testserver.Options{Handle: serveOptionsThenIdle})
 
-	ctx := context.Background()
+	ctx := t.Context()
 	c, err := rtsp.Dial(ctx, rtsp.Config{URL: s.URL("/stream"), Timeout: testTimeout})
 	if err != nil {
 		t.Fatalf("Dial: %v", err)
@@ -305,7 +305,7 @@ func TestDialTLS(t *testing.T) {
 	if !pool.AppendCertsFromPEM(s.CertPEM()) {
 		t.Fatal("AppendCertsFromPEM: no cert added")
 	}
-	ctx := context.Background()
+	ctx := t.Context()
 	c, err := rtsp.Dial(ctx, rtsp.Config{
 		URL:     s.URL("/stream"),
 		Timeout: testTimeout,
@@ -338,7 +338,7 @@ func TestDialMarshalErrorNoHang(t *testing.T) {
 
 	done := make(chan error, 1)
 	go func() {
-		_, err := rtsp.Dial(context.Background(), rtsp.Config{URL: s.URL(longPath), Timeout: testTimeout})
+		_, err := rtsp.Dial(t.Context(), rtsp.Config{URL: s.URL(longPath), Timeout: testTimeout})
 		done <- err
 	}()
 
@@ -360,7 +360,7 @@ func TestGoroutineLeakBaseline(t *testing.T) {
 	s := testserver.New(t, testserver.Options{Handle: serveOptionsThenIdle})
 
 	baseline := runtime.NumGoroutine()
-	ctx := context.Background()
+	ctx := t.Context()
 	c, err := rtsp.Dial(ctx, rtsp.Config{URL: s.URL("/stream"), Timeout: testTimeout})
 	if err != nil {
 		t.Fatalf("Dial: %v", err)
@@ -379,7 +379,7 @@ func TestGoroutineLeakBaseline(t *testing.T) {
 func TestDialTLSInsecureSkipsVerification(t *testing.T) {
 	s := testserver.New(t, testserver.Options{TLS: true, Handle: serveOptionsThenIdle})
 
-	ctx := context.Background()
+	ctx := t.Context()
 	c, err := rtsp.Dial(ctx, rtsp.Config{
 		URL:         s.URL("/stream"),
 		Timeout:     testTimeout,
@@ -400,7 +400,7 @@ func TestDialTLSInsecureSkipsVerification(t *testing.T) {
 func TestDialTLSVerifiesByDefault(t *testing.T) {
 	s := testserver.New(t, testserver.Options{TLS: true, Handle: serveOptionsThenIdle})
 
-	ctx := context.Background()
+	ctx := t.Context()
 	_, err := rtsp.Dial(ctx, rtsp.Config{URL: s.URL("/stream"), Timeout: testTimeout})
 	if err == nil {
 		t.Fatal("Dial succeeded against a self-signed cert without InsecureTLS")
@@ -420,7 +420,7 @@ func TestDialTLSFillsServerNameFromURL(t *testing.T) {
 	if !pool.AppendCertsFromPEM(s.CertPEM()) {
 		t.Fatal("AppendCertsFromPEM: no cert added")
 	}
-	ctx := context.Background()
+	ctx := t.Context()
 	c, err := rtsp.Dial(ctx, rtsp.Config{
 		URL:       s.URL("/stream"),
 		Timeout:   testTimeout,

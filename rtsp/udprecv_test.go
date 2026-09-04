@@ -1,6 +1,7 @@
 package rtsp
 
 import (
+	"bytes"
 	"encoding/binary"
 	"errors"
 	"net"
@@ -75,11 +76,19 @@ func newRecvHarness(t *testing.T, opts harnessOpts) *recvHarness {
 	}
 	rtpConn := loopbackUDP(t)
 	rtcpConn := loopbackUDP(t)
+	rtpAddr, ok := rtpConn.LocalAddr().(*net.UDPAddr)
+	if !ok {
+		t.Fatalf("rtpConn LocalAddr is %T, want *net.UDPAddr", rtpConn.LocalAddr())
+	}
+	rtcpAddr, ok := rtcpConn.LocalAddr().(*net.UDPAddr)
+	if !ok {
+		t.Fatalf("rtcpConn LocalAddr is %T, want *net.UDPAddr", rtcpConn.LocalAddr())
+	}
 	m := &mediaSockets{
 		rtpConn:  rtpConn,
 		rtcpConn: rtcpConn,
-		rtpPeer:  &net.UDPAddr{IP: peerIP, Port: rtpConn.LocalAddr().(*net.UDPAddr).Port},
-		rtcpPeer: &net.UDPAddr{IP: peerIP, Port: rtcpConn.LocalAddr().(*net.UDPAddr).Port},
+		rtpPeer:  &net.UDPAddr{IP: peerIP, Port: rtpAddr.Port},
+		rtcpPeer: &net.UDPAddr{IP: peerIP, Port: rtcpAddr.Port},
 	}
 	local, remote := net.Pipe()
 	frames := make(chan audiostream.Frame, 256)
@@ -92,7 +101,7 @@ func newRecvHarness(t *testing.T, opts harnessOpts) *recvHarness {
 	c.cfg.ReadIdle = opts.readIdle
 	c.cfg.OnFrame = func(f audiostream.Frame) {
 		cp := f
-		cp.Data = append([]byte(nil), f.Data...)
+		cp.Data = bytes.Clone(f.Data)
 		select {
 		case frames <- cp:
 		default:
@@ -101,7 +110,7 @@ func newRecvHarness(t *testing.T, opts harnessOpts) *recvHarness {
 	if opts.playing {
 		c.playing.Store(true)
 	}
-	send, err := net.DialUDP("udp", nil, rtpConn.LocalAddr().(*net.UDPAddr))
+	send, err := net.DialUDP("udp", nil, rtpAddr)
 	if err != nil {
 		_ = m.Close()
 		t.Fatalf("dial sender: %v", err)
@@ -212,10 +221,10 @@ func TestUDPRecvInOrder(t *testing.T) {
 	h.start()
 
 	const ssrc = 0x11111111
-	for i := uint16(0); i < 3; i++ {
+	for i := range uint16(3) {
 		h.sendRTP(buildTestRTP(96, 100+i, uint32(100+i), ssrc, []byte{byte(i)}))
 	}
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		f := h.waitFrame()
 		if f.RTPTime != uint32(100+i) {
 			t.Errorf("frame %d RTPTime = %d, want %d", i, f.RTPTime, 100+i)

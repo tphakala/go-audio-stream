@@ -39,7 +39,7 @@ func TestOutOfBandTwoElements(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	payload := append(append([]byte{}, v3Payload...), secondOOBElement...)
+	payload := append(bytes.Clone(v3Payload), secondOOBElement...)
 	aus, err := d.Depacketize(payload, true, 0)
 	if err != nil {
 		t.Fatalf("Depacketize: %v", err)
@@ -58,7 +58,7 @@ func TestOutOfBandThreeElements(t *testing.T) {
 		t.Fatalf("New: %v", err)
 	}
 	third := []byte{0x01, 0xCC, 0x02, 0xDD, 0xEE}
-	payload := append(append(append([]byte{}, v3Payload...), secondOOBElement...), third...)
+	payload := append(append(bytes.Clone(v3Payload), secondOOBElement...), third...)
 	aus, err := d.Depacketize(payload, true, 0)
 	if err != nil {
 		t.Fatalf("Depacketize: %v", err)
@@ -78,7 +78,7 @@ func TestOutOfBandTrailingPaddingDropped(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	payload := append(append([]byte{}, v3Payload...), 0x00, 0x00, 0x00)
+	payload := append(bytes.Clone(v3Payload), 0x00, 0x00, 0x00)
 	aus, err := d.Depacketize(payload, true, 0)
 	if err != nil {
 		t.Fatalf("Depacketize: %v", err)
@@ -96,7 +96,7 @@ func TestOutOfBandZeroLengthElementIsParsedNotPadding(t *testing.T) {
 	// A second element whose first subframe is zero-length but whose remainder is
 	// not all-zero must be parsed, locking the padding discriminator's boundary:
 	// subframe0 len 0 (empty AU), subframe1 len 2 (AA BB).
-	payload := append(append([]byte{}, v3Payload...), 0x00, 0x02, 0xAA, 0xBB)
+	payload := append(bytes.Clone(v3Payload), 0x00, 0x02, 0xAA, 0xBB)
 	aus, err := d.Depacketize(payload, true, 0)
 	if err != nil {
 		t.Fatalf("Depacketize: %v", err)
@@ -114,7 +114,7 @@ func TestOutOfBandTrailingMalformedDeliversLeading(t *testing.T) {
 	}
 	// A second element declaring a 5-byte first subframe with only 2 bytes present
 	// overflows; the complete leading element is still delivered (nil error).
-	payload := append(append([]byte{}, v3Payload...), 0x05, 0x11, 0x22)
+	payload := append(bytes.Clone(v3Payload), 0x05, 0x11, 0x22)
 	aus, err := d.Depacketize(payload, true, 0)
 	if err != nil {
 		t.Fatalf("Depacketize: want nil (deliver leading), got %v", err)
@@ -220,7 +220,7 @@ func TestInBandTwoElementsResendConfig(t *testing.T) {
 	// Two elements that each send a full config (useSameStreamMux 0). The
 	// double in-band config parse in one call must stay memory-safe (the ascBuf
 	// double-buffer swaps into the other backing array each time).
-	payload := append(append([]byte{}, buildInBandTwoSubframes()...), buildInBandTwoSubframes()...)
+	payload := append(bytes.Clone(buildInBandTwoSubframes()), buildInBandTwoSubframes()...)
 	aus, err := d.Depacketize(payload, true, 0)
 	if err != nil {
 		t.Fatalf("Depacketize: %v", err)
@@ -236,7 +236,7 @@ func TestInBandTrailingPaddingDropped(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	payload := append(append([]byte{}, buildInBandTwoSubframes()...), 0x00, 0x00)
+	payload := append(bytes.Clone(buildInBandTwoSubframes()), 0x00, 0x00)
 	aus, err := d.Depacketize(payload, true, 0)
 	if err != nil {
 		t.Fatalf("Depacketize: %v", err)
@@ -252,7 +252,7 @@ func TestInBandTrailingMalformedDeliversLeading(t *testing.T) {
 	}
 	// A valid element 1 (reuse config in element 2 would need a retained config;
 	// element 1 supplies it) followed by a truncated element 2.
-	payload := append(append([]byte{}, buildInBandTwoSubframes()...), buildInBandTwoSubframesTruncated()...)
+	payload := append(bytes.Clone(buildInBandTwoSubframes()), buildInBandTwoSubframesTruncated()...)
 	aus, err := d.Depacketize(payload, true, 0)
 	if err != nil {
 		t.Fatalf("Depacketize: want nil (deliver leading), got %v", err)

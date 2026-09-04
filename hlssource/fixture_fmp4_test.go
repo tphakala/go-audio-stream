@@ -133,7 +133,7 @@ func buildFragment(trackID uint32, samples [][]byte, dur uint32) []byte {
 	}
 	// trun flags: data-offset (0x01) + sample-duration (0x100) + sample-size (0x200).
 	trun := func(dataOffset int32) []byte {
-		body := append([]byte{}, u32(uint32(len(samples)))...)
+		body := bytes.Clone(u32(uint32(len(samples))))
 		body = append(body, u32(uint32(dataOffset))...)
 		body = append(body, records...)
 		return fullBox("trun", 0, 0x000301, body)
@@ -153,7 +153,7 @@ func buildMultiplexedFragment(videoID uint32, videoData []byte, audioID uint32, 
 	mfhd := fullBox("mfhd", 0, 0, u32(1))
 	vtfhd := fullBox("tfhd", 0, 0x020000, u32(videoID))
 	vtrun := func(off int32) []byte {
-		body := append([]byte{}, u32(1)...)
+		body := bytes.Clone(u32(1))
 		body = append(body, u32(uint32(off))...)
 		body = append(body, u32(dur)...)
 		body = append(body, u32(uint32(len(videoData)))...)
@@ -168,7 +168,7 @@ func buildMultiplexedFragment(videoID uint32, videoData []byte, audioID uint32, 
 		aData = append(aData, s...)
 	}
 	atrun := func(off int32) []byte {
-		body := append([]byte{}, u32(uint32(len(audioSamples)))...)
+		body := bytes.Clone(u32(uint32(len(audioSamples))))
 		body = append(body, u32(uint32(off))...)
 		body = append(body, aRecords...)
 		return fullBox("trun", 0, 0x000301, body)
@@ -182,7 +182,7 @@ func buildMultiplexedFragment(videoID uint32, videoData []byte, audioID uint32, 
 	vOff := int32(len(moof) + 8) // + mdat header
 	aOff := vOff + int32(len(videoData))
 	moof = build(vOff, aOff)
-	mdat := box("mdat", append(append([]byte{}, videoData...), aData...))
+	mdat := box("mdat", append(bytes.Clone(videoData), aData...))
 	return append(moof, mdat...)
 }
 
@@ -239,7 +239,7 @@ func buildEncryptedInitSegment(asc []byte, timescale, trackID uint32) []byte {
 		panic(fmt.Sprintf("fixture: want exactly one mp4a sample entry to encrypt, found %d", n))
 	}
 	i := bytes.Index(plain, []byte("mp4a"))
-	out := append([]byte(nil), plain...)
+	out := bytes.Clone(plain)
 	copy(out[i:i+4], "enca")
 	return out
 }

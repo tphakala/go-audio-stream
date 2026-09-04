@@ -12,6 +12,7 @@
 package mp4
 
 import (
+	"bytes"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -529,7 +530,7 @@ func parseESDS(esds []byte) ([]byte, error) {
 	if len(dsi) == 0 {
 		return nil, ErrNoASC
 	}
-	return append([]byte(nil), dsi...), nil
+	return bytes.Clone(dsi), nil
 }
 
 // readDescriptor reads one MPEG-4 descriptor from the front of b: its tag byte and
@@ -543,7 +544,7 @@ func readDescriptor(b []byte) (tag byte, content, rest []byte, err error) {
 	tag = b[0]
 	i := 1
 	size := 0
-	for n := 0; n < 4; n++ {
+	for range 4 {
 		if i >= len(b) {
 			return 0, nil, nil, ErrMalformedBox
 		}
@@ -849,7 +850,7 @@ func parseTrun(trun []byte, base, running int, located bool, defDur, defSize uin
 			return running, hadOffset, false, fmt.Errorf("%w: trun sample_count exceeds the fragment", ErrMalformedBox)
 		}
 	}
-	for s := uint32(0); s < sampleCount; s++ {
+	for range sampleCount {
 		dur := defDur
 		size := defSize
 		if flags&trunSampleDuration != 0 {

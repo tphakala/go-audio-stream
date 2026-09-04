@@ -185,7 +185,7 @@ func FuzzDepacketize(f *testing.F) {
 		d := New()
 		// Feed the same payload a few times with alternating markers to exercise
 		// the reassembly state machine.
-		for i := 0; i < 4; i++ {
+		for i := range 4 {
 			_, err := d.Depacketize(payload, marker || i == 3, rtpTime)
 			if err != nil && !errors.Is(err, ErrEmptyPayload) && !errors.Is(err, ErrFrameOverflow) {
 				t.Fatalf("unexpected error value: %v", err)
@@ -229,7 +229,7 @@ func BenchmarkDepacketizeUnfragmented(b *testing.B) {
 	frame[0], frame[1] = 0xFF, 0xF8
 	b.ReportAllocs()
 	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		if _, err := d.Depacketize(frame, true, ts); err != nil {
 			b.Fatal(err)
 		}

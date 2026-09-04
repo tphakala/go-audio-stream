@@ -3,6 +3,7 @@ package rtsp_test
 import (
 	"bytes"
 	"errors"
+	"net/http"
 	"strings"
 	"testing"
 
@@ -75,7 +76,7 @@ func TestParseResponseMinimal(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ParseResponse: %v", err)
 	}
-	if resp.StatusCode != 200 || resp.Reason != "OK" || resp.CSeq != 1 {
+	if resp.StatusCode != http.StatusOK || resp.Reason != "OK" || resp.CSeq != 1 {
 		t.Errorf("got code=%d reason=%q cseq=%d", resp.StatusCode, resp.Reason, resp.CSeq)
 	}
 	if resp.Body != nil {
@@ -146,7 +147,7 @@ func TestParseResponseBareLF(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ParseResponse bare-LF: %v", err)
 	}
-	if resp.StatusCode != 200 || resp.CSeq != 1 {
+	if resp.StatusCode != http.StatusOK || resp.CSeq != 1 {
 		t.Errorf("got code=%d cseq=%d", resp.StatusCode, resp.CSeq)
 	}
 	if n != len(buf) {
@@ -175,7 +176,7 @@ func TestParseResponseCapViolations(t *testing.T) {
 
 	var manyLines strings.Builder
 	manyLines.WriteString("RTSP/1.0 200 OK\r\n")
-	for i := 0; i < 300; i++ {
+	for range 300 {
 		manyLines.WriteString("X-Pad: v\r\n")
 	}
 	manyLines.WriteString("\r\n")
@@ -265,7 +266,7 @@ func TestParseRequestOptions(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ParseRequest: %v", err)
 	}
-	if req.Method != "OPTIONS" || req.URL != testURL || req.CSeq != 3 {
+	if req.Method != http.MethodOptions || req.URL != testURL || req.CSeq != 3 {
 		t.Errorf("got method=%q url=%q cseq=%d", req.Method, req.URL, req.CSeq)
 	}
 	if n != len(buf) {

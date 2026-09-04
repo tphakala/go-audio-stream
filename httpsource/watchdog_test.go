@@ -1,7 +1,6 @@
 package httpsource
 
 import (
-	"context"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -70,7 +69,7 @@ func TestReadIdleDisabledByDefault(t *testing.T) {
 
 	c := openOK(t, srv, Config{})
 	got := make(chan error, 1)
-	go func() { got <- c.Wait(context.Background()) }()
+	go func() { got <- c.Wait(t.Context()) }()
 	select {
 	case err := <-got:
 		t.Fatalf("Wait returned %v while the stream was parked and never closed", err)

@@ -1,7 +1,6 @@
 package doctor
 
 import (
-	"context"
 	"errors"
 	"io"
 	"strings"
@@ -47,7 +46,7 @@ func TestRunReportScrubsCameraStrings(t *testing.T) {
 	opts := Options{URL: testTargetURL, Duration: time.Second, Report: true}
 
 	var out strings.Builder
-	if _, err := Run(context.Background(), opts, f, &out, io.Discard, testEnv(), fixedClock(time.Millisecond)); err != nil {
+	if _, err := Run(t.Context(), opts, f, &out, io.Discard, testEnv(), fixedClock(time.Millisecond)); err != nil {
 		t.Fatalf("Run() error = %v, want nil", err)
 	}
 	got := out.String()
@@ -81,7 +80,7 @@ func TestRunReportFailureLineScrubbed(t *testing.T) {
 	opts := Options{URL: testTargetURL, Report: true}
 
 	var out strings.Builder
-	_, err := Run(context.Background(), opts, f, &out, io.Discard, testEnv(), fixedClock(time.Millisecond))
+	_, err := Run(t.Context(), opts, f, &out, io.Discard, testEnv(), fixedClock(time.Millisecond))
 	if err == nil {
 		t.Fatal("Run() error = nil, want dial error")
 	}
@@ -111,7 +110,7 @@ func TestRunReportNoAudioTrack(t *testing.T) {
 	opts := Options{URL: testTargetURL, Duration: 10 * time.Second, Report: true}
 
 	var out strings.Builder
-	res, err := Run(context.Background(), opts, f, &out, io.Discard, testEnv(), fixedClock(time.Millisecond))
+	res, err := Run(t.Context(), opts, f, &out, io.Discard, testEnv(), fixedClock(time.Millisecond))
 	if err != nil {
 		t.Fatalf("Run() error = %v, want nil", err)
 	}

@@ -43,7 +43,7 @@ type frameWriter struct {
 }
 
 func (fw *frameWriter) Write(p []byte) (int, error) {
-	fw.frames = append(fw.frames, append([]byte(nil), p...))
+	fw.frames = append(fw.frames, bytes.Clone(p))
 	return len(p), nil
 }
 
@@ -61,9 +61,9 @@ func TestWriteWAVG711MuLaw(t *testing.T) {
 	pcmBytes := int16sToLE(ramp)
 
 	frames := []CapturedFrame{
-		{Data: append([]byte(nil), pcmBytes[:200]...)},
-		{Data: append([]byte(nil), pcmBytes[200:400]...)},
-		{Data: append([]byte(nil), pcmBytes[400:]...)},
+		{Data: bytes.Clone(pcmBytes[:200])},
+		{Data: bytes.Clone(pcmBytes[200:400])},
+		{Data: bytes.Clone(pcmBytes[400:])},
 	}
 	track := rtsp.Track{
 		ID: 0, Media: audiostream.MediaAudio,
@@ -114,9 +114,9 @@ func TestWriteWAVL16(t *testing.T) {
 	pcmBytes := int16sToLE(ramp)
 
 	frames := []CapturedFrame{
-		{Data: append([]byte(nil), pcmBytes[:200]...)},
-		{Data: append([]byte(nil), pcmBytes[200:400]...)},
-		{Data: append([]byte(nil), pcmBytes[400:]...)},
+		{Data: bytes.Clone(pcmBytes[:200])},
+		{Data: bytes.Clone(pcmBytes[200:400])},
+		{Data: bytes.Clone(pcmBytes[400:])},
 	}
 	track := rtsp.Track{
 		ID: 0, Media: audiostream.MediaAudio,
@@ -172,7 +172,7 @@ func TestWriteWAVOpus(t *testing.T) {
 		if encErr != nil {
 			t.Fatalf("Encode packet %d: %v", p, encErr)
 		}
-		frames = append(frames, CapturedFrame{Data: append([]byte(nil), packetBuf[:n]...)})
+		frames = append(frames, CapturedFrame{Data: bytes.Clone(packetBuf[:n])})
 	}
 
 	track := rtsp.Track{ID: 0, Media: audiostream.MediaAudio, Codec: audiostream.CodecOpus{}, ClockRate: sampleRate, Channels: channels}

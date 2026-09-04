@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -86,7 +87,7 @@ func (tl *timeline) onCodecUpdate(u audiostream.CodecUpdate) {
 		return
 	}
 	tl.events = append(tl.events, "codec")
-	tl.ascs = append(tl.ascs, append([]byte(nil), aac.AudioSpecificConfig...))
+	tl.ascs = append(tl.ascs, bytes.Clone(aac.AudioSpecificConfig))
 	if tl.mutateOnUpdate {
 		// The contract documents the slice as read-only; a consumer that ignores
 		// that must not be able to corrupt the source's comparison snapshot or the
@@ -116,7 +117,7 @@ func (tl *timeline) framesBeforeFirstCodecUpdate() (int, bool) {
 func (tl *timeline) codecUpdates() [][]byte {
 	tl.mu.Lock()
 	defer tl.mu.Unlock()
-	return append([][]byte(nil), tl.ascs...)
+	return slices.Clone(tl.ascs)
 }
 
 // frameCount derives the frame total from the one ordered event log, so there is
@@ -175,7 +176,7 @@ func twoPhaseServer(segs map[string][]byte, body1, body2 string) *hlsServer {
 // mutateOnUpdate), drives the stream with Wait, and asserts on tl.
 func openTimeline(t *testing.T, srv *httptest.Server, tl *timeline) *Client {
 	t.Helper()
-	c, err := Open(context.Background(), Config{
+	c, err := Open(t.Context(), Config{
 		URL:           srv.URL + "/live.m3u8",
 		OnFrame:       tl.onFrame,
 		OnCodecUpdate: tl.onCodecUpdate,
@@ -188,7 +189,7 @@ func openTimeline(t *testing.T, srv *httptest.Server, tl *timeline) *Client {
 		// Close only starts shutdown; wait (bounded) for the reader goroutine to run
 		// its deferred teardown so it does not outlive the test and bleed into a
 		// later one. A test that already ran Wait to completion returns immediately.
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 		defer cancel()
 		_ = c.Wait(ctx)
 	})
@@ -207,7 +208,7 @@ func TestFMP4InitChangeSameASCContinues(t *testing.T) {
 
 	tl := &timeline{}
 	c := openTimeline(t, srv, tl)
-	if werr := c.Wait(context.Background()); !errors.Is(werr, ErrStreamEnded) {
+	if werr := c.Wait(t.Context()); !errors.Is(werr, ErrStreamEnded) {
 		t.Fatalf("Wait = %v, want ErrStreamEnded (a replaced init must not end the stream)", werr)
 	}
 	if want := len(s0) + len(s1); tl.frameCount() != want {
@@ -235,7 +236,7 @@ func TestFMP4InitChangeNewASCFiresCodecUpdate(t *testing.T) {
 
 	tl := &timeline{}
 	c := openTimeline(t, srv, tl)
-	if werr := c.Wait(context.Background()); !errors.Is(werr, ErrStreamEnded) {
+	if werr := c.Wait(t.Context()); !errors.Is(werr, ErrStreamEnded) {
 		t.Fatalf("Wait = %v, want ErrStreamEnded", werr)
 	}
 
@@ -288,11 +289,11 @@ func TestFMP4InitChangeWithoutCallbackEndsStream(t *testing.T) {
 	srv := twoPhaseServer(segs, v1, v2).start(t)
 
 	tl := &timeline{} // OnFrame only: OnCodecUpdate is deliberately left nil.
-	c, err := Open(context.Background(), Config{URL: srv.URL + "/live.m3u8", OnFrame: tl.onFrame})
+	c, err := Open(t.Context(), Config{URL: srv.URL + "/live.m3u8", OnFrame: tl.onFrame})
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
-	if werr := c.Wait(context.Background()); !errors.Is(werr, ErrUnsupportedPlaylist) {
+	if werr := c.Wait(t.Context()); !errors.Is(werr, ErrUnsupportedPlaylist) {
 		t.Fatalf("Wait = %v, want ErrUnsupportedPlaylist (a codec change with nowhere to report it)", werr)
 	}
 	// The first segment, under the configuration Open resolved, is still delivered
@@ -364,7 +365,7 @@ func TestFMP4RepeatedInitChangesFireEachUpdate(t *testing.T) {
 
 	tl := &timeline{mutateOnUpdate: true}
 	c := openTimeline(t, srv, tl)
-	if werr := c.Wait(context.Background()); !errors.Is(werr, ErrStreamEnded) {
+	if werr := c.Wait(t.Context()); !errors.Is(werr, ErrStreamEnded) {
 		t.Fatalf("Wait = %v, want ErrStreamEnded", werr)
 	}
 
@@ -471,7 +472,7 @@ func TestFMP4InitChangeFailureEndsStream(t *testing.T) {
 
 			tl := &timeline{}
 			c := openTimeline(t, srv, tl)
-			if werr := c.Wait(context.Background()); !errors.Is(werr, tc.wantErr) {
+			if werr := c.Wait(t.Context()); !errors.Is(werr, tc.wantErr) {
 				t.Fatalf("Wait = %v, want %v (%s)", werr, tc.wantErr, tc.wantWhy)
 			}
 			// The failure came from the replacement-init path, not from anything
@@ -507,11 +508,11 @@ func TestFMP4ContainerSwitchIsUnsupported(t *testing.T) {
 			{uri: fragRel0, duration: 1.0}, {uri: tsSegRel0, duration: 1.0},
 		})
 		srv := twoPhaseServer(segs, v1, v2).start(t)
-		c, err := Open(context.Background(), Config{URL: srv.URL + "/live.m3u8"})
+		c, err := Open(t.Context(), Config{URL: srv.URL + "/live.m3u8"})
 		if err != nil {
 			t.Fatalf("Open: %v", err)
 		}
-		if werr := c.Wait(context.Background()); !errors.Is(werr, ErrUnsupportedPlaylist) {
+		if werr := c.Wait(t.Context()); !errors.Is(werr, ErrUnsupportedPlaylist) {
 			t.Fatalf("Wait = %v, want ErrUnsupportedPlaylist (fMP4 to TS)", werr)
 		}
 	})
@@ -530,11 +531,11 @@ func TestFMP4ContainerSwitchIsUnsupported(t *testing.T) {
 			{uri: tsSegRel0, duration: 1.0}, {uri: fragRel1, duration: 1.0},
 		})
 		srv := twoPhaseServer(segs, v1, v2).start(t)
-		c, err := Open(context.Background(), Config{URL: srv.URL + "/live.m3u8"})
+		c, err := Open(t.Context(), Config{URL: srv.URL + "/live.m3u8"})
 		if err != nil {
 			t.Fatalf("Open: %v", err)
 		}
-		if werr := c.Wait(context.Background()); !errors.Is(werr, ErrUnsupportedPlaylist) {
+		if werr := c.Wait(t.Context()); !errors.Is(werr, ErrUnsupportedPlaylist) {
 			t.Fatalf("Wait = %v, want ErrUnsupportedPlaylist (TS to fMP4)", werr)
 		}
 	})
@@ -591,7 +592,7 @@ func TestFMP4InitChangeCarriesRetiredDemuxerGapCount(t *testing.T) {
 
 	tl := &timeline{}
 	c := openTimeline(t, srv, tl)
-	if werr := c.Wait(context.Background()); !errors.Is(werr, ErrStreamEnded) {
+	if werr := c.Wait(t.Context()); !errors.Is(werr, ErrStreamEnded) {
 		t.Fatalf("Wait = %v, want ErrStreamEnded", werr)
 	}
 	if ups := tl.codecUpdates(); len(ups) != 2 {
@@ -645,7 +646,7 @@ func TestFMP4CloseMidStreamEndsStream(t *testing.T) {
 	if err := c.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
-	if werr := c.Wait(context.Background()); !errors.Is(werr, audiostream.ErrClosed) {
+	if werr := c.Wait(t.Context()); !errors.Is(werr, audiostream.ErrClosed) {
 		t.Fatalf("Wait = %v, want audiostream.ErrClosed after Close", werr)
 	}
 }

@@ -105,7 +105,7 @@ func TestDescribeSessionLevelControl(t *testing.T) {
 			c := dialIdle(t, s.URL("/stream"))
 			defer closeAndWait(t, c)
 
-			tracks, err := c.Describe(context.Background())
+			tracks, err := c.Describe(t.Context())
 			if err != nil {
 				t.Fatalf("Describe: %v", err)
 			}
@@ -134,7 +134,7 @@ func TestDescribeSessionControlResolveError(t *testing.T) {
 	c := dialIdle(t, s.URL("/stream"))
 	defer closeAndWait(t, c)
 
-	if _, err := c.Describe(context.Background()); !errors.Is(err, rtsp.ErrInvalidURL) {
+	if _, err := c.Describe(t.Context()); !errors.Is(err, rtsp.ErrInvalidURL) {
 		t.Fatalf("Describe = %v, want ErrInvalidURL", err)
 	}
 }
@@ -148,7 +148,7 @@ func TestDescribeSDPParseError(t *testing.T) {
 	c := dialIdle(t, s.URL("/stream"))
 	defer closeAndWait(t, c)
 
-	if _, err := c.Describe(context.Background()); !errors.Is(err, sdp.ErrTooManyMedia) {
+	if _, err := c.Describe(t.Context()); !errors.Is(err, sdp.ErrTooManyMedia) {
 		t.Fatalf("Describe = %v, want sdp.ErrTooManyMedia", err)
 	}
 }
@@ -160,7 +160,7 @@ func TestDescribeBaseURLError(t *testing.T) {
 	c := dialIdle(t, s.URL("/stream"))
 	defer closeAndWait(t, c)
 
-	if _, err := c.Describe(context.Background()); !errors.Is(err, rtsp.ErrInvalidURL) {
+	if _, err := c.Describe(t.Context()); !errors.Is(err, rtsp.ErrInvalidURL) {
 		t.Fatalf("Describe = %v, want ErrInvalidURL", err)
 	}
 }
@@ -178,7 +178,7 @@ func TestDescribeControlURLError(t *testing.T) {
 	c := dialIdle(t, s.URL("/stream"))
 	defer closeAndWait(t, c)
 
-	if _, err := c.Describe(context.Background()); !errors.Is(err, rtsp.ErrInvalidURL) {
+	if _, err := c.Describe(t.Context()); !errors.Is(err, rtsp.ErrInvalidURL) {
 		t.Fatalf("Describe = %v, want ErrInvalidURL", err)
 	}
 }
@@ -192,7 +192,7 @@ func TestDescribeZeroTracks(t *testing.T) {
 	c := dialIdle(t, s.URL("/stream"))
 	defer closeAndWait(t, c)
 
-	tracks, err := c.Describe(context.Background())
+	tracks, err := c.Describe(t.Context())
 	if err != nil {
 		t.Fatalf("Describe = %v, want nil", err)
 	}
@@ -200,7 +200,7 @@ func TestDescribeZeroTracks(t *testing.T) {
 		t.Fatalf("track count = %d, want 0", len(tracks))
 	}
 	// It advanced: a second Describe is rejected as a state error.
-	if _, err := c.Describe(context.Background()); !errors.Is(err, rtsp.ErrInvalidState) {
+	if _, err := c.Describe(t.Context()); !errors.Is(err, rtsp.ErrInvalidState) {
 		t.Errorf("second Describe = %v, want ErrInvalidState (state advanced)", err)
 	}
 }
@@ -225,20 +225,20 @@ func TestSetupAACWithoutFmtpDegradesToRaw(t *testing.T) {
 		drainRequests(sc)
 	}})
 
-	c, err := rtsp.Dial(context.Background(), rtsp.Config{URL: s.URL("/stream"), Timeout: testTimeout, Logger: logger})
+	c, err := rtsp.Dial(t.Context(), rtsp.Config{URL: s.URL("/stream"), Timeout: testTimeout, Logger: logger})
 	if err != nil {
 		t.Fatalf("Dial: %v", err)
 	}
 	defer closeAndWait(t, c)
 
-	tracks, err := c.Describe(context.Background())
+	tracks, err := c.Describe(t.Context())
 	if err != nil {
 		t.Fatalf("Describe: %v", err)
 	}
 	if _, ok := tracks[0].Codec.(audiostream.CodecAAC); !ok {
 		t.Fatalf("Codec = %T, want CodecAAC (MPEG4-GENERIC resolves to AAC even with no fmtp)", tracks[0].Codec)
 	}
-	if err := c.Setup(context.Background(), tracks[0], rtsp.SetupOptions{}); err != nil {
+	if err := c.Setup(t.Context(), tracks[0], rtsp.SetupOptions{}); err != nil {
 		t.Fatalf("Setup: %v", err)
 	}
 	if msgs := snapshot(); !loggedContains(msgs, "aac track is not AAC-hbr") {
@@ -265,7 +265,7 @@ func TestSetupZeroClockRate(t *testing.T) {
 	if tracks[0].ClockRate != 0 {
 		t.Errorf("ClockRate = %d, want 0", tracks[0].ClockRate)
 	}
-	if err := c.Setup(context.Background(), tracks[0], rtsp.SetupOptions{}); err != nil {
+	if err := c.Setup(t.Context(), tracks[0], rtsp.SetupOptions{}); err != nil {
 		t.Fatalf("Setup with zero clock rate: %v", err)
 	}
 }
@@ -286,20 +286,20 @@ func TestSetupDifferingSessionID(t *testing.T) {
 		drainRequests(sc)
 	}})
 
-	c, err := rtsp.Dial(context.Background(), rtsp.Config{URL: s.URL("/stream"), Timeout: testTimeout, Logger: logger})
+	c, err := rtsp.Dial(t.Context(), rtsp.Config{URL: s.URL("/stream"), Timeout: testTimeout, Logger: logger})
 	if err != nil {
 		t.Fatalf("Dial: %v", err)
 	}
 	defer closeAndWait(t, c)
 
-	tracks, err := c.Describe(context.Background())
+	tracks, err := c.Describe(t.Context())
 	if err != nil {
 		t.Fatalf("Describe: %v", err)
 	}
-	if err := c.Setup(context.Background(), tracks[0], rtsp.SetupOptions{}); err != nil {
+	if err := c.Setup(t.Context(), tracks[0], rtsp.SetupOptions{}); err != nil {
 		t.Fatalf("Setup track 0: %v", err)
 	}
-	if err := c.Setup(context.Background(), tracks[1], rtsp.SetupOptions{}); err != nil {
+	if err := c.Setup(t.Context(), tracks[1], rtsp.SetupOptions{}); err != nil {
 		t.Fatalf("Setup track 1: %v", err)
 	}
 	if got := c.SessionInfo().SessionID; got != testSessionID {
