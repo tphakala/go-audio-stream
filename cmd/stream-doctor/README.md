@@ -65,7 +65,7 @@ flag once:
 xattr -d com.apple.quarantine stream-doctor-*
 ```
 
-You can also build from source (Go 1.26+): from `cmd/stream-doctor/`, run
+You can also build from source (Go 1.27+): from `cmd/stream-doctor/`, run
 `go build .`. A source build reports its version as `dev`.
 
 ## Quickstart

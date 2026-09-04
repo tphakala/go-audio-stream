@@ -1,6 +1,6 @@
 module github.com/tphakala/go-audio-stream/cmd/stream-doctor
 
-go 1.26.3
+go 1.27
 
 replace github.com/tphakala/go-audio-stream => ../..
 

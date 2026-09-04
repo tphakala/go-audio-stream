@@ -20,7 +20,7 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-go@v7
         with:
-          go-version: '1.26.x'
+          go-version: '1.27.x'
       - name: Build
         run: go build ./...
       - name: Vet
@@ -36,7 +36,7 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-go@v7
         with:
-          go-version: '1.26.x'
+          go-version: '1.27.x'
           cache-dependency-path: |
             go.sum
             cmd/stream-doctor/go.sum
@@ -51,11 +51,11 @@ jobs:
       - name: golangci-lint
         uses: golangci/golangci-lint-action@v9
         with:
-          version: latest
+          version: v2.13.2
       - name: golangci-lint (stream-doctor)
         uses: golangci/golangci-lint-action@v9
         with:
-          version: latest
+          version: v2.13.2
           working-directory: cmd/stream-doctor
 
   doctor:
@@ -69,7 +69,7 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-go@v7
         with:
-          go-version: '1.26.x'
+          go-version: '1.27.x'
           cache-dependency-path: cmd/stream-doctor/go.sum
       - name: Build stream-doctor
         working-directory: cmd/stream-doctor
