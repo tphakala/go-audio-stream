@@ -236,6 +236,21 @@ func TestParseResponseCapViolations(t *testing.T) {
 			buf:  []byte("RTSP/1.0 200 OK\r\nX-A: one\r\n continued\r\n\r\n"),
 			want: rtsp.ErrMalformedHeader,
 		},
+		{
+			name: "empty header name rejected",
+			buf:  []byte("RTSP/1.0 200 OK\r\n: value\r\n\r\n"),
+			want: rtsp.ErrMalformedHeader,
+		},
+		{
+			name: "header name with space before colon rejected",
+			buf:  []byte("RTSP/1.0 200 OK\r\nContent-Length : 5\r\n\r\n"),
+			want: rtsp.ErrMalformedHeader,
+		},
+		{
+			name: "header name with control byte rejected",
+			buf:  []byte("RTSP/1.0 200 OK\r\n\x01X: v\r\n\r\n"),
+			want: rtsp.ErrMalformedHeader,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -279,6 +294,34 @@ func TestParseRequestMalformedLine(t *testing.T) {
 	buf := []byte("OPTIONS rtsp://cam/s\r\nCSeq: 3\r\n\r\n") // missing version token
 	if _, _, err := rtsp.ParseRequest(buf); !errors.Is(err, rtsp.ErrMalformedRequestLine) {
 		t.Errorf("err = %v, want ErrMalformedRequestLine", err)
+	}
+}
+
+func TestParseRequestInvalidHeaderName(t *testing.T) {
+	t.Parallel()
+	// The header-name validation lives in parseHeaderLines, which both
+	// ParseRequest and ParseResponse funnel through; assert the request path
+	// rejects both the empty-name and the non-token (space before colon) cases.
+	tests := []struct {
+		name string
+		buf  []byte
+	}{
+		{
+			name: "empty name",
+			buf:  []byte("OPTIONS rtsp://cam/s RTSP/1.0\r\n: value\r\n\r\n"),
+		},
+		{
+			name: "space before colon",
+			buf:  []byte("OPTIONS rtsp://cam/s RTSP/1.0\r\nContent-Length : 5\r\n\r\n"),
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if _, _, err := rtsp.ParseRequest(tt.buf); !errors.Is(err, rtsp.ErrMalformedHeader) {
+				t.Errorf("err = %v, want ErrMalformedHeader", err)
+			}
+		})
 	}
 }
 

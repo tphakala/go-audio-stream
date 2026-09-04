@@ -71,8 +71,10 @@ var (
 	ErrMalformedStatusLine = errors.New("rtsp: malformed status line")
 	// ErrMalformedRequestLine means the request line did not parse.
 	ErrMalformedRequestLine = errors.New("rtsp: malformed request line")
-	// ErrMalformedHeader means a header line had no colon, or was an
-	// obsolete folded continuation line.
+	// ErrMalformedHeader means a header line had no colon, had a field name
+	// that is not a valid RFC 9110 token (empty, or carrying whitespace,
+	// control, or separator bytes), or was an obsolete folded continuation
+	// line.
 	ErrMalformedHeader = errors.New("rtsp: malformed header line")
 	// ErrBadContentLength means the Content-Length value was non-numeric or
 	// negative.
@@ -523,10 +525,40 @@ func parseRequestLine(line string) (method, url string, err error) {
 	return method, url, nil
 }
 
+// isTokenChar reports whether b is an RFC 9110 token character (tchar), the
+// byte set permitted in a header field name.
+func isTokenChar(b byte) bool {
+	switch b {
+	case '!', '#', '$', '%', '&', '\'', '*', '+', '-', '.', '^', '_', '`', '|', '~':
+		return true
+	}
+	return (b >= '0' && b <= '9') || (b >= 'A' && b <= 'Z') || (b >= 'a' && b <= 'z')
+}
+
+// isValidHeaderName reports whether name is a non-empty RFC 9110 token, the
+// grammar every RTSP header field name must satisfy. Rejecting a non-token
+// name (an empty name, whitespace before the colon, or a control or separator
+// byte) stops a malformed line from being stored under a bogus canonical key
+// where a later Header.Get would silently miss it (for example a
+// "Content-Length : 5" line whose declared body would otherwise vanish).
+func isValidHeaderName(name string) bool {
+	if name == "" {
+		return false
+	}
+	for i := range len(name) {
+		if !isTokenChar(name[i]) {
+			return false
+		}
+	}
+	return true
+}
+
 // parseHeaderLines parses each header line into h. It splits on the first
 // colon, trims one optional leading space from the value, and enforces the
-// name and value caps. A line with no colon, or an obsolete folded
-// continuation line (one beginning with a space or tab), is ErrMalformedHeader.
+// name and value caps. A line with no colon, a field name that is not a valid
+// RFC 9110 token (empty, or carrying whitespace, control, or separator bytes),
+// or an obsolete folded continuation line (one beginning with a space or tab),
+// is ErrMalformedHeader.
 func parseHeaderLines(lines []string, h Header) error {
 	for _, line := range lines {
 		if line == "" || line[0] == ' ' || line[0] == '\t' {
@@ -537,6 +569,9 @@ func parseHeaderLines(lines []string, h Header) error {
 			return ErrMalformedHeader
 		}
 		name := before
+		if !isValidHeaderName(name) {
+			return ErrMalformedHeader
+		}
 		value := strings.TrimPrefix(after, " ")
 		if len(name) > MaxHeaderNameLen {
 			return ErrHeaderNameTooLong
