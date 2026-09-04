@@ -39,7 +39,7 @@ conventions and their audio vocabulary, alongside
 go get github.com/tphakala/go-audio-stream
 ```
 
-Requires Go 1.26 or newer.
+Requires Go 1.27 or newer.
 
 ## Status
 
