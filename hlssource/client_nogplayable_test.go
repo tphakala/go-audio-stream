@@ -81,4 +81,8 @@ func TestOpenLiveAllGapRecoversOnReload(t *testing.T) {
 		t.Fatalf("second Open err = %v, want success after the playlist gained a playable segment", err)
 	}
 	_ = c.Close()
+	// Join the reader goroutine before returning. Close only signals shutdown; it
+	// does not wait. Without this the reader can outlive the test and race a later
+	// test's fastReload swap of the package-global reloadDelayFor under -race.
+	_ = c.Wait(t.Context())
 }
