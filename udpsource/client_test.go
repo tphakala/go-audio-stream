@@ -430,6 +430,20 @@ func TestSourceIPFilter(t *testing.T) {
 	if rejected.count() != 0 {
 		t.Fatalf("delivered %d frames, want 0 (datagram from a non-allowlisted IP)", rejected.count())
 	}
+	// The dropped datagram is counted as source-filtered and touches no other
+	// counter, so an operator can tell it apart from an idle socket.
+	ts := cr.Stats().Tracks[0]
+	if ts.SourceFiltered != 1 {
+		t.Errorf("SourceFiltered = %d, want 1", ts.SourceFiltered)
+	}
+	if ts.Packets != 0 || ts.Malformed != 0 {
+		t.Errorf("filtered datagram touched other counters: Packets=%d Malformed=%d, want 0/0", ts.Packets, ts.Malformed)
+	}
+	// A source with no filter and no traffic reports zero, so a non-zero count is
+	// never a false positive.
+	if ts := ca.Stats().Tracks[0]; ts.SourceFiltered != 0 {
+		t.Errorf("accepted source SourceFiltered = %d, want 0", ts.SourceFiltered)
+	}
 }
 
 func TestReadIdleWatchdog(t *testing.T) {
