@@ -163,6 +163,14 @@ func describeTrack(m *Media) DescribedTrack {
 			// sender that means the AAL2 order has to say so with an
 			// AAL2-G726-32 rtpmap.
 			encoding, clock, channels = g726Name32, g726ClockRate, 1
+		case 14:
+			// RFC 3551 static payload type 14 is MPA (MPEG-1/2 audio), always at a
+			// 90 kHz RTP clock independent of the audio sampling rate (RFC 3551
+			// section 4.5.13). The layer, sampling rate, and channel count live in
+			// each MPEG audio frame header, not the SDP, so the channel default of 1
+			// is nominal and never feeds any frame-size math for this compressed
+			// codec.
+			encoding, clock, channels = "MPA", 90000, 1
 		default:
 			encoding, clock, channels = "", 0, 0
 		}
@@ -198,6 +206,14 @@ func describeTrack(m *Media) DescribedTrack {
 		t.LATM = params
 	case "OPUS":
 		t.Codec = audiostream.CodecOpus{}
+	case "MPA", "MP3":
+		// MPEG-1/2 audio (RFC 2250). The RTP payload carries raw MPEG audio frames
+		// behind the RFC 2250 section 3.5 header; the rtsp pipeline depacketizes
+		// them without decoding. Both the RFC 3551 rtpmap name (MPA) and the common
+		// alias (MP3) resolve here, at whatever clock the rtpmap declared (90 kHz
+		// for a conformant sender). Sampling rate and channel count come from the
+		// frame headers, so no fmtp is required.
+		t.Codec = audiostream.CodecMP3{}
 	case "FLAC":
 		// FLAC over RTP carries raw FLAC frames; the STREAMINFO a decoder needs is
 		// advertised out of band in the fmtp streaminfo= parameter (base64). A

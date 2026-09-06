@@ -338,3 +338,44 @@ func TestCodecsL16Static(t *testing.T) {
 		})
 	}
 }
+
+// TestCodecsMP3 covers MPEG audio resolving to CodecMP3: the RFC 3551 static
+// payload type 14 (MPA) with no rtpmap at the fixed 90 kHz clock, the MPA and
+// MP3 rtpmap encoding names (case-insensitively), and a non-standard rtpmap
+// clock being honored rather than forced to 90 kHz.
+func TestCodecsMP3(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name  string
+		media string // the media line and any rtpmap
+		clock int
+	}{
+		{"static PT14 no rtpmap", "m=audio 0 RTP/AVP 14\r\n", 90000},
+		{"rtpmap MPA/90000", "m=audio 0 RTP/AVP 96\r\na=rtpmap:96 MPA/90000\r\n", 90000},
+		{"rtpmap MP3 alias", "m=audio 0 RTP/AVP 96\r\na=rtpmap:96 MP3/90000\r\n", 90000},
+		{"rtpmap lowercase mpa", "m=audio 0 RTP/AVP 96\r\na=rtpmap:96 mpa/90000\r\n", 90000},
+		{"non-standard clock honored", "m=audio 0 RTP/AVP 96\r\na=rtpmap:96 MPA/44100\r\n", 44100},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			s, err := sdp.Parse([]byte("v=0\r\n" + tc.media))
+			if err != nil {
+				t.Fatalf("Parse: %v", err)
+			}
+			tracks := s.Codecs()
+			if len(tracks) != 1 {
+				t.Fatalf("track count = %d, want 1", len(tracks))
+			}
+			if _, ok := tracks[0].Codec.(audiostream.CodecMP3); !ok {
+				t.Fatalf("Codec = %T, want CodecMP3", tracks[0].Codec)
+			}
+			if tracks[0].ClockRate != tc.clock {
+				t.Errorf("ClockRate = %d, want %d", tracks[0].ClockRate, tc.clock)
+			}
+			if tracks[0].AAC != nil || tracks[0].LATM != nil {
+				t.Error("AAC/LATM params must be nil for MP3")
+			}
+		})
+	}
+}
