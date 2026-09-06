@@ -217,7 +217,7 @@ func TestMP3DeliversLastFrameBeforeTrailer(t *testing.T) {
 		// A 128-byte ID3v1 tag: "TAG" then 125 bytes of fields.
 		{"id3v1 TAG trailer", append([]byte("TAG"), make([]byte, 125)...)},
 		// Trailing junk with no sync word.
-		{"trailing junk", bytes.Repeat([]byte{0x00}, 64)},
+		{"trailing junk", make([]byte, 64)},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
