@@ -184,6 +184,14 @@ type track struct {
 	reorderDrops atomic.Uint64
 	malformed    atomic.Uint64
 	ssrcResets   atomic.Uint64
+	// sourceFiltered counts datagrams dropped because their source address was
+	// not the negotiated media peer (fromPeer false), across the RTP, RTCP and
+	// discard UDP receive paths. It is deliberately kept off wireBytes and off
+	// the read-idle watchdog anchor, so an off-path forgery targeting the
+	// wildcard-bound port cannot count as bandwidth or hold a dead session open;
+	// it is surfaced as TrackStats.SourceFiltered for the same idle-versus-filtered
+	// diagnosis udpsource provides. It stays zero on the TCP-interleaved path.
+	sourceFiltered atomic.Uint64
 	// lastFrameUnixNano is the wall-clock arrival (UnixNano) of the most recent
 	// frame on this track's RTP channel, parsed or not: the per-track media
 	// clock exposed as TrackStats.LastFrameAt. It is distinct from the Client's

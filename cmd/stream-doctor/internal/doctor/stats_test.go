@@ -71,7 +71,7 @@ func TestComputeStatsDuplicates(t *testing.T) {
 
 func TestComputeStatsLossAndGap(t *testing.T) {
 	t.Parallel()
-	lib := audiostream.TrackStats{Packets: 490, PayloadBytes: 62720, SeqGaps: 10, Malformed: 4, SSRCResets: 2}
+	lib := audiostream.TrackStats{Packets: 490, PayloadBytes: 62720, SeqGaps: 10, Malformed: 4, SSRCResets: 2, SourceFiltered: 7}
 	frames := []CapturedFrame{
 		{RTPTime: 0, SeqGap: 0},
 		{RTPTime: 1, SeqGap: 3},
@@ -86,6 +86,9 @@ func TestComputeStatsLossAndGap(t *testing.T) {
 	}
 	if stats.SSRCResets != 2 {
 		t.Errorf("SSRCResets = %d, want 2", stats.SSRCResets)
+	}
+	if stats.SourceFiltered != 7 {
+		t.Errorf("SourceFiltered = %d, want 7", stats.SourceFiltered)
 	}
 	wantRatio := 10.0 / 500
 	if stats.LossRatio != wantRatio {

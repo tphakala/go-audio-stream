@@ -532,13 +532,14 @@ func (c *Client) Stats() audiostream.Stats {
 	m := make(map[int]audiostream.TrackStats, len(tracks))
 	for _, tr := range tracks {
 		ts := audiostream.TrackStats{
-			Packets:      tr.packets.Load(),
-			PayloadBytes: tr.payloadBytes.Load(),
-			WireBytes:    tr.wireBytes.Load(),
-			SeqGaps:      tr.seqGaps.Load(),
-			Duplicates:   tr.duplicates.Load() + tr.reorderDrops.Load(),
-			Malformed:    tr.malformed.Load(),
-			SSRCResets:   tr.ssrcResets.Load(),
+			Packets:        tr.packets.Load(),
+			PayloadBytes:   tr.payloadBytes.Load(),
+			WireBytes:      tr.wireBytes.Load(),
+			SeqGaps:        tr.seqGaps.Load(),
+			Duplicates:     tr.duplicates.Load() + tr.reorderDrops.Load(),
+			Malformed:      tr.malformed.Load(),
+			SSRCResets:     tr.ssrcResets.Load(),
+			SourceFiltered: tr.sourceFiltered.Load(),
 		}
 		// A zero UnixNano means no frame has arrived yet, so leave LastFrameAt as
 		// the zero Time rather than mapping it to the 1970 epoch.

@@ -35,6 +35,13 @@ type CaptureStats struct {
 	// SSRCResets is the number of mid-stream SSRC changes the library
 	// tolerated (from the library Stats.SSRCResets).
 	SSRCResets uint64
+	// SourceFiltered is the number of datagrams the library dropped because
+	// their source address did not match the expected peer (from the library
+	// Stats.SourceFiltered). Only the UDP-receiving sources populate it; a
+	// nonzero count over rtsp/udp means datagrams are arriving from an address
+	// other than the negotiated peer, which distinguishes an off-path flood or
+	// a misconfigured source from a silent socket.
+	SourceFiltered uint64
 	// MaxGap is the largest single sequence-number gap observed across
 	// frames.
 	MaxGap int
@@ -81,14 +88,15 @@ type CaptureStats struct {
 // the snapshot time capturedAt (used for the last-frame age).
 func computeStats(frames []CapturedFrame, lib *audiostream.TrackStats, clockRate int, elapsed time.Duration, capturedAt time.Time) CaptureStats {
 	stats := CaptureStats{
-		Packets:     lib.Packets,
-		Bytes:       lib.PayloadBytes,
-		WireBytes:   lib.WireBytes,
-		Lost:        lib.SeqGaps,
-		Duplicates:  lib.Duplicates,
-		Malformed:   lib.Malformed,
-		SSRCResets:  lib.SSRCResets,
-		SenderClock: lib.SenderClock,
+		Packets:        lib.Packets,
+		Bytes:          lib.PayloadBytes,
+		WireBytes:      lib.WireBytes,
+		Lost:           lib.SeqGaps,
+		Duplicates:     lib.Duplicates,
+		Malformed:      lib.Malformed,
+		SSRCResets:     lib.SSRCResets,
+		SourceFiltered: lib.SourceFiltered,
+		SenderClock:    lib.SenderClock,
 	}
 
 	if denom := stats.Packets + stats.Lost; denom > 0 {

@@ -252,6 +252,49 @@ func TestRTCPSeparateSocketPopulatesSenderClock(t *testing.T) {
 	}
 }
 
+// An RTCP datagram from outside the SourceIP allowlist is dropped by the filter
+// and counted in TrackStats.SourceFiltered, mirroring the media path, so an
+// off-path RTCP flood is observable rather than indistinguishable from silence.
+func TestRTCPSourceIPFilterCounts(t *testing.T) {
+	var col collector
+	cfg := rtcpE2ECfg(col.onFrame)
+	cfg.RTCPListenAddr = loopbackAddr
+	cfg.SourceIP = "127.0.0.2" // the loopback sender is 127.0.0.1, so it is foreign.
+	c := openOK(t, cfg)
+	defer func() { _ = c.Close() }()
+
+	// Seed the media SSRC and baseSet so an ACCEPTED Sender Report for this SSRC
+	// would map a sender clock. That makes the SenderClock assertion below
+	// discriminating: it can stay invalid only because the filter dropped the
+	// datagram before handleRTCP, not merely because baseSet was never set.
+	const ssrc = uint32(0x0ABCDEF0)
+	c.mediaSSRC.Store(ssrc)
+	c.baseSet.Store(true)
+
+	rtcp := senderForAddr(t, c.rtcpConn.LocalAddr().String())
+	// A well-formed SR for the media SSRC: only the source-address filter stops
+	// it from mapping a clock.
+	_, _ = rtcp.Write(buildSR(ssrc, ntpAt(1_600_000_000), 90000, 1, 5))
+
+	// Poll until the RTCP reader has processed and dropped the datagram. A
+	// filtered datagram advances no other counter, so once SourceFiltered ticks
+	// the drop has happened. SourceFiltered is incremented only in the filter
+	// branch, so reaching 1 can only mean the drop path ran.
+	deadline := time.Now().Add(2 * time.Second)
+	for c.Stats().Tracks[0].SourceFiltered == 0 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if got := c.Stats().Tracks[0].SourceFiltered; got != 1 {
+		t.Fatalf("SourceFiltered = %d, want 1 (filtered RTCP datagram not counted)", got)
+	}
+	// With baseSet and the media SSRC seeded, an accepted SR would have mapped a
+	// clock; a still-invalid SenderClock proves the filter dropped it before
+	// handleRTCP could steer the mapping.
+	if c.Stats().Tracks[0].SenderClock.Valid {
+		t.Error("SenderClock became valid, want invalid (a filtered RTCP datagram must not map)")
+	}
+}
+
 func TestRTCPSSRCResetClearsSenderClock(t *testing.T) {
 	const ssrc1, ssrc2 = uint32(0x11111111), uint32(0x22222222)
 	var col collector

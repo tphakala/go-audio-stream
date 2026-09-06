@@ -289,6 +289,11 @@ func renderCapture(b *strings.Builder, r *Report) {
 	fmt.Fprintf(b, captureInt, "duplicates", c.Duplicates)
 	fmt.Fprintf(b, captureInt, "malformed", c.Malformed)
 	fmt.Fprintf(b, captureInt, "ssrc-resets", c.SSRCResets)
+	// Shown only when nonzero: it is zero for every source that does not
+	// source-filter (TCP, HTTP), so an always-present line would be noise.
+	if c.SourceFiltered > 0 {
+		fmt.Fprintf(b, captureInt, "src-filtered", c.SourceFiltered)
+	}
 	fmt.Fprintf(b, captureInt, "max gap", c.MaxGap)
 	fmt.Fprintf(b, "  %-14s%.1f kbit/s\n", "bitrate", c.Bitrate/1000)
 	if c.WireBytes > 0 {

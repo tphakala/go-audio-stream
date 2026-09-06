@@ -12,7 +12,8 @@ import (
 // ends this goroutine and never funnels shutdown: the media stream governs the
 // session's life. It arms no read-idle deadline; Sender Reports are irregular
 // and their absence is not a media stall. The SourceIP filter applies here too,
-// mirroring the media path.
+// mirroring the media path, and a filtered datagram is counted in
+// TrackStats.SourceFiltered.
 func (c *Client) rtcpReader() {
 	defer c.rtcpWG.Done()
 	defer c.recoverRTCP()
@@ -28,6 +29,11 @@ func (c *Client) rtcpReader() {
 			return
 		}
 		if c.srcIP != nil && !addr.IP.Equal(c.srcIP) {
+			// A datagram from outside the SourceIP allowlist is dropped before
+			// handleRTCP, counted in TrackStats.SourceFiltered so an off-path RTCP
+			// flood is observable and not mistaken for a silent socket. This
+			// mirrors the media recvLoop, which counts its own filtered drops.
+			c.sourceFiltered.Add(1)
 			continue
 		}
 		c.handleRTCP(buf[:n], time.Now())
