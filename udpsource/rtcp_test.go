@@ -263,9 +263,18 @@ func TestRTCPSourceIPFilterCounts(t *testing.T) {
 	c := openOK(t, cfg)
 	defer func() { _ = c.Close() }()
 
+	// Seed the media SSRC and baseSet so an ACCEPTED Sender Report for this SSRC
+	// would map a sender clock. That makes the SenderClock assertion below
+	// discriminating: it can stay invalid only because the filter dropped the
+	// datagram before handleRTCP, not merely because baseSet was never set.
+	const ssrc = uint32(0x0ABCDEF0)
+	c.mediaSSRC.Store(ssrc)
+	c.baseSet.Store(true)
+
 	rtcp := senderForAddr(t, c.rtcpConn.LocalAddr().String())
-	// The content is irrelevant: the filter drops it before handleRTCP.
-	_, _ = rtcp.Write(buildSR(0x0ABCDEF0, ntpAt(1_600_000_000), 90000, 1, 5))
+	// A well-formed SR for the media SSRC: only the source-address filter stops
+	// it from mapping a clock.
+	_, _ = rtcp.Write(buildSR(ssrc, ntpAt(1_600_000_000), 90000, 1, 5))
 
 	// Poll until the RTCP reader has processed and dropped the datagram. A
 	// filtered datagram advances no other counter, so once SourceFiltered ticks
@@ -278,7 +287,9 @@ func TestRTCPSourceIPFilterCounts(t *testing.T) {
 	if got := c.Stats().Tracks[0].SourceFiltered; got != 1 {
 		t.Fatalf("SourceFiltered = %d, want 1 (filtered RTCP datagram not counted)", got)
 	}
-	// The drop happened before handleRTCP, so it must not have mapped a clock.
+	// With baseSet and the media SSRC seeded, an accepted SR would have mapped a
+	// clock; a still-invalid SenderClock proves the filter dropped it before
+	// handleRTCP could steer the mapping.
 	if c.Stats().Tracks[0].SenderClock.Valid {
 		t.Error("SenderClock became valid, want invalid (a filtered RTCP datagram must not map)")
 	}

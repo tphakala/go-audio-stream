@@ -1,6 +1,7 @@
 package doctor
 
 import (
+	"fmt"
 	"os"
 	"strings"
 	"testing"
@@ -74,8 +75,8 @@ func TestCaptureSourceFilteredShown(t *testing.T) {
 	shown := &Report{CaptureShown: true, Reason: EndCompleted, Capture: CaptureStats{SourceFiltered: 3}}
 	var rc strings.Builder
 	renderCapture(&rc, shown)
-	if !strings.Contains(rc.String(), "src-filtered") {
-		t.Errorf("walkthrough omits the src-filtered line:\n%s", rc.String())
+	if want := fmt.Sprintf(captureInt, "src-filtered", uint64(3)); !strings.Contains(rc.String(), want) {
+		t.Errorf("walkthrough omits the src-filtered count line %q:\n%s", want, rc.String())
 	}
 	var rp strings.Builder
 	reportCapture(&rp, shown)
