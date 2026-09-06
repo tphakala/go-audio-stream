@@ -88,14 +88,25 @@ func (s *mp3Stream) next() (frame []byte, hdr mp3.Header, ok bool) {
 			return nil, mp3.Header{}, false // wait for the whole frame
 		}
 		if len(rem) >= h.FrameLen+mp3.HeaderLen {
-			if !headerConsistent(rem, h) {
-				// A false sync: the bytes at the next-frame offset are not a valid
-				// header. Advance one byte and rescan from the next position.
-				s.discard(1)
+			switch {
+			case headerConsistent(rem, h):
+				s.synced = true
+			case s.synced:
+				// This frame's own header is valid and the whole frame is present, but
+				// the bytes at the next-frame offset are not a valid header. In an
+				// established sync that means the stream lost sync AFTER this frame (a
+				// trailer such as an ID3v1 "TAG", an inline ID3v2 tag, or trailing
+				// junk/EOF), not a false sync before it. Deliver this last good frame
+				// and drop sync, so the next call resynchronizes past the trailing
+				// bytes and counts THAT as the discard rather than dropping this frame.
 				s.synced = false
+			default:
+				// Not yet synced: an unconfirmed candidate in leading garbage that only
+				// looked like a header. Advance one byte and rescan from the next
+				// position.
+				s.discard(1)
 				continue
 			}
-			s.synced = true
 		} else if !s.synced && !s.ended {
 			// The first sync cannot be confirmed yet and more bytes may arrive.
 			return nil, mp3.Header{}, false

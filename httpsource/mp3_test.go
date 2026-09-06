@@ -203,6 +203,52 @@ func TestMP3RejectsFalseSync(t *testing.T) {
 	}
 }
 
+// A progressive MP3 file commonly ends with an ID3v1 "TAG" trailer or trailing
+// junk after the last audio frame. Once the stream is synced, that last frame's
+// own header is valid and the whole frame is present, so it must be delivered
+// even though the bytes after it are not a valid header; the trailer is the
+// discard (counted malformed), not the last frame. This is the case a plain
+// next-header-consistency check dropped before the fix.
+func TestMP3DeliversLastFrameBeforeTrailer(t *testing.T) {
+	tests := []struct {
+		name    string
+		trailer []byte
+	}{
+		// A 128-byte ID3v1 tag: "TAG" then 125 bytes of fields.
+		{"id3v1 TAG trailer", append([]byte("TAG"), make([]byte, 125)...)},
+		// Trailing junk with no sync word.
+		{"trailing junk", bytes.Repeat([]byte{0x00}, 64)},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			const n = 3
+			stream, frames := mp3Frames(n)
+			body := append(bytes.Clone(stream), tc.trailer...)
+			srv := httptest.NewServer(serveStatic("audio/mpeg", body))
+			defer srv.Close()
+
+			var col collector
+			c := openOK(t, srv, Config{OnFrame: col.onFrame})
+			if err := waitResult(t, c, 5*time.Second); !errors.Is(err, ErrStreamEnded) {
+				t.Fatalf("Wait = %v, want ErrStreamEnded", err)
+			}
+			got := col.snapshot()
+			if len(got) != n {
+				t.Fatalf("delivered %d frames, want %d (the last frame before the trailer must not be dropped)", len(got), n)
+			}
+			for i := range frames {
+				if !bytes.Equal(got[i].Data, frames[i]) {
+					t.Errorf("frame %d mismatch", i)
+				}
+			}
+			// The trailer is a discard, counted malformed, while every frame is intact.
+			if m := c.Stats().Tracks[0].Malformed; m == 0 {
+				t.Errorf("Malformed = 0, want >0 (the trailer should be counted as a discard)")
+			}
+		})
+	}
+}
+
 func TestMP3FramesSplitAcrossReads(t *testing.T) {
 	stream, frames := mp3Frames(4)
 	srv := httptest.NewServer(serveChunked("audio/mpeg", stream, 64)) // frames span 64-byte chunks

@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"math"
 	"net"
 	"net/http"
 	"sync"
@@ -15,6 +14,7 @@ import (
 	"time"
 
 	audiostream "github.com/tphakala/go-audio-stream"
+	"github.com/tphakala/go-audio-stream/internal/mediatime"
 )
 
 // readBufSize is the reader's per-read buffer and the buffered-body size. The
@@ -22,12 +22,6 @@ import (
 // a single read never straddles a frame by more than a partial one, and the
 // per-read byte-swap scratch of the same size always fits a full delivery.
 const readBufSize = 4096
-
-// maxPTSSeconds is the largest whole-second count a time.Duration holds. A
-// duration is an int64 nanosecond count, so the seconds term of a PTS must stay
-// below this or the multiply that scales it wraps negative. It mirrors the rtsp
-// pipeline's overflow-safe PTS math.
-const maxPTSSeconds = math.MaxInt64 / int64(time.Second)
 
 // Client is a single HTTP progressive audio source. It opens one GET, resolves
 // the audio format from the response, and delivers s16le PCM frames to
@@ -437,6 +431,12 @@ func (c *Client) classifyOpenRead(err error) error {
 	return c.openReadClassifier(err)
 }
 
+// isCompressed reports whether the source is a compressed codec (MP3 or AAC),
+// framed through c.framer rather than delivered as fixed-width PCM. resolveFormat
+// sets c.codec and c.framer together (setupMP3, setupAAC), so either signals it;
+// this helper names the predicate the reader and Format both test.
+func (c *Client) isCompressed() bool { return c.framer != nil }
+
 // Format returns the source's audio format descriptor. A compressed source
 // (MP3 or AAC) reports its codec with Kind KindCompressed and, per the AudioFormat
 // contract, SampleRate and Channels 0: the true geometry is the consumer's
@@ -446,7 +446,7 @@ func (c *Client) classifyOpenRead(err error) error {
 // source byte order, so SampleRate and Channels are populated. It is immutable
 // after Open and safe from any goroutine, including from inside OnFrame.
 func (c *Client) Format() audiostream.AudioFormat {
-	if c.codec != nil {
+	if c.isCompressed() {
 		return audiostream.AudioFormat{
 			Codec: c.codec,
 			Kind:  audiostream.PayloadKindFor(c.codec),
@@ -577,7 +577,7 @@ func (c *Client) recoverReader() {
 // so a frame split by a read boundary is never delivered half. It runs until a
 // terminal condition, whose shutdown it funnels before returning.
 func (c *Client) readLoop() {
-	if c.framer != nil {
+	if c.isCompressed() {
 		c.readCompressed()
 		return
 	}
@@ -641,29 +641,48 @@ func (c *Client) absorb(fill, n int) int {
 // deliverFrame counts one PCM delivery and, when OnFrame is set, hands it over.
 // A little-endian source (WAV or raw LE) is delivered zero-copy; a big-endian
 // source is byte-swapped into swapBuf first. The frame's PTS is the presentation
-// time of its first sample, computed before this delivery advances the sample
-// counter, so the first frame is at PTS 0 and successive PTSs are strictly
-// increasing. pcm is a whole number of sample-frames.
+// time of its first sample, computed from the running sample-frame count before
+// this delivery advances it, so the first frame is at PTS 0 and successive PTSs
+// are strictly increasing. pcm is a whole number of sample-frames.
+//
+// A PCM source has one fixed sample rate, so PTS comes from the cumulative
+// sample count through the shared overflow-safe mediatime helper. With no
+// callback the byte swap, PTS, and counter advance are all wasted work (nothing
+// reads the PTS), so the nil path only counts the delivery.
 func (c *Client) deliverFrame(pcm []byte, now time.Time) {
-	c.packets.Add(1)
-	c.payload.Add(uint64(len(pcm)))
 	if c.cfg.OnFrame == nil {
+		c.emitFrame(pcm, 0, now)
 		return
 	}
 	out := pcm
 	if c.swap {
 		out = c.byteSwap(pcm)
 	}
-	pts := c.ptsOf()
+	c.emitFrame(out, mediatime.PTSFromSamples(c.samples, c.rate), now)
+	c.samples += uint64(len(pcm) / c.frameBytes)
+}
+
+// emitFrame counts one delivered frame and, when OnFrame is set, hands it over
+// with the source's fixed fields (track 0, no RTP time, no sequence gap). It is
+// the shared tail of the PCM path (deliverFrame) and the compressed path
+// (deliverCompressed): both count every frame whether or not a callback consumes
+// it, so the count is unconditional and only the callback is guarded. data
+// aliases reader-owned memory and is valid only during the callback; the caller
+// does its own pre-work (byte swap, PTS, clock advance) before calling.
+func (c *Client) emitFrame(data []byte, pts time.Duration, now time.Time) {
+	c.packets.Add(1)
+	c.payload.Add(uint64(len(data)))
+	if c.cfg.OnFrame == nil {
+		return
+	}
 	c.cfg.OnFrame(audiostream.Frame{
 		TrackID:    0,
-		Data:       out,
+		Data:       data,
 		RTPTime:    0,
 		PTS:        pts,
 		ReceivedAt: now,
 		SeqGap:     0,
 	})
-	c.samples += uint64(len(pcm) / c.frameBytes)
 }
 
 // byteSwap writes the little-endian image of a big-endian s16 buffer into
@@ -680,25 +699,6 @@ func (c *Client) byteSwap(pcm []byte) []byte {
 		dst[i+1] = pcm[i]
 	}
 	return dst
-}
-
-// ptsOf computes the presentation time of the next sample to be delivered, from
-// the running sample-frame count and the clock rate. The division is split into
-// whole seconds and a remainder so the nanosecond scaling cannot overflow a
-// uint64 on a long stream, and the seconds term is clamped to what a
-// time.Duration can express, mirroring the rtsp pipeline's overflow-safe math.
-func (c *Client) ptsOf() time.Duration {
-	rate := uint64(c.rate)
-	if rate == 0 {
-		return 0
-	}
-	s := c.samples
-	sec := s / rate
-	if sec >= uint64(maxPTSSeconds) {
-		return time.Duration(maxPTSSeconds) * time.Second
-	}
-	frac := (s % rate) * uint64(time.Second) / rate
-	return time.Duration(sec)*time.Second + time.Duration(frac)
 }
 
 // dropPartial counts an undelivered sub-frame tail as malformed, mirroring the
