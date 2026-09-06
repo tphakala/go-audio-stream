@@ -36,6 +36,8 @@ type recvHarness struct {
 	tr       *track
 	m        *mediaSockets
 	send     *net.UDPConn
+	rtcpSend *net.UDPConn
+	rtcpAddr *net.UDPAddr
 	remote   net.Conn
 	frames   chan audiostream.Frame
 	baseline int
@@ -97,6 +99,7 @@ func newRecvHarness(t *testing.T, opts harnessOpts) *recvHarness {
 		conn:    local,
 		closing: make(chan struct{}),
 		media:   map[int]*mediaSockets{tr.id: m},
+		tracks:  []*track{tr},
 	}
 	c.cfg.ReadIdle = opts.readIdle
 	c.cfg.OnFrame = func(f audiostream.Frame) {
@@ -115,7 +118,7 @@ func newRecvHarness(t *testing.T, opts harnessOpts) *recvHarness {
 		_ = m.Close()
 		t.Fatalf("dial sender: %v", err)
 	}
-	return &recvHarness{t: t, c: c, tr: tr, m: m, send: send, remote: remote, frames: frames}
+	return &recvHarness{t: t, c: c, tr: tr, m: m, send: send, rtcpAddr: rtcpAddr, remote: remote, frames: frames}
 }
 
 // start records the goroutine baseline and launches the RTP receiver under the
@@ -138,6 +141,31 @@ func (h *recvHarness) startDiscardRTP() {
 	h.tr.lastFrameUnixNano.Store(time.Now().UnixNano())
 	h.c.udpWG.Add(1)
 	go h.c.runDiscardReceiver(h.tr, h.m.rtpConn, h.m.rtpPeer.IP, false)
+}
+
+// startRTCP records the goroutine baseline and launches the RTCP receiver, the
+// way Play does for a track's RTCP socket.
+func (h *recvHarness) startRTCP() {
+	h.baseline = runtime.NumGoroutine()
+	h.c.udpWG.Add(1)
+	go h.c.runRTCPReceiver(h.tr, h.m)
+}
+
+// sendRTCP writes one datagram to the receiver's RTCP socket, dialing a sender
+// on first use. The sender binds an ephemeral loopback port, so its source IP is
+// 127.0.0.1, matching the RTP sender.
+func (h *recvHarness) sendRTCP(pkt []byte) {
+	h.t.Helper()
+	if h.rtcpSend == nil {
+		s, err := net.DialUDP("udp", nil, h.rtcpAddr)
+		if err != nil {
+			h.t.Fatalf("dial rtcp sender: %v", err)
+		}
+		h.rtcpSend = s
+	}
+	if _, err := h.rtcpSend.Write(pkt); err != nil {
+		h.t.Fatalf("send rtcp: %v", err)
+	}
 }
 
 // waitCounter polls an atomic counter until it reaches want or the deadline
@@ -185,6 +213,9 @@ func (h *recvHarness) cleanup() {
 	h.c.udpWG.Wait()
 	assertGoroutinesSettled(h.t, h.baseline)
 	_ = h.send.Close()
+	if h.rtcpSend != nil {
+		_ = h.rtcpSend.Close()
+	}
 	_ = h.remote.Close()
 }
 
@@ -464,17 +495,23 @@ func TestUDPRecvSourceAddressFilter(t *testing.T) {
 	if f := accepted.waitFrame(); f.RTPTime != 10 {
 		t.Errorf("accepted-peer frame RTPTime = %d, want 10", f.RTPTime)
 	}
+	if got := accepted.tr.sourceFiltered.Load(); got != 0 {
+		t.Errorf("sourceFiltered = %d, want 0 (an accepted-peer datagram is not filtered)", got)
+	}
 	accepted.stop()
 
 	// Dropped: a TEST-NET peer IP (RFC 5737) the loopback sender cannot match,
-	// so its datagram is foreign and must leave no trace.
+	// so its datagram is foreign and must leave no trace but the filtered count.
 	dropped := newRecvHarness(t, harnessOpts{peerIP: net.IPv4(192, 0, 2, 1)})
 	dropped.start()
 	dropped.sendRTP(buildTestRTP(96, 20, 20, 0x1234, []byte{2}))
+	// Synchronize on the drop being counted, so the zero-asserts below reflect a
+	// datagram that was read and rejected, not one still in flight.
+	waitCounter(t, dropped.tr.sourceFiltered.Load, 1, "sourceFiltered")
 	select {
 	case f := <-dropped.frames:
 		t.Fatalf("delivered a frame from a foreign source: %+v", f)
-	case <-time.After(150 * time.Millisecond):
+	default:
 	}
 	if got := dropped.tr.wireBytes.Load(); got != 0 {
 		t.Errorf("wireBytes = %d, want 0 (a foreign-source datagram is not bandwidth)", got)
@@ -491,7 +528,42 @@ func TestUDPRecvSourceAddressFilter(t *testing.T) {
 	if got := dropped.c.lastFrameAt.Load(); got != 0 {
 		t.Errorf("lastFrameAt = %d, want 0 (a foreign-source datagram must not feed the watchdog)", got)
 	}
+	// Stats surfaces the per-track counter under the track ID.
+	if got := dropped.c.Stats().Tracks[0].SourceFiltered; got != 1 {
+		t.Errorf("Stats SourceFiltered = %d, want 1", got)
+	}
 	dropped.stop()
+}
+
+// A discard track's RTP receiver counts a foreign-source datagram as filtered,
+// dropping it before wire or packet accounting, exactly as the active receiver
+// does: the source-address filter guards every UDP receive path.
+func TestUDPDiscardReceiverSourceAddressFilterCounts(t *testing.T) {
+	h := newRecvHarness(t, harnessOpts{peerIP: net.IPv4(192, 0, 2, 1)})
+	h.tr.discard = true
+	h.startDiscardRTP()
+
+	h.sendRTP(buildTestRTP(96, 1, 1, 0xABCDEF01, []byte{1, 2, 3, 4}))
+	waitCounter(t, h.tr.sourceFiltered.Load, 1, "sourceFiltered")
+	if got := h.tr.wireBytes.Load(); got != 0 {
+		t.Errorf("wireBytes = %d, want 0 (a foreign-source datagram is not bandwidth)", got)
+	}
+	if got := h.tr.packets.Load(); got != 0 {
+		t.Errorf("packets = %d, want 0 (a foreign-source datagram is dropped before the shape check)", got)
+	}
+	h.stop()
+}
+
+// The RTCP receiver counts a foreign-source datagram as filtered, dropping it
+// before it can steer the sender-clock mapping or the RR snapshot.
+func TestUDPRTCPReceiverSourceAddressFilterCounts(t *testing.T) {
+	h := newRecvHarness(t, harnessOpts{peerIP: net.IPv4(192, 0, 2, 1)})
+	h.startRTCP()
+
+	// The datagram content is irrelevant: the filter drops it before handleRTCP.
+	h.sendRTCP([]byte{0x80, 0xc8, 0x00, 0x00})
+	waitCounter(t, h.tr.sourceFiltered.Load, 1, "sourceFiltered")
+	h.stop()
 }
 
 // A discard track's RTP receiver counts wireBytes for every datagram from the

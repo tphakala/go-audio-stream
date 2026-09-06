@@ -82,10 +82,10 @@ type Client struct {
 	malformed  atomic.Uint64
 	ssrcResets atomic.Uint64
 	// sourceFiltered counts datagrams dropped by the Config.SourceIP allowlist
-	// before any parsing (so they touch none of the other counters). It is zero
-	// when no SourceIP is set, and lets an operator tell an idle socket apart from
-	// one receiving only from an unexpected address. Surfaced as
-	// TrackStats.SourceFiltered.
+	// before any parsing (so they touch none of the other counters), on both the
+	// media receive loop and the RTCP receiver. It is zero when no SourceIP is
+	// set, and lets an operator tell an idle socket apart from one receiving only
+	// from an unexpected address. Surfaced as TrackStats.SourceFiltered.
 	sourceFiltered atomic.Uint64
 
 	// reorderDrops counts datagrams the Reorderer dropped as late or duplicate

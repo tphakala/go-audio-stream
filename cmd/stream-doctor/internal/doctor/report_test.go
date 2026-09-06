@@ -66,6 +66,36 @@ func TestRenderReportGolden(t *testing.T) {
 	}
 }
 
+// source-filtered is surfaced by both the walkthrough and the markdown report
+// when nonzero, and omitted entirely when zero so the common case (and every
+// non-UDP source, where it is always zero) carries no permanently-zero line.
+func TestCaptureSourceFilteredShown(t *testing.T) {
+	t.Parallel()
+	shown := &Report{CaptureShown: true, Reason: EndCompleted, Capture: CaptureStats{SourceFiltered: 3}}
+	var rc strings.Builder
+	renderCapture(&rc, shown)
+	if !strings.Contains(rc.String(), "src-filtered") {
+		t.Errorf("walkthrough omits the src-filtered line:\n%s", rc.String())
+	}
+	var rp strings.Builder
+	reportCapture(&rp, shown)
+	if !strings.Contains(rp.String(), "source-filtered: 3") {
+		t.Errorf("report omits the source-filtered line:\n%s", rp.String())
+	}
+
+	zero := &Report{CaptureShown: true, Reason: EndCompleted, Capture: CaptureStats{}}
+	rc.Reset()
+	renderCapture(&rc, zero)
+	if strings.Contains(rc.String(), "src-filtered") {
+		t.Errorf("walkthrough shows src-filtered when zero:\n%s", rc.String())
+	}
+	rp.Reset()
+	reportCapture(&rp, zero)
+	if strings.Contains(rp.String(), "source-filtered") {
+		t.Errorf("report shows source-filtered when zero:\n%s", rp.String())
+	}
+}
+
 func TestRenderReportRedaction(t *testing.T) {
 	t.Parallel()
 	r := goldenReport()

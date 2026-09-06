@@ -252,6 +252,38 @@ func TestRTCPSeparateSocketPopulatesSenderClock(t *testing.T) {
 	}
 }
 
+// An RTCP datagram from outside the SourceIP allowlist is dropped by the filter
+// and counted in TrackStats.SourceFiltered, mirroring the media path, so an
+// off-path RTCP flood is observable rather than indistinguishable from silence.
+func TestRTCPSourceIPFilterCounts(t *testing.T) {
+	var col collector
+	cfg := rtcpE2ECfg(col.onFrame)
+	cfg.RTCPListenAddr = loopbackAddr
+	cfg.SourceIP = "127.0.0.2" // the loopback sender is 127.0.0.1, so it is foreign.
+	c := openOK(t, cfg)
+	defer func() { _ = c.Close() }()
+
+	rtcp := senderForAddr(t, c.rtcpConn.LocalAddr().String())
+	// The content is irrelevant: the filter drops it before handleRTCP.
+	_, _ = rtcp.Write(buildSR(0x0ABCDEF0, ntpAt(1_600_000_000), 90000, 1, 5))
+
+	// Poll until the RTCP reader has processed and dropped the datagram. A
+	// filtered datagram advances no other counter, so once SourceFiltered ticks
+	// the drop has happened. SourceFiltered is incremented only in the filter
+	// branch, so reaching 1 can only mean the drop path ran.
+	deadline := time.Now().Add(2 * time.Second)
+	for c.Stats().Tracks[0].SourceFiltered == 0 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if got := c.Stats().Tracks[0].SourceFiltered; got != 1 {
+		t.Fatalf("SourceFiltered = %d, want 1 (filtered RTCP datagram not counted)", got)
+	}
+	// The drop happened before handleRTCP, so it must not have mapped a clock.
+	if c.Stats().Tracks[0].SenderClock.Valid {
+		t.Error("SenderClock became valid, want invalid (a filtered RTCP datagram must not map)")
+	}
+}
+
 func TestRTCPSSRCResetClearsSenderClock(t *testing.T) {
 	const ssrc1, ssrc2 = uint32(0x11111111), uint32(0x22222222)
 	var col collector

@@ -120,7 +120,9 @@ func reportHTTPSession(b *strings.Builder, r *Report) {
 
 // reportCapture writes the capture statistics block, or nothing when capture
 // never ran. Malformed and ssrc-resets are library-health counters: a climbing
-// malformed count points at a codec or framing mismatch.
+// malformed count points at a codec or framing mismatch. source-filtered, shown
+// only when nonzero, means datagrams arrived from an address other than the
+// negotiated peer (an off-path flood or a misconfigured source).
 func reportCapture(b *strings.Builder, r *Report) {
 	if !r.CaptureShown {
 		return
@@ -138,6 +140,11 @@ func reportCapture(b *strings.Builder, r *Report) {
 	fmt.Fprintf(b, "  duplicates: %d\n", c.Duplicates)
 	fmt.Fprintf(b, "  malformed: %d\n", c.Malformed)
 	fmt.Fprintf(b, "  ssrc-resets: %d\n", c.SSRCResets)
+	// Shown only when nonzero: it is zero for every source that does not
+	// source-filter (TCP, HTTP), so an always-present line would be noise.
+	if c.SourceFiltered > 0 {
+		fmt.Fprintf(b, "  source-filtered: %d\n", c.SourceFiltered)
+	}
 	fmt.Fprintf(b, "  max-gap: %d\n", c.MaxGap)
 	fmt.Fprintf(b, "  bitrate: %.1f kbit/s\n", c.Bitrate/1000)
 	if c.WireBytes > 0 {

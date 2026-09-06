@@ -56,7 +56,10 @@ func (c *Client) runRTPReceiver(tr *track, m *mediaSockets) {
 			// the wildcard address, so any host can target this ephemeral port,
 			// and an off-path forgery must not count as bandwidth, keep the
 			// watchdog alive, reach the Reorderer, or trip an SSRC reset (or
-			// inject counterfeit audio) inside process.
+			// inject counterfeit audio) inside process. Counted as filtered only,
+			// so an operator can tell an idle socket from one under a foreign
+			// flood without the count feeding bandwidth or the watchdog.
+			tr.sourceFiltered.Add(1)
 			continue
 		}
 		now := time.Now()
@@ -160,7 +163,9 @@ func (c *Client) runRTCPReceiver(tr *track, m *mediaSockets) {
 		if !fromPeer(addr, m.rtcpPeer.IP) {
 			// An RTCP datagram from a host other than the negotiated peer is a
 			// forgery targeting the wildcard-bound port; drop it so it cannot
-			// steer the sender-clock mapping or the RR snapshot.
+			// steer the sender-clock mapping or the RR snapshot, counting it as
+			// filtered so the drop is observable.
+			tr.sourceFiltered.Add(1)
 			continue
 		}
 		c.handleRTCP(tr, buf[:n], time.Now())
@@ -208,7 +213,11 @@ func (c *Client) runDiscardReceiver(tr *track, conn *net.UDPConn, peerIP net.IP,
 			return
 		}
 		if !fromPeer(addr, peerIP) {
-			continue // not from the negotiated peer; drop without accounting.
+			// Not from the negotiated peer; drop before wire or packet accounting,
+			// counting it as filtered so even a discard track's foreign drops are
+			// observable.
+			tr.sourceFiltered.Add(1)
+			continue
 		}
 		if isRTCP {
 			// A discard track's RTCP is not media, is attributed to nothing, and
