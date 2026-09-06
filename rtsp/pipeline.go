@@ -15,6 +15,7 @@ import (
 	"github.com/tphakala/go-audio-stream/depacket/g711"
 	"github.com/tphakala/go-audio-stream/depacket/g726"
 	"github.com/tphakala/go-audio-stream/depacket/latm"
+	"github.com/tphakala/go-audio-stream/depacket/mp3"
 	"github.com/tphakala/go-audio-stream/depacket/opus"
 	"github.com/tphakala/go-audio-stream/rtsp/rtp"
 	"github.com/tphakala/go-audio-stream/rtsp/sdp"
@@ -59,6 +60,9 @@ const (
 	// deliverFLAC reassembles FLAC frames across RTP packets and delivers each
 	// completed frame as one compressed frame.
 	deliverFLAC
+	// deliverMP3 strips the RFC 2250 MPEG audio header and delivers each whole
+	// MPEG audio (MP3/MPA) frame, reassembling frames fragmented across packets.
+	deliverMP3
 )
 
 // track is one set-up track's pipeline state. Setup fully initializes it and
@@ -95,6 +99,10 @@ type track struct {
 	// otherwise. Like aac it carries cross-packet fragment state, so it is reset
 	// on BOTH a sequence gap and an SSRC change (see resetDepacketizer).
 	flac *flac.Depacketizer
+	// mp3 depacketizes MPEG audio (MP3/MPA) per RFC 2250 for a CodecMP3 track, nil
+	// otherwise. Like flac it reassembles frames fragmented across packets, so it
+	// is reset on BOTH a sequence gap and an SSRC change (see resetDepacketizer).
+	mp3  *mp3.Depacketizer
 	latm *latm.Depacketizer
 	// g726 is the ITU-T G.726 ADPCM decoder for a CodecG726 track, nil
 	// otherwise. It carries adaptive state across packets, so it is reset only
@@ -247,6 +255,12 @@ func newTrack(id int, desc describedTrack, opts SetupOptions, rtcpCh int, logger
 	case audiostream.CodecFLAC:
 		tr.kind = deliverFLAC
 		tr.flac = flac.New()
+	case audiostream.CodecMP3:
+		// The RTP clock for MPA is 90 kHz (RFC 2250); the depacketizer defaults to
+		// it when the resolved rate is 0, so a track with an unusable SDP rate still
+		// frames and only loses PTS interpolation (ptsOf returns 0 for a 0 rate).
+		tr.kind = deliverMP3
+		tr.mp3 = mp3.New(uint32(tr.clockRate))
 	default:
 		logWarn(logger, "unrecognized codec; delivering raw payloads", "track", id)
 	}
@@ -489,6 +503,8 @@ func (tr *track) deliver(pkt rtp.Packet, up rtp.Update, now time.Time, onFrame f
 		tr.deliverG726(pkt, up, now, onFrame)
 	case deliverFLAC:
 		tr.deliverFLAC(pkt, up, now, onFrame)
+	case deliverMP3:
+		tr.deliverMP3(pkt, up, now, onFrame)
 	case deliverLATM:
 		// nil onCodecUpdate: this generic dispatch has no Config to read one
 		// from, so it is test-only for LATM. Production delivery routes
@@ -764,6 +780,47 @@ func (tr *track) deliverFLAC(pkt rtp.Packet, up rtp.Update, now time.Time, onFra
 	tr.deliverOne(frame, pkt, up, now, onFrame)
 }
 
+// deliverMP3 strips the RFC 2250 MPEG audio header and delivers each whole MPEG
+// audio frame the packet yields, reassembling frames fragmented across packets.
+// It mirrors deliverAAC's multi-frame drain: a packet may carry several whole
+// frames (aggregation), complete exactly one (a single frame or a fragment's
+// last packet), or none (a buffering fragment). SeqGap is drained (from
+// tr.pendingGap) onto the FIRST frame a packet delivers and zero on the rest, so
+// summing SeqGap across frames counts each loss once; RTPTime is the packet
+// timestamp for every frame and PTS interpolates by the frame's RTPOffset. A
+// malformed packet (a short or invalid header, or an orphaned/overflowing
+// fragment) counts as malformed and yields no frame, retaining the pending gap
+// for the next delivered frame. The reassembly buffer is cleared on a gap and an
+// SSRC change (see resetDepacketizer), so a lost fragment cannot be spliced onto
+// the next frame.
+func (tr *track) deliverMP3(pkt rtp.Packet, up rtp.Update, now time.Time, onFrame func(audiostream.Frame)) {
+	tr.pendingGap += up.Gap
+	frames, err := tr.mp3.Depacketize(pkt.Payload, pkt.Header.Timestamp)
+	if err != nil {
+		// The pending gap is retained for the next delivered frame.
+		tr.malformed.Add(1)
+		return
+	}
+	for i := range frames {
+		gap := 0
+		if i == 0 {
+			gap = tr.pendingGap
+			tr.pendingGap = 0
+		}
+		if onFrame == nil {
+			continue
+		}
+		onFrame(audiostream.Frame{
+			TrackID:    tr.id,
+			Data:       frames[i].Data,
+			RTPTime:    pkt.Header.Timestamp,
+			PTS:        tr.ptsOf(up.Timestamp + uint64(frames[i].RTPOffset)),
+			ReceivedAt: now,
+			SeqGap:     gap,
+		})
+	}
+}
+
 // deliverRaw delivers the undecoded RTP payload as one frame. It is the
 // fallback for every track newTrack could not build a decoder for: an
 // unrecognized codec, a non-audio media kind, an AAC mode other than AAC-hbr,
@@ -834,10 +891,11 @@ func (tr *track) ptsOf(ts uint64) time.Duration {
 	return time.Duration(sec)*time.Second + time.Duration(frac)
 }
 
-// resetDepacketizer clears codec reassembly state. AAC and FLAC reassembly state
-// is cleared on BOTH a gap and an SSRC change (regardless of onSSRCChange), so a
-// lost fragment cannot corrupt the next access unit or frame: both fragment a
-// unit across packets, so a hole leaves partial state that must be dropped.
+// resetDepacketizer clears codec reassembly state. Every codec that reassembles a
+// coded unit across packets (AAC, FLAC, MP3) has its reassembly state cleared on
+// BOTH a gap and an SSRC change (regardless of onSSRCChange), so a lost fragment
+// cannot corrupt the next access unit or frame: each fragments a unit across
+// packets, so a hole leaves partial state that must be dropped.
 // LATM does not fragment across packets, so it carries no cross-packet fragment
 // state, only a retained StreamMuxConfig. That config must SURVIVE a gap and be
 // reset only on an SSRC change (onSSRCChange true), where a new source may use a
@@ -886,6 +944,15 @@ func (tr *track) resetDepacketizer(onSSRCChange bool) {
 		// onSSRCChange guard): a lost final fragment must not be spliced onto the
 		// next frame, which marker-bit framing alone cannot prevent.
 		tr.flac.Reset()
+	}
+	if tr.mp3 != nil {
+		// MP3/MPA reassembles a fragmented frame across packets exactly as FLAC
+		// does, so its partial reassembly is dropped on BOTH a gap and an SSRC
+		// change: a lost fragment must not be spliced onto the next frame. The
+		// depacketizer already rejects a continuation whose offset or timestamp does
+		// not line up, but a gap that lands exactly on a fragment boundary can leave
+		// a consistent-looking partial, so the caller-driven reset is still needed.
+		tr.mp3.Reset()
 	}
 	if onSSRCChange && tr.g726 != nil {
 		// G.726 carries adaptive predictor and quantizer state across packets;

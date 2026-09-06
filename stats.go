@@ -54,6 +54,14 @@ type TrackStats struct {
 	Malformed uint64
 	// SSRCResets is the number of mid-stream SSRC changes tolerated.
 	SSRCResets uint64
+	// SourceFiltered is the number of datagrams discarded because their source
+	// address did not match the configured allowlist, before any RTP parsing.
+	// Only the raw UDP source (udpsource) populates it, and only when
+	// Config.SourceIP is set; every other source leaves it zero. It separates
+	// "nothing is arriving" from "everything is being filtered": a climbing
+	// SourceFiltered with no Packets means datagrams are reaching the socket but
+	// from an address other than the one configured.
+	SourceFiltered uint64
 	// LastFrameAt is the wall-clock arrival time of the most recent frame on
 	// the track's RTP channel, parsed or not; it is the zero Time until the
 	// first such frame and is never advanced by RTCP traffic, so it is a media

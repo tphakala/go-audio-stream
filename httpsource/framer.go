@@ -3,8 +3,6 @@ package httpsource
 import (
 	"errors"
 	"time"
-
-	audiostream "github.com/tphakala/go-audio-stream"
 )
 
 // compressedFramer is the codec-neutral surface the reader drives for a
@@ -82,28 +80,19 @@ func (c *Client) drainCompressed(now time.Time) {
 	c.malformed.Store(c.framer.GapCount())
 }
 
-// deliverCompressed counts one coded-frame delivery and hands it to OnFrame. The
-// frame's PTS is the presentation time of its first sample, computed from the
-// running media time before this frame advances it, so the first frame is at PTS
-// 0 and successive PTSs increase by each frame's duration. A non-positive
-// duration (a frame whose header carried no usable rate) does not advance the
-// clock. data aliases reader-owned memory and is valid only during the callback.
+// deliverCompressed counts one coded-frame delivery and hands it to OnFrame
+// through the shared emitFrame tail. The frame's PTS is the presentation time of
+// its first sample, computed from the running media time before this frame
+// advances it, so the first frame is at PTS 0 and successive PTSs increase by
+// each frame's duration. Accumulating per-frame durations (rather than a
+// cumulative sample count at one rate) keeps the PTS correct across a mid-stream
+// sample-rate change, which Icecast/SHOUTcast streams do. A non-positive duration
+// (a frame whose header carried no usable rate) does not advance the clock. data
+// aliases reader-owned memory and is valid only during the callback.
 func (c *Client) deliverCompressed(data []byte, dur time.Duration, now time.Time) {
-	c.packets.Add(1)
-	c.payload.Add(uint64(len(data)))
 	pts := c.mediaPTS
 	if dur > 0 {
 		c.mediaPTS += dur
 	}
-	if c.cfg.OnFrame == nil {
-		return
-	}
-	c.cfg.OnFrame(audiostream.Frame{
-		TrackID:    0,
-		Data:       data,
-		RTPTime:    0,
-		PTS:        pts,
-		ReceivedAt: now,
-		SeqGap:     0,
-	})
+	c.emitFrame(data, pts, now)
 }

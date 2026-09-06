@@ -426,9 +426,31 @@ func TestSourceIPFilter(t *testing.T) {
 	})
 	defer func() { _ = cr.Close() }()
 	_, _ = senderFor(t, cr).Write(rtpPacket(111, 1, 0, 1, []byte{1, 2, 3}))
-	time.Sleep(150 * time.Millisecond)
+	// Poll until the reader has processed the filtered datagram rather than racing a
+	// fixed sleep (a source-filtered datagram advances no WireBytes, so sendAndSettle
+	// cannot gate it, and under load or -race the reader may lag a bare sleep). The
+	// reader is single-threaded and delivers nothing for a filtered datagram, so once
+	// SourceFiltered ticks the other counters are settled.
+	deadline := time.Now().Add(2 * time.Second)
+	for cr.Stats().Tracks[0].SourceFiltered == 0 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	ts := cr.Stats().Tracks[0]
+	if ts.SourceFiltered != 1 {
+		t.Fatalf("SourceFiltered = %d, want 1 (filtered datagram not counted)", ts.SourceFiltered)
+	}
+	// The filtered datagram delivers no frame and touches no other counter, so an
+	// operator can tell it apart from an idle socket.
 	if rejected.count() != 0 {
-		t.Fatalf("delivered %d frames, want 0 (datagram from a non-allowlisted IP)", rejected.count())
+		t.Errorf("delivered %d frames, want 0 (datagram from a non-allowlisted IP)", rejected.count())
+	}
+	if ts.Packets != 0 || ts.Malformed != 0 {
+		t.Errorf("filtered datagram touched other counters: Packets=%d Malformed=%d, want 0/0", ts.Packets, ts.Malformed)
+	}
+	// A source with no filter and no traffic reports zero, so a non-zero count is
+	// never a false positive.
+	if ts := ca.Stats().Tracks[0]; ts.SourceFiltered != 0 {
+		t.Errorf("accepted source SourceFiltered = %d, want 0", ts.SourceFiltered)
 	}
 }
 

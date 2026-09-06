@@ -81,6 +81,12 @@ type Client struct {
 	duplicates atomic.Uint64
 	malformed  atomic.Uint64
 	ssrcResets atomic.Uint64
+	// sourceFiltered counts datagrams dropped by the Config.SourceIP allowlist
+	// before any parsing (so they touch none of the other counters). It is zero
+	// when no SourceIP is set, and lets an operator tell an idle socket apart from
+	// one receiving only from an unexpected address. Surfaced as
+	// TrackStats.SourceFiltered.
+	sourceFiltered atomic.Uint64
 
 	// reorderDrops counts datagrams the Reorderer dropped as late or duplicate
 	// before Stream.Observe ever saw them (Config.Reorder path only). Stats folds
@@ -449,6 +455,11 @@ func (c *Client) recvLoop() {
 			return
 		}
 		if c.srcIP != nil && !addr.IP.Equal(c.srcIP) {
+			// A datagram from an address outside the allowlist. Count it before any
+			// other accounting (it is not media wire traffic and never reaches the
+			// parser) so an operator can tell an idle socket from one flooded by an
+			// unexpected sender.
+			c.sourceFiltered.Add(1)
 			continue
 		}
 		now := time.Now()
@@ -998,13 +1009,14 @@ func (c *Client) Close() error {
 // including from inside OnFrame.
 func (c *Client) Stats() audiostream.Stats {
 	ts := audiostream.TrackStats{
-		Packets:      c.packets.Load(),
-		PayloadBytes: c.payload.Load(),
-		WireBytes:    c.wire.Load(),
-		SeqGaps:      c.seqGaps.Load(),
-		Duplicates:   c.duplicates.Load() + c.reorderDrops.Load(),
-		Malformed:    c.malformed.Load(),
-		SSRCResets:   c.ssrcResets.Load(),
+		Packets:        c.packets.Load(),
+		PayloadBytes:   c.payload.Load(),
+		WireBytes:      c.wire.Load(),
+		SeqGaps:        c.seqGaps.Load(),
+		Duplicates:     c.duplicates.Load() + c.reorderDrops.Load(),
+		Malformed:      c.malformed.Load(),
+		SSRCResets:     c.ssrcResets.Load(),
+		SourceFiltered: c.sourceFiltered.Load(),
 	}
 	if nanos := c.lastReadAt.Load(); nanos != 0 {
 		ts.LastFrameAt = time.Unix(0, nanos)

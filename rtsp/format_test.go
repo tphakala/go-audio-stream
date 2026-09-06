@@ -37,6 +37,13 @@ func TestTrackFormat(t *testing.T) {
 			wantChan: 0,
 		},
 		{
+			name:     "mp3 zeroes geometry (rate/channels live in the frame headers)",
+			track:    Track{Codec: audiostream.CodecMP3{}, ClockRate: 90000, Channels: 1},
+			wantKind: audiostream.KindCompressed,
+			wantRate: 0,
+			wantChan: 0,
+		},
+		{
 			name:     "g711 carries pcm geometry",
 			track:    Track{Codec: audiostream.CodecG711{Law: audiostream.MuLaw}, ClockRate: 8000, Channels: 1},
 			wantKind: audiostream.KindPCMS16LE,
