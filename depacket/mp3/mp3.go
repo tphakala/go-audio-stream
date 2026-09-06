@@ -17,6 +17,16 @@ const headerLen = 4
 // to it when the caller passes 0.
 const defaultClockRate = 90000
 
+// maxRTPOffset caps an aggregated frame's RTPOffset at the 32-bit RTP clock
+// range. A conformant MPA clock (90 kHz) keeps a packet's accumulated offset far
+// below this (tens of millions of ticks at most), but the SDP clock is remote
+// input bounded only by MaxUint32, so a pathological rtpmap clock plus a
+// maximally aggregated packet could push the uint64 accumulator past 2^32.
+// Saturating rather than wrapping the cast keeps the per-frame offsets
+// non-decreasing (a wrap would hand a later frame a SMALLER offset and a
+// backwards PTS); a real stream never reaches the cap.
+const maxRTPOffset uint64 = 1<<32 - 1
+
 // Sentinel errors. Depacketize returns one of these (never any other error
 // value) and never panics.
 var (
@@ -166,11 +176,13 @@ func (d *Depacketizer) startBoundary(data []byte, rtpTime uint32) ([]Frame, erro
 		}
 		frames = append(frames, Frame{
 			Data:      rem[:h.FrameLen],
-			RTPOffset: uint32(accTicks),
+			RTPOffset: uint32(min(accTicks, maxRTPOffset)),
 		})
 		// Accumulate this frame's duration in RTP ticks for the next frame's offset.
 		// Parse guarantees SampleRate > 0 and FrameLen >= HeaderLen, so neither the
-		// division nor the loop advance can misbehave.
+		// division nor the loop advance can misbehave; the accumulator is uint64 and
+		// the cast above saturates at maxRTPOffset, so a pathological clock cannot wrap
+		// it.
 		accTicks += uint64(h.SamplesPerFrame) * uint64(d.clockRate) / uint64(h.SampleRate)
 		off += h.FrameLen
 	}

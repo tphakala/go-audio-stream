@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"errors"
+	"math"
 	"testing"
 
 	mpahdr "github.com/tphakala/go-audio-stream/internal/mp3"
@@ -99,8 +100,10 @@ func TestAggregatedFramesRTPOffsets(t *testing.T) {
 	if len(got) != 3 {
 		t.Fatalf("got %d frames, want 3", len(got))
 	}
-	// perFrame ticks = 1152 * 90000 / 44100 = 2351.
-	const perFrame = uint32(mp1l3Samples * 90000 / mp1l3Rate)
+	// perFrame ticks = 1152 * 90000 / 44100 = 2351, pinned as a literal so a
+	// mis-ordered production formula that happens to match the test's own
+	// re-derivation cannot slip through.
+	const perFrame uint32 = 2351
 	for i, want := range []uint32{0, perFrame, 2 * perFrame} {
 		if got[i].RTPOffset != want {
 			t.Errorf("frame %d RTPOffset = %d, want %d", i, got[i].RTPOffset, want)
@@ -317,19 +320,73 @@ func TestMBZIgnored(t *testing.T) {
 	}
 }
 
-// A whole frame followed by a stray tail too short to be another frame yields
-// only the whole frame; the tail is discarded (RFC 2250 aggregates integral
-// frames only).
-func TestAggregationDiscardsShortTail(t *testing.T) {
-	d := New(90000)
+// After at least one whole frame in an aggregating packet, trailing bytes that
+// are not another whole frame are discarded (RFC 2250 aggregates integral frames
+// only): a stray tail shorter than a header, junk that fails to parse as a
+// header, and a valid header whose frame runs past the payload all yield only the
+// whole frame already parsed, never an error and never a partial reassembly.
+func TestAggregationDiscardsTrailingBytes(t *testing.T) {
 	f := frame(hdrMP1L3)
-	payload := mpaPayload(0, append(append([]byte{}, f...), 0xAA, 0xBB))
-	got, err := d.Depacketize(payload, ts)
+	tests := []struct {
+		name  string
+		trail []byte
+	}{
+		{"tail shorter than a header", []byte{0xAA, 0xBB}},
+		{"junk that fails header parse", []byte{0x00, 0x00, 0x00, 0x00}},
+		{"valid header but frame exceeds the payload", f[:100]}, // header ok, FrameLen 417 > 100
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			d := New(90000)
+			payload := mpaPayload(0, append(bytes.Clone(f), tc.trail...))
+			got, err := d.Depacketize(payload, ts)
+			if err != nil {
+				t.Fatalf("Depacketize: %v", err)
+			}
+			if len(got) != 1 || !bytes.Equal(got[0].Data, f) {
+				t.Fatalf("got %d frames, want exactly the one whole frame", len(got))
+			}
+			// A trailing partial must not have started a reassembly.
+			if _, err := d.Depacketize(mpaPayload(100, f[100:]), ts); !errors.Is(err, ErrOrphanFragment) {
+				t.Errorf("a continuation was accepted, so the trailing bytes wrongly began a reassembly: %v", err)
+			}
+		})
+	}
+}
+
+// A pathological SDP clock plus a heavily aggregated packet can push the
+// accumulated RTP offset past the 32-bit range. The offset saturates at
+// maxRTPOffset instead of wrapping, so per-frame offsets stay non-decreasing (a
+// wrap would hand a later frame a smaller offset and a backwards PTS). A real
+// stream never reaches the cap.
+func TestAggregatedFramesOffsetSaturates(t *testing.T) {
+	d := New(math.MaxUint32) // absurd but permitted (clockRateTicks allows up to MaxUint32)
+	f := frame(hdrMP1L3)
+	const n = 45 // enough frames that a MaxUint32 clock overflows uint32 ticks
+	payload := make([]byte, 0, n*len(f))
+	for range n {
+		payload = append(payload, f...)
+	}
+	got, err := d.Depacketize(mpaPayload(0, payload), ts)
 	if err != nil {
 		t.Fatalf("Depacketize: %v", err)
 	}
-	if len(got) != 1 || !bytes.Equal(got[0].Data, f) {
-		t.Fatalf("got %d frames, want 1 whole frame", len(got))
+	if len(got) != n {
+		t.Fatalf("got %d frames, want %d", len(got), n)
+	}
+	var prev uint32
+	sawCap := false
+	for i, fr := range got {
+		if i > 0 && fr.RTPOffset < prev {
+			t.Fatalf("frame %d RTPOffset %d < previous %d (offset wrapped)", i, fr.RTPOffset, prev)
+		}
+		if fr.RTPOffset == math.MaxUint32 {
+			sawCap = true
+		}
+		prev = fr.RTPOffset
+	}
+	if !sawCap {
+		t.Fatal("no frame reached the saturation cap; the test did not exercise the clamp")
 	}
 }
 

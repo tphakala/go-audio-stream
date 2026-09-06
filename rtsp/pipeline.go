@@ -891,10 +891,11 @@ func (tr *track) ptsOf(ts uint64) time.Duration {
 	return time.Duration(sec)*time.Second + time.Duration(frac)
 }
 
-// resetDepacketizer clears codec reassembly state. AAC and FLAC reassembly state
-// is cleared on BOTH a gap and an SSRC change (regardless of onSSRCChange), so a
-// lost fragment cannot corrupt the next access unit or frame: both fragment a
-// unit across packets, so a hole leaves partial state that must be dropped.
+// resetDepacketizer clears codec reassembly state. Every codec that reassembles a
+// coded unit across packets (AAC, FLAC, MP3) has its reassembly state cleared on
+// BOTH a gap and an SSRC change (regardless of onSSRCChange), so a lost fragment
+// cannot corrupt the next access unit or frame: each fragments a unit across
+// packets, so a hole leaves partial state that must be dropped.
 // LATM does not fragment across packets, so it carries no cross-packet fragment
 // state, only a retained StreamMuxConfig. That config must SURVIVE a gap and be
 // reset only on an SSRC change (onSSRCChange true), where a new source may use a

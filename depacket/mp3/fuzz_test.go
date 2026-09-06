@@ -1,8 +1,11 @@
 package mp3
 
 import (
+	"encoding/binary"
 	"errors"
 	"testing"
+
+	mpahdr "github.com/tphakala/go-audio-stream/internal/mp3"
 )
 
 // isSentinel reports whether err is one of the package's documented sentinels.
@@ -21,8 +24,10 @@ func isSentinel(err error) bool {
 
 // FuzzDepacketize drives the public entry point across a sequence of two packets
 // (to exercise fragment continuation) with arbitrary bytes and fragmentation
-// offsets. It must never panic, must return only documented sentinels, and any
-// frame it returns must have a length within the payload it came from.
+// offsets. It must never panic, must return only documented sentinels, and every
+// frame it returns must be a whole MPEG audio frame: its header must re-parse and
+// its length must equal that header's FrameLen. That postcondition catches a
+// mis-sliced or mis-reassembled frame, which a mere non-empty check would pass.
 func FuzzDepacketize(f *testing.F) {
 	seeds := []struct {
 		p0, p1     []byte
@@ -49,8 +54,15 @@ func FuzzDepacketize(f *testing.F) {
 				t.Fatalf("non-sentinel error: %v", err)
 			}
 			for _, fr := range frames {
-				if len(fr.Data) == 0 {
-					t.Fatalf("returned a zero-length frame")
+				if len(fr.Data) < mpahdr.HeaderLen {
+					t.Fatalf("returned frame too short to hold a header: %d bytes", len(fr.Data))
+				}
+				h, perr := mpahdr.Parse(binary.BigEndian.Uint32(fr.Data[:mpahdr.HeaderLen]))
+				if perr != nil {
+					t.Fatalf("returned frame does not begin with a valid header: %v", perr)
+				}
+				if len(fr.Data) != h.FrameLen {
+					t.Fatalf("returned frame length %d != header FrameLen %d", len(fr.Data), h.FrameLen)
 				}
 			}
 		}

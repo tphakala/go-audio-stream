@@ -667,8 +667,10 @@ func (c *Client) deliverFrame(pcm []byte, now time.Time) {
 // the shared tail of the PCM path (deliverFrame) and the compressed path
 // (deliverCompressed): both count every frame whether or not a callback consumes
 // it, so the count is unconditional and only the callback is guarded. data
-// aliases reader-owned memory and is valid only during the callback; the caller
-// does its own pre-work (byte swap, PTS, clock advance) before calling.
+// aliases reader-owned memory and is valid only during the callback. The caller
+// owns byte swap, PTS, and the clock advance; emitFrame does none of them (the
+// PCM path advances its sample counter after this returns, the compressed path
+// advances its media clock before, so no ordering is assumed here).
 func (c *Client) emitFrame(data []byte, pts time.Duration, now time.Time) {
 	c.packets.Add(1)
 	c.payload.Add(uint64(len(data)))
