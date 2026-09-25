@@ -43,17 +43,12 @@ func (p *Packetizer) Split(pcm []byte, fn func(payload []byte) error) (int, erro
 		return 0, ErrPartialFrame
 	}
 
-	maxPayload := p.MaxBytes - (p.MaxBytes % frameBytes)
-	if maxPayload < frameBytes {
-		maxPayload = frameBytes // always make progress, at least one frame per payload
-	}
+	// Always make progress: at least one frame per payload.
+	maxPayload := max(p.MaxBytes-(p.MaxBytes%frameBytes), frameBytes)
 
 	frames := 0
 	for off := 0; off < len(pcm); {
-		end := off + maxPayload
-		if end > len(pcm) {
-			end = len(pcm)
-		}
+		end := min(off+maxPayload, len(pcm))
 		chunk := pcm[off:end]
 		if cap(p.buf) < len(chunk) {
 			p.buf = make([]byte, len(chunk))
