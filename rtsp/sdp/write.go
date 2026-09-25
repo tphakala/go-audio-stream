@@ -12,6 +12,10 @@ var (
 	ErrInjection = errors.New("sdp: field contains a forbidden control character")
 	// ErrBadPayloadType is returned when PayloadType is outside 0..127.
 	ErrBadPayloadType = errors.New("sdp: payload type out of range 0..127")
+	// ErrBadRtpmap is returned when EncodingName is not a single SDP token or
+	// ClockRate is not positive, either of which would make the a=rtpmap line
+	// unparseable for a receiver.
+	ErrBadRtpmap = errors.New("sdp: invalid rtpmap encoding name or clock rate")
 )
 
 // WriteSpec describes a single-track audio session to serialize. The parse
@@ -48,8 +52,10 @@ type WriteSpec struct {
 // WriteSession serializes spec to a complete RFC 4566 SDP body with CRLF line
 // endings, in the order v, o, s, c, t, m, rtpmap, fmtp, ptime, control. The
 // connection line is written as IN IP4 0.0.0.0 because TCP-interleaved delivery
-// ignores it. It returns ErrBadPayloadType for a payload type outside 0..127
-// and ErrInjection if any free-text field would inject a line break.
+// ignores it. It returns ErrBadPayloadType for a payload type outside 0..127,
+// ErrInjection if any free-text field would inject a line break, and
+// ErrBadRtpmap for an encoding name that is not a single token or a clock rate
+// that is not positive.
 //
 //nolint:gocritic // WriteSpec by value is the config-struct API; WriteSession runs once at DESCRIBE time, not on a hot path.
 func WriteSession(spec WriteSpec) ([]byte, error) {
@@ -60,6 +66,9 @@ func WriteSession(spec WriteSpec) ([]byte, error) {
 		if strings.ContainsAny(f, "\r\n\x00") {
 			return nil, ErrInjection
 		}
+	}
+	if !isToken(spec.EncodingName) || spec.ClockRate <= 0 {
+		return nil, ErrBadRtpmap
 	}
 
 	pt := strconv.Itoa(spec.PayloadType)
@@ -93,6 +102,23 @@ func WriteSession(spec WriteSpec) ([]byte, error) {
 		writeLine(&b, "a=control:"+spec.Control)
 	}
 	return []byte(b.String()), nil
+}
+
+// isToken reports whether s is a non-empty RFC 8866 token: visible ASCII
+// excluding the separators that would split or reshape the rtpmap value.
+func isToken(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, c := range []byte(s) {
+		switch {
+		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9':
+		case strings.IndexByte("!#$%&'*+-.^_`{|}~", c) >= 0:
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 func writeLine(b *strings.Builder, line string) {

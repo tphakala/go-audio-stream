@@ -27,9 +27,18 @@ func (sr SenderReport) Marshal() []byte {
 // 64-bit NTP timestamp (RFC 5905). The seconds are taken modulo 2^32, which
 // NTPTime's era-1 pivot decodes back correctly for any time from 1968 to 2104,
 // so no epoch is out of range. The all-zero timestamp is reserved by RFC 3550
-// section 6.4.1 for "no wall clock"; a real time never encodes to it.
+// section 6.4.1 for "no wall clock": the zero time.Time encodes to it, and a
+// real time never does (an instant exactly on an NTP era boundary, such as the
+// 2036 rollover, is nudged up by one fraction unit, well below nanosecond
+// resolution).
 func NTPFromTime(t time.Time) uint64 {
+	if t.IsZero() {
+		return 0
+	}
 	sec := uint64(t.Unix()+ntpUnixOffset) & 0xFFFFFFFF
 	frac := (uint64(t.Nanosecond()) << 32) / uint64(time.Second)
-	return sec<<32 | frac
+	if ts := sec<<32 | frac; ts != 0 {
+		return ts
+	}
+	return 1
 }

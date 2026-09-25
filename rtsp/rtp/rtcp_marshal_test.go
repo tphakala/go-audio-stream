@@ -37,6 +37,7 @@ func TestNTPFromTimeRoundTrip(t *testing.T) {
 		{"epoch", time.Unix(0, 0)},
 		{"current", time.Unix(1756454400, 123456789)},
 		{"era1-post-2036", time.Unix(2500000000, 500000000)},
+		{"era-rollover-2036", time.Unix(1<<32-ntpUnixOffset, 0)},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -50,6 +51,12 @@ func TestNTPFromTimeRoundTrip(t *testing.T) {
 				t.Errorf("round-trip diff = %d ns (want within 1 ns): got %v, want %v", diff, got, tt.t)
 			}
 		})
+	}
+}
+
+func TestNTPFromTimeZeroIsNoClock(t *testing.T) {
+	if got := NTPFromTime(time.Time{}); got != 0 {
+		t.Errorf("NTPFromTime(zero) = %#x, want 0 (RFC 3550 no wall clock)", got)
 	}
 }
 

@@ -123,3 +123,21 @@ func TestWriteSessionRejectsBadPayloadType(t *testing.T) {
 		}
 	}
 }
+
+func TestWriteSessionRejectsBadRtpmap(t *testing.T) {
+	for _, spec := range []WriteSpec{
+		{PayloadType: 96, EncodingName: "", ClockRate: 48000},
+		{PayloadType: 96, EncodingName: "L16 extra", ClockRate: 48000},
+		{PayloadType: 96, EncodingName: "L16/2", ClockRate: 48000},
+		{PayloadType: 96, EncodingName: encodingL16, ClockRate: 0},
+		{PayloadType: 96, EncodingName: encodingL16, ClockRate: -1},
+	} {
+		if _, err := WriteSession(spec); !errors.Is(err, ErrBadRtpmap) {
+			t.Errorf("WriteSession(%+v) err = %v, want ErrBadRtpmap", spec, err)
+		}
+	}
+	// Token punctuation such as '-' and '.' is legal in an encoding name.
+	if _, err := WriteSession(WriteSpec{PayloadType: 96, EncodingName: "x-test.1", ClockRate: 8000}); err != nil {
+		t.Errorf("WriteSession(x-test.1) err = %v, want nil", err)
+	}
+}

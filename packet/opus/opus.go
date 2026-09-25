@@ -6,10 +6,11 @@ package opus
 import "errors"
 
 // maxPacketBytes is a defensive upper bound on an Opus packet in one RTP
-// payload: three 1275-byte frames plus a two-byte TOC/frame-count prefix
-// (RFC 6716). Real 20 ms frames are far smaller; this only rejects absurd
-// input.
-const maxPacketBytes = 1275*3 + 2
+// payload. RFC 6716 section 3.2.5 lets a code-3 packet carry up to 48 frames
+// of at most 1275 bytes each after a TOC and frame-count byte, with a length
+// field of up to two bytes for every frame but the last in VBR mode. Real
+// 20 ms packets are far smaller; this only rejects absurd input.
+const maxPacketBytes = 1275*48 + 2 + 2*47
 
 var (
 	// ErrEmptyPacket is returned for a zero-length packet: RFC 7587 puts no

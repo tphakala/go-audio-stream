@@ -44,7 +44,7 @@ func TestSplitFrameAlignment(t *testing.T) {
 	src := make([]byte, 4*300) // 300 stereo frames
 	p := &Packetizer{Channels: 2, MaxBytes: 1023}
 	count := 0
-	_, err := p.Split(src, func(payload []byte) error {
+	frames, err := p.Split(src, func(payload []byte) error {
 		count++
 		if len(payload)%4 != 0 {
 			t.Errorf("payload len %d not frame-aligned", len(payload))
@@ -57,8 +57,11 @@ func TestSplitFrameAlignment(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if count == 0 {
-		t.Error("no payloads emitted")
+	if frames != 300 {
+		t.Errorf("frames = %d, want 300", frames)
+	}
+	if count != 2 { // 1020 bytes then the remaining 180
+		t.Errorf("payloads = %d, want 2", count)
 	}
 }
 

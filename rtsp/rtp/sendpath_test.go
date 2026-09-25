@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"math"
+	"slices"
 	"testing"
 
 	"github.com/tphakala/go-audio-stream/packet/l16"
@@ -124,6 +125,9 @@ func FuzzHeaderMarshalParse(f *testing.F) {
 		if pkt.Header.PayloadType != pt&0x7f || pkt.Header.Marker != marker ||
 			pkt.Header.SequenceNumber != seq || pkt.Header.Timestamp != ts || pkt.Header.SSRC != ssrc {
 			t.Errorf("header mismatch: got %+v", pkt.Header)
+		}
+		if !slices.Equal(pkt.Header.CSRC, csrc) {
+			t.Errorf("CSRC = %v, want %v", pkt.Header.CSRC, csrc)
 		}
 		if !bytes.Equal(pkt.Payload, []byte{1, 2, 3}) {
 			t.Errorf("payload = %v, want [1 2 3]", pkt.Payload)
