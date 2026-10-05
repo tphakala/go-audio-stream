@@ -181,6 +181,21 @@ func TestTimeReferenceSamplesBoundsSampleRate(t *testing.T) {
 	}
 }
 
+// readBext reads the bext chunk and the iXML text back out of a WAV through
+// go-wav's own decoder, so the tests do not each repeat the decoder calls.
+func readBext(t *testing.T, wavBytes []byte) (bext *wavpcm.Bext, ixml string) {
+	t.Helper()
+	d, err := wavpcm.NewDecoder(bytes.NewReader(wavBytes))
+	if err != nil {
+		t.Fatalf("opening the WAV: %v", err)
+	}
+	bext, err = d.Bext()
+	if err != nil {
+		t.Fatalf("reading bext back: %v", err)
+	}
+	return bext, d.IXML()
+}
+
 // TestBuildBextEncodesAndRoundTrips pins that buildBext output always passes
 // go-wav's bext validation, so Config.Bext never fails an encode, and reads
 // back unchanged through go-wav's own decoder. The instants cover the NTP era
@@ -207,14 +222,7 @@ func TestBuildBextEncodesAndRoundTrips(t *testing.T) {
 			if err := wavpcm.EncodeInterleaved(&buf, cfg, make([]byte, 64)); err != nil {
 				t.Fatalf("encoding with the built bext: %v", err)
 			}
-			d, err := wavpcm.NewDecoder(bytes.NewReader(buf.Bytes()))
-			if err != nil {
-				t.Fatalf("opening the encoded WAV: %v", err)
-			}
-			got, err := d.Bext()
-			if err != nil {
-				t.Fatalf("reading bext back: %v", err)
-			}
+			got, _ := readBext(t, buf.Bytes())
 			if !reflect.DeepEqual(got, want) {
 				t.Errorf("bext read back = %+v, want %+v", got, want)
 			}
@@ -286,19 +294,12 @@ func TestRunListenBextWithValidSenderClock(t *testing.T) {
 	// valid fmt+data stream. go-wav's own reader must also read the chunk
 	// back as the descriptor the doctor built, with no iXML chunk beside it.
 	decodeWrittenWAV(t, wavBytes)
-	d, derr := wavpcm.NewDecoder(bytes.NewReader(wavBytes))
-	if derr != nil {
-		t.Fatalf("opening the bext-carrying output: %v", derr)
-	}
-	gotBext, berr := d.Bext()
-	if berr != nil {
-		t.Fatalf("reading bext back: %v", berr)
-	}
+	gotBext, ixml := readBext(t, wavBytes)
 	if want := buildBext(anchor, 8000); !reflect.DeepEqual(gotBext, want) {
 		t.Errorf("bext read back = %+v, want %+v", gotBext, want)
 	}
-	if x := d.IXML(); x != "" {
-		t.Errorf("iXML = %q, want none", x)
+	if ixml != "" {
+		t.Errorf("iXML = %q, want none", ixml)
 	}
 
 	if !strings.Contains(out.String(), "sender clock start 2026-08-04T09:12:00.000Z") {
