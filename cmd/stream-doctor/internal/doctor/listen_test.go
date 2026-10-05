@@ -9,6 +9,7 @@ import (
 
 	aac "github.com/tphakala/go-aac"
 	"github.com/tphakala/go-opus/opus"
+	wav "github.com/tphakala/go-wav"
 	wavpcm "github.com/tphakala/go-wav/pcm"
 
 	audiostream "github.com/tphakala/go-audio-stream"
@@ -28,6 +29,41 @@ func fillSine(buf []int16, sampleRate, channels, startSample int) {
 			buf[i*channels+c] = s
 		}
 	}
+}
+
+// decodeTestWAV decodes a WAV produced by the doctor through go-wav's
+// one-shot reader, so a go-wav signature change touches this one function.
+// go-wav does not report a truncated file (it returns what is present and
+// keeps the header's declared count), so when the header declares a length
+// the helper requires the decoded audio to match it.
+func decodeTestWAV(t *testing.T, wavBytes []byte) ([]byte, wav.StreamInfo) {
+	t.Helper()
+	decoded, info, err := wavpcm.DecodeInterleaved(bytes.NewReader(wavBytes))
+	if err != nil {
+		t.Fatalf("decoding WAV output: %v", err)
+	}
+	if info.TotalFrames == 0 {
+		return decoded, info
+	}
+	frameBytes := info.Channels * info.BitDepth / 8
+	if frameBytes <= 0 {
+		t.Fatalf("decoded StreamInfo has no frame width: %+v", info)
+	}
+	if len(decoded)%frameBytes != 0 || uint64(len(decoded)/frameBytes) != info.TotalFrames {
+		t.Fatalf("header declares %d frames but the file carries %d bytes of audio (truncated, or the size was not patched)", info.TotalFrames, len(decoded))
+	}
+	return decoded, info
+}
+
+// decodeWrittenWAV is decodeTestWAV for a --wav file the doctor wrote. That
+// file is seekable, so its header must have been patched with a length.
+func decodeWrittenWAV(t *testing.T, wavBytes []byte) ([]byte, wav.StreamInfo) {
+	t.Helper()
+	decoded, info := decodeTestWAV(t, wavBytes)
+	if info.TotalFrames == 0 {
+		t.Fatalf("--wav file declares no length, want a patched header: %+v", info)
+	}
+	return decoded, info
 }
 
 // frameWriter records each Write call as one element, so the AAC test can
@@ -86,10 +122,7 @@ func TestWriteWAVG711MuLaw(t *testing.T) {
 		t.Errorf("res.Frames = %d, want %d", res.Frames, len(ramp))
 	}
 
-	decoded, info, err := wavpcm.DecodeInterleavedBytes(buf.Bytes())
-	if err != nil {
-		t.Fatalf("decode: %v", err)
-	}
+	decoded, info := decodeTestWAV(t, buf.Bytes())
 	if info.SampleRate != sampleRate || info.Channels != channels || info.BitDepth != 16 {
 		t.Errorf("decoded StreamInfo = %+v, want %d Hz, %d ch, 16-bit", info, sampleRate, channels)
 	}
@@ -139,10 +172,7 @@ func TestWriteWAVL16(t *testing.T) {
 		t.Errorf("res.Frames = %d, want %d", res.Frames, len(ramp))
 	}
 
-	decoded, info, err := wavpcm.DecodeInterleavedBytes(buf.Bytes())
-	if err != nil {
-		t.Fatalf("decode: %v", err)
-	}
+	decoded, info := decodeTestWAV(t, buf.Bytes())
 	if info.SampleRate != sampleRate || info.Channels != channels || info.BitDepth != 16 {
 		t.Errorf("decoded StreamInfo = %+v, want %d Hz, %d ch, 16-bit", info, sampleRate, channels)
 	}
@@ -192,10 +222,7 @@ func TestWriteWAVOpus(t *testing.T) {
 		t.Errorf("res.Frames = %d, want a plausible nonzero count near %d", res.Frames, wantSamples)
 	}
 
-	decoded, info, err := wavpcm.DecodeInterleavedBytes(buf.Bytes())
-	if err != nil {
-		t.Fatalf("decode: %v", err)
-	}
+	decoded, info := decodeTestWAV(t, buf.Bytes())
 	if info.SampleRate != sampleRate || info.Channels != channels || info.BitDepth != 16 {
 		t.Errorf("decoded StreamInfo = %+v, want %d Hz, %d ch, 16-bit", info, sampleRate, channels)
 	}
@@ -237,10 +264,7 @@ func TestWriteWAVAAC(t *testing.T) {
 		t.Errorf("res.Frames = %d, want a plausible nonzero count near %d", res.Frames, wantSamples)
 	}
 
-	decoded, info, err := wavpcm.DecodeInterleavedBytes(buf.Bytes())
-	if err != nil {
-		t.Fatalf("decode: %v", err)
-	}
+	decoded, info := decodeTestWAV(t, buf.Bytes())
 	if info.SampleRate != sampleRate || info.Channels != channels || info.BitDepth != 16 {
 		t.Errorf("decoded StreamInfo = %+v, want %d Hz, %d ch, 16-bit", info, sampleRate, channels)
 	}
@@ -348,10 +372,7 @@ func TestWriteWAVLATM(t *testing.T) {
 	if res.SampleRate != sampleRate || res.Channels != channels {
 		t.Errorf("res sample rate/channels = %d/%d, want %d/%d", res.SampleRate, res.Channels, sampleRate, channels)
 	}
-	decoded, info, err := wavpcm.DecodeInterleavedBytes(buf.Bytes())
-	if err != nil {
-		t.Fatalf("decode: %v", err)
-	}
+	decoded, info := decodeTestWAV(t, buf.Bytes())
 	if info.SampleRate != sampleRate || info.Channels != channels || info.BitDepth != 16 {
 		t.Errorf("decoded StreamInfo = %+v, want %d Hz, %d ch, 16-bit", info, sampleRate, channels)
 	}

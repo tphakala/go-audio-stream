@@ -10,7 +10,6 @@ import (
 
 	aac "github.com/tphakala/go-aac"
 	aacpcm "github.com/tphakala/go-aac/pcm"
-	wavpcm "github.com/tphakala/go-wav/pcm"
 
 	audiostream "github.com/tphakala/go-audio-stream"
 	"github.com/tphakala/go-audio-stream/rtsp"
@@ -137,10 +136,7 @@ func TestRunReportAndWAV(t *testing.T) {
 	if rerr != nil {
 		t.Fatalf("reading WAV output: %v", rerr)
 	}
-	decoded, info, derr := wavpcm.DecodeInterleavedBytes(wavBytes)
-	if derr != nil {
-		t.Fatalf("decoding WAV output: %v", derr)
-	}
+	decoded, info := decodeWrittenWAV(t, wavBytes)
 	if info.SampleRate != sampleRate || info.Channels != channels || info.BitDepth != 16 {
 		t.Errorf("decoded WAV = %+v, want %d Hz, %d ch, 16-bit", info, sampleRate, channels)
 	}

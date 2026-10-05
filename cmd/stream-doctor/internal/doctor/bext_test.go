@@ -1,13 +1,16 @@
 package doctor
 
 import (
+	"bytes"
 	"encoding/binary"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
 
+	wav "github.com/tphakala/go-wav"
 	wavpcm "github.com/tphakala/go-wav/pcm"
 
 	audiostream "github.com/tphakala/go-audio-stream"
@@ -178,6 +181,47 @@ func TestTimeReferenceSamplesBoundsSampleRate(t *testing.T) {
 	}
 }
 
+// TestBuildBextEncodesAndRoundTrips pins that buildBext output always passes
+// go-wav's bext validation, so Config.Bext never fails an encode, and reads
+// back unchanged through go-wav's own decoder. The instants cover the NTP era
+// edges and a rollover, where the date and time fields are most likely to be
+// refused or mis-parsed.
+func TestBuildBextEncodesAndRoundTrips(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		instant time.Time
+		rate    int
+	}{
+		{"ntp era start", time.Date(1900, 1, 1, 0, 0, 0, 0, time.UTC), 8000},
+		{"ntp 32-bit era end", time.Date(2036, 2, 7, 6, 28, 15, 999_000_000, time.UTC), 48000},
+		{"end of day", time.Date(2026, 8, 4, 23, 59, 59, 999_999_999, time.UTC), 8000},
+		{"non-utc rollover", time.Date(2026, 8, 4, 21, 0, 0, 0, time.FixedZone("test-5", -5*3600)), 48000},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			want := buildBext(tt.instant, tt.rate)
+			cfg := wavpcm.Config{SampleRate: tt.rate, BitDepth: 16, Channels: 1, Format: wav.SampleFormatPCM, Bext: want}
+			var buf bytes.Buffer
+			if err := wavpcm.EncodeInterleaved(&buf, cfg, make([]byte, 64)); err != nil {
+				t.Fatalf("encoding with the built bext: %v", err)
+			}
+			d, err := wavpcm.NewDecoder(bytes.NewReader(buf.Bytes()))
+			if err != nil {
+				t.Fatalf("opening the encoded WAV: %v", err)
+			}
+			got, err := d.Bext()
+			if err != nil {
+				t.Fatalf("reading bext back: %v", err)
+			}
+			if !reflect.DeepEqual(got, want) {
+				t.Errorf("bext read back = %+v, want %+v", got, want)
+			}
+		})
+	}
+}
+
 // TestRunListenBextWithValidSenderClock drives Run end to end with a valid
 // RTCP sender clock and asserts the written --wav file carries a native bext
 // chunk anchoring it to the sender clock start (Description, OriginationDate,
@@ -239,9 +283,22 @@ func TestRunListenBextWithValidSenderClock(t *testing.T) {
 	}
 
 	// The bext chunk must not break decoding: the rest of the file is still a
-	// valid fmt+data stream.
-	if _, _, derr := wavpcm.DecodeInterleavedBytes(wavBytes); derr != nil {
-		t.Errorf("DecodeInterleaved on the bext-carrying output: %v", derr)
+	// valid fmt+data stream. go-wav's own reader must also read the chunk
+	// back as the descriptor the doctor built, with no iXML chunk beside it.
+	decodeWrittenWAV(t, wavBytes)
+	d, derr := wavpcm.NewDecoder(bytes.NewReader(wavBytes))
+	if derr != nil {
+		t.Fatalf("opening the bext-carrying output: %v", derr)
+	}
+	gotBext, berr := d.Bext()
+	if berr != nil {
+		t.Fatalf("reading bext back: %v", berr)
+	}
+	if want := buildBext(anchor, 8000); !reflect.DeepEqual(gotBext, want) {
+		t.Errorf("bext read back = %+v, want %+v", gotBext, want)
+	}
+	if x := d.IXML(); x != "" {
+		t.Errorf("iXML = %q, want none", x)
 	}
 
 	if !strings.Contains(out.String(), "sender clock start 2026-08-04T09:12:00.000Z") {
