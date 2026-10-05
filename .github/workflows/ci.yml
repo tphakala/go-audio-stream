@@ -51,11 +51,11 @@ jobs:
       - name: golangci-lint
         uses: golangci/golangci-lint-action@v9
         with:
-          version: v2.13.2
+          version: v2.14.0
       - name: golangci-lint (stream-doctor)
         uses: golangci/golangci-lint-action@v9
         with:
-          version: v2.13.2
+          version: v2.14.0
           working-directory: cmd/stream-doctor
 
   doctor:

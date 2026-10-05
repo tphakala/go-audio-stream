@@ -90,7 +90,7 @@ New behaviour gets a test through the relevant seam. A bug fix gets a regression
 
 ## Commands
 
-Go 1.27 and golangci-lint v2.13.2 (pinned in `ci.yml`). Tasks are in `Taskfile.yml`.
+Go 1.27 and golangci-lint v2.14.0 (pinned in `ci.yml`). Tasks are in `Taskfile.yml`.
 
 ```
 task check        # library gate: build, vet (amd64 and arm64), lint, gofmt, race tests
