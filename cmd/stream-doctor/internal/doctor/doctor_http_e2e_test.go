@@ -85,10 +85,7 @@ func TestHTTPWAVFullRun(t *testing.T) {
 	if rerr != nil {
 		t.Fatalf("reading WAV output: %v", rerr)
 	}
-	decoded, info, derr := wavpcm.DecodeInterleavedBytes(wavBytes)
-	if derr != nil {
-		t.Fatalf("decoding WAV output: %v", derr)
-	}
+	decoded, info := decodeWrittenWAV(t, wavBytes)
 	if info.SampleRate != sampleRate || info.Channels != channels || info.BitDepth != 16 {
 		t.Errorf("decoded WAV = %+v, want %d Hz, %d ch, 16-bit", info, sampleRate, channels)
 	}
@@ -129,10 +126,7 @@ func TestHTTPRawL16FullRun(t *testing.T) {
 	if rerr != nil {
 		t.Fatalf("reading WAV output: %v", rerr)
 	}
-	decoded, info, derr := wavpcm.DecodeInterleavedBytes(wavBytes)
-	if derr != nil {
-		t.Fatalf("decoding WAV output: %v", derr)
-	}
+	decoded, info := decodeWrittenWAV(t, wavBytes)
 	if info.SampleRate != sampleRate || info.Channels != channels {
 		t.Errorf("decoded WAV = %+v, want %d Hz, %d ch", info, sampleRate, channels)
 	}
