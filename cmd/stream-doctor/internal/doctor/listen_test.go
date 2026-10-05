@@ -2,6 +2,7 @@ package doctor
 
 import (
 	"bytes"
+	"fmt"
 	"math"
 	"strings"
 	"testing"
@@ -42,17 +43,27 @@ func decodeTestWAV(t *testing.T, wavBytes []byte) ([]byte, wav.StreamInfo) {
 	if err != nil {
 		t.Fatalf("decoding WAV output: %v", err)
 	}
+	if err := checkDeclaredLength(info, decoded); err != nil {
+		t.Fatal(err)
+	}
+	return decoded, info
+}
+
+// checkDeclaredLength returns an error when the header declares a frame count
+// that the decoded audio does not match. A header with no declared length
+// (a streamed encode into a non-seekable writer) has nothing to compare.
+func checkDeclaredLength(info wav.StreamInfo, decoded []byte) error {
 	if info.TotalFrames == 0 {
-		return decoded, info
+		return nil
 	}
 	frameBytes := info.Channels * info.BitDepth / 8
 	if frameBytes <= 0 {
-		t.Fatalf("decoded StreamInfo has no frame width: %+v", info)
+		return fmt.Errorf("decoded StreamInfo has no frame width: %+v", info)
 	}
 	if len(decoded)%frameBytes != 0 || uint64(len(decoded)/frameBytes) != info.TotalFrames {
-		t.Fatalf("header declares %d frames but the file carries %d bytes of audio (truncated, or the size was not patched)", info.TotalFrames, len(decoded))
+		return fmt.Errorf("header declares %d frames but the file carries %d bytes of audio (truncated, or the size was not patched)", info.TotalFrames, len(decoded))
 	}
-	return decoded, info
+	return nil
 }
 
 // decodeWrittenWAV is decodeTestWAV for a --wav file the doctor wrote. That
@@ -64,6 +75,63 @@ func decodeWrittenWAV(t *testing.T, wavBytes []byte) ([]byte, wav.StreamInfo) {
 		t.Fatalf("--wav file declares no length, want a patched header: %+v", info)
 	}
 	return decoded, info
+}
+
+// TestCheckDeclaredLength pins the truncation check the decode helpers rely
+// on: go-wav reports a file cut short as a clean end of stream and keeps the
+// header's declared frame count, so only this comparison notices it.
+func TestCheckDeclaredLength(t *testing.T) {
+	t.Parallel()
+	const sampleRate, channels, frames = 8000, 2, 160
+	pcm := make([]byte, frames*channels*2)
+	var full bytes.Buffer
+	cfg := wavpcm.Config{SampleRate: sampleRate, BitDepth: 16, Channels: channels, Format: wav.SampleFormatPCM}
+	if err := wavpcm.EncodeInterleaved(&full, cfg, pcm); err != nil {
+		t.Fatalf("encoding: %v", err)
+	}
+	frameBytes := channels * 2
+
+	tests := []struct {
+		name    string
+		cut     int
+		wantErr bool
+	}{
+		{"complete", 0, false},
+		{"one byte short", 1, true},
+		{"one frame short", frameBytes, true},
+		{"half the audio missing", len(pcm) / 2, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			wavBytes := full.Bytes()[:full.Len()-tt.cut]
+			decoded, info, err := wavpcm.DecodeInterleaved(bytes.NewReader(wavBytes))
+			if err != nil {
+				t.Fatalf("decoding: %v", err)
+			}
+			if info.TotalFrames != frames {
+				t.Fatalf("declared frames = %d, want %d", info.TotalFrames, frames)
+			}
+			if err := checkDeclaredLength(info, decoded); (err != nil) != tt.wantErr {
+				t.Errorf("checkDeclaredLength = %v, wantErr %v", err, tt.wantErr)
+			}
+		})
+	}
+
+	t.Run("no declared length", func(t *testing.T) {
+		t.Parallel()
+		info := wav.StreamInfo{SampleRate: sampleRate, Channels: channels, BitDepth: 16}
+		if err := checkDeclaredLength(info, pcm[:3]); err != nil {
+			t.Errorf("checkDeclaredLength with no declared length = %v, want nil", err)
+		}
+	})
+	t.Run("zero frame width", func(t *testing.T) {
+		t.Parallel()
+		info := wav.StreamInfo{TotalFrames: 1}
+		if err := checkDeclaredLength(info, pcm); err == nil {
+			t.Error("checkDeclaredLength with no frame width = nil, want an error")
+		}
+	})
 }
 
 // frameWriter records each Write call as one element, so the AAC test can
