@@ -86,7 +86,7 @@ func TestWriteWAVG711MuLaw(t *testing.T) {
 		t.Errorf("res.Frames = %d, want %d", res.Frames, len(ramp))
 	}
 
-	info, decoded, err := wavpcm.DecodeInterleaved(buf.Bytes())
+	decoded, info, err := wavpcm.DecodeInterleavedBytes(buf.Bytes())
 	if err != nil {
 		t.Fatalf("decode: %v", err)
 	}
@@ -139,7 +139,7 @@ func TestWriteWAVL16(t *testing.T) {
 		t.Errorf("res.Frames = %d, want %d", res.Frames, len(ramp))
 	}
 
-	info, decoded, err := wavpcm.DecodeInterleaved(buf.Bytes())
+	decoded, info, err := wavpcm.DecodeInterleavedBytes(buf.Bytes())
 	if err != nil {
 		t.Fatalf("decode: %v", err)
 	}
@@ -192,7 +192,7 @@ func TestWriteWAVOpus(t *testing.T) {
 		t.Errorf("res.Frames = %d, want a plausible nonzero count near %d", res.Frames, wantSamples)
 	}
 
-	info, decoded, err := wavpcm.DecodeInterleaved(buf.Bytes())
+	decoded, info, err := wavpcm.DecodeInterleavedBytes(buf.Bytes())
 	if err != nil {
 		t.Fatalf("decode: %v", err)
 	}
@@ -237,7 +237,7 @@ func TestWriteWAVAAC(t *testing.T) {
 		t.Errorf("res.Frames = %d, want a plausible nonzero count near %d", res.Frames, wantSamples)
 	}
 
-	info, decoded, err := wavpcm.DecodeInterleaved(buf.Bytes())
+	decoded, info, err := wavpcm.DecodeInterleavedBytes(buf.Bytes())
 	if err != nil {
 		t.Fatalf("decode: %v", err)
 	}
@@ -348,7 +348,7 @@ func TestWriteWAVLATM(t *testing.T) {
 	if res.SampleRate != sampleRate || res.Channels != channels {
 		t.Errorf("res sample rate/channels = %d/%d, want %d/%d", res.SampleRate, res.Channels, sampleRate, channels)
 	}
-	info, decoded, err := wavpcm.DecodeInterleaved(buf.Bytes())
+	decoded, info, err := wavpcm.DecodeInterleavedBytes(buf.Bytes())
 	if err != nil {
 		t.Fatalf("decode: %v", err)
 	}

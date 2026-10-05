@@ -85,7 +85,7 @@ func TestHTTPWAVFullRun(t *testing.T) {
 	if rerr != nil {
 		t.Fatalf("reading WAV output: %v", rerr)
 	}
-	info, decoded, derr := wavpcm.DecodeInterleaved(wavBytes)
+	decoded, info, derr := wavpcm.DecodeInterleavedBytes(wavBytes)
 	if derr != nil {
 		t.Fatalf("decoding WAV output: %v", derr)
 	}
@@ -129,7 +129,7 @@ func TestHTTPRawL16FullRun(t *testing.T) {
 	if rerr != nil {
 		t.Fatalf("reading WAV output: %v", rerr)
 	}
-	info, decoded, derr := wavpcm.DecodeInterleaved(wavBytes)
+	decoded, info, derr := wavpcm.DecodeInterleavedBytes(wavBytes)
 	if derr != nil {
 		t.Fatalf("decoding WAV output: %v", derr)
 	}

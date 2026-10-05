@@ -240,7 +240,7 @@ func TestRunListenBextWithValidSenderClock(t *testing.T) {
 
 	// The bext chunk must not break decoding: the rest of the file is still a
 	// valid fmt+data stream.
-	if _, _, derr := wavpcm.DecodeInterleaved(wavBytes); derr != nil {
+	if _, _, derr := wavpcm.DecodeInterleavedBytes(wavBytes); derr != nil {
 		t.Errorf("DecodeInterleaved on the bext-carrying output: %v", derr)
 	}
 
